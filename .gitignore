@@ -1,0 +1,17 @@
+# Build output and dependency directories are per-language; add yours as the component grows.
+target/
+build/
+dist/
+out/
+node_modules/
+
+# Local environment and editor state — never committed.
+.env
+.env.local
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
