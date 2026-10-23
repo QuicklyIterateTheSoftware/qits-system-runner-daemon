@@ -38,7 +38,7 @@
              qits.system.runner / qits-system-runner (qits-1524), which SystemRunnerIdentityTest
              holds this runner's identity to. The toolkit brings qits-containers-driver at the
              version it was released against. -->
-        <qits.runner.version>2026.1023.195404</qits.runner.version>
+        <qits.runner.version>2026.1023.201412</qits.runner.version>
 
         <!-- qits-observability's LOG_EXPORT row needs "an empty telemetry buffer" recorded, which
              lands only at this version (qits-1163) — newer than the one qits-runner-toolkit-contracts
