@@ -1,0 +1,214 @@
+archetype: daemon
+artifacts:
+  # THE RUNNER IS AN IMAGE, and only an image: on every target it runs as a container started from
+  # this tag (the install script qits-system renders `docker run`s it; a runner rolls itself over by
+  # starting a successor from the next tag). The static native binary is still built — it is what
+  # the image carries — but it is no artifact of its own, and nothing downloads it.
+  #
+  # The document is the system-runner module's CycloneDX, from the same build as the image: the
+  # reactor resolve that produced the binary inside it.
+  - { type: docker, name: qits/qits-system-runner, sbom: out/sbom.json }
+  # THE PIN AND THE PROTOCOL, IN ONE JAR — qits-projects-desk-runner-daemon's arrangement, for the
+  # same reason. `system-runner-protocol` is the wire contract qits-system and the runner both speak,
+  # and it carries `SystemRunnerBinary.VERSION`, filtered from `${project.version}` at build time, so
+  # the jar's version IS the tag of the image published beside it. qits-system-service pins this
+  # coordinate in its pom and renders the install script's image, and every Upgrade's, from the
+  # constant. AFTER the image, always: a jar that resolves before its image exists is a pin pointing
+  # at nothing.
+  #
+  # qits-ci submits this `sbom:` from whichever release step holds the file — the maven step below,
+  # where `makeBom` writes it — and checks on the last step that it reached the store.
+  - { type: maven, name: "eu.wohlben.qits:qits-system-runner-protocol", path: system-runner-protocol, sbom: system-runner-protocol/target/sbom.json }
+
+# THE CONSUMER PACTS (qits-1163): the REST calls qits-runner-toolkit makes on this daemon's behalf,
+# pacted as this daemon's own by ToolkitPactTest through eu.wohlben.qits:qits-runner-toolkit-contracts
+# and kept flat in `pacts/` as qits-system-runner-daemon_qits-runner-javalib_<provider>.json. Only
+# providers with a committed file are declared: qits-system-service (register, operation
+# `registerTarget`) joins once its recordings reach golden masters pinned here. The platform packs
+# each file as eu.wohlben.qits:qits-system-runner-daemon-pacts-<provider> and publishes it only when
+# it changed. The runner serves no HTTP, so it records no golden masters.
+contracts:
+  application: qits-system-runner
+  pacts:
+    qits-idp-service: { packages: [maven] }
+    qits-observability-service: { packages: [maven] }
+
+# AN IMAGE AND A JAR FROM ONE TREE, WHICH NO ARCHETYPE PUBLISHES — qits-projects-desk-runner-daemon's
+# shape: `daemon` names the family (the repository is a daemon, a static musl binary), and both
+# slots are declared here, so qits-ci composes no archetype slot of its own.
+#
+# qits-ci reads this file at fold and tag time, so it rides this repository's own first release
+# request like any other change.
+#
+# THE QA HALF, for two things a compile does not do: the JVM suite (the install-script template and
+# its contract test are qits-runner-toolkit's, so there is no separate install-contract step here);
+# and a smoke of the BUILT NATIVE BINARY — exported from the same Dockerfile build the release
+# pushes as an image, and run IN THE STEP ITSELF, twice: once asked for its version (it must print
+# the tree's) and once with no environment at all (it must refuse, exit 2). The binary is static
+# musl, so the step's own image runs it as it is: there is NO `docker: true` step — a builder
+# (`build: true`) is all this half needs, and the image smoke the desk runner makes with a docker
+# socket is replaced by running the very binary the image carries.
+release-request:
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      # THE ADDRESSES ARE CODE (qits-731): hosted Maven on registry.qits.<domain> — where
+      # qits-runner-toolkit, qits-runner-protocol and qits-containers-driver live — and Central
+      # through mirror.qits.<domain>. `wohlben.eu` covers a qits-ci too old to inject $QITS_DOMAIN.
+      qits_domain=${QITS_DOMAIN:-wohlben.eu}
+      export QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$qits_domain/mirror/maven/central"
+      export QITS_MAVEN_REPOSITORY_URL="https://registry.qits.$qits_domain/artifacts/maven/maven"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL"
+
+  - image: qits/build-images/ci-base:latest
+    build: true
+    timeout-seconds: 3600
+    script: |
+      # THE ADDRESSES ARE CODE (qits-731): the registry is registry.qits.<domain>, the hosted maven
+      # repository and the mirror's Central constant paths under it and mirror.qits.<domain>.
+      # `wohlben.eu` covers a qits-ci too old to inject $QITS_DOMAIN.
+      qits_domain=${QITS_DOMAIN:-wohlben.eu}
+      maven_root="https://registry.qits.$qits_domain/artifacts/maven/maven"
+      musl_url=$(sed -n 's/^ARG MUSL_URL=//p' docker/Dockerfile.musl-builder)
+      zlib_url=$(sed -n 's/^ARG ZLIB_URL=//p' docker/Dockerfile.musl-builder)
+      : "${musl_url:?docker/Dockerfile.musl-builder declares no ARG MUSL_URL}"
+      : "${zlib_url:?docker/Dockerfile.musl-builder declares no ARG ZLIB_URL}"
+      musl_url="$maven_root${musl_url#*/artifacts/maven/maven}"
+      zlib_url="$maven_root${zlib_url#*/artifacts/maven/maven}"
+      # ON THE EDGE PLANE THE TARBALL `ADD` NEEDS THE RUN'S TOKEN (qits-441): there $maven_root is
+      # the public registry, which answers an anonymous read 401. BuildKit's HTTP source sends a
+      # session secret named HTTP_AUTH_TOKEN_<url host> as `Authorization: Bearer`, so the secret is
+      # keyed by exactly that host and passed only when the step holds $QITS_TOKEN, which qits-ci
+      # sets on the EDGE plane alone. docker/Dockerfile.musl-builder's header has the long form.
+      #
+      # THE MAVEN STAGE'S CREDENTIAL IS UNCONDITIONAL, unlike the tarball's: the two files qits-ci's
+      # prelude writes become QITS_MAVEN_AUTH_USR/PSW inside the mvnw RUN (docker/Dockerfile), for
+      # the hosted repository and the Central mirror alike.
+      tarball_auth=
+      if [ -n "${QITS_TOKEN:-}" ]; then
+        tarball_host=$(printf '%s\n' "$maven_root" | sed -E 's|^[A-Za-z]+://||; s|[/:?].*$||')
+        tarball_auth="--secret id=HTTP_AUTH_TOKEN_$tarball_host,env=QITS_TOKEN"
+      fi
+      # THE TOOLCHAIN TAG IS A HASH OF ITS INPUTS (qits-ci-runner-daemon's derivation): this tree's
+      # toolchain gets a tag of its own that no other repository's copy pushes, and the QA and
+      # release phases of one tree land on the same tag, so the native compile stays a cache hit.
+      builder_tag=$( { cat docker/Dockerfile.musl-builder; printf '%s\n%s\n' "$musl_url" "$zlib_url"; } | sha256sum | cut -c1-16 )
+      builder="registry.qits.$qits_domain/$QITS_IMAGE_REPOSITORY/graalvmce-musl-builder:jdk-25-$builder_tag"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=docker --local dockerfile=docker \
+        --opt filename=Dockerfile.musl-builder \
+        --opt build-arg:MUSL_URL="$musl_url" \
+        --opt build-arg:ZLIB_URL="$zlib_url" \
+        $tarball_auth \
+        --output "type=image,name=$builder,push=true"
+      # THE SAME BUILD STAGE AS THE RELEASE SLOT'S IMAGE — the build args byte-identical, so the
+      # native compile is one cache entry for both — exported as the bare file: `target=binary`
+      # writes out/qits-system-runner. Nothing is published from a fold.
+      mkdir -p out
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=binary \
+        --opt build-arg:BUILDER_IMAGE="$builder" \
+        --opt build-arg:QITS_DOMAIN="$qits_domain" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output type=local,dest=out
+      binary=out/qits-system-runner
+      [ -f "$binary" ] || { echo "the binary export left no $binary" >&2; ls -la out >&2; exit 1; }
+      chmod +x "$binary"
+      # THE VERSION PROBE: `QITS_SYSTEM_RUNNER_PRINT_VERSION=1` is the toolkit's print-version (it
+      # takes no `--print-version` argument; RunnerLauncher reads the variable). The binary names the version this tree carries — the one the jar beside it will pin, and the
+      # one a runner says in its Hello. Answered before Quarkus starts, so stdout is exactly that one
+      # line. Run under `env -i`, so nothing of this step's environment can stand in for it.
+      expected=$(sed -n 's:^    <version>\(.*\)</version>$:\1:p' pom.xml | head -1)
+      printed=$(env -i QITS_SYSTEM_RUNNER_PRINT_VERSION=1 "$binary")
+      [ -n "$expected" ] && [ "$printed" = "$expected" ] || {
+        echo "the binary printed version '$printed', the tree carries '$expected'" >&2
+        exit 1
+      }
+      # THE NO-ENVIRONMENT PROBE: the one line an operator who ran the image bare gets, exit 2. The
+      # suite cannot see a native-image startup failure; this can.
+      code=0
+      env -i "$binary" >/dev/null 2>&1 || code=$?
+      [ "$code" = 2 ] || { echo "the runner binary started with no environment exited $code, expected 2" >&2; exit 1; }
+      echo "qits-system-runner built: version $printed, $(sha256sum "$binary" | cut -d' ' -f1)"
+
+# THE RELEASE HALF: two artifacts of two kinds leave this tree. The first step pushes the image; the
+# second is the pin-and-protocol jar, deliberately AFTER the push — the jar is what tells qits-system
+# which image to hand out, so a jar that resolves before its image is in the registry is a pin
+# pointing at nothing.
+release:
+  - image: qits/build-images/ci-base:latest
+    build: true
+    timeout-seconds: 3600
+    script: |
+      # THE ADDRESSES ARE CODE (qits-731): see the QA step's comment. `wohlben.eu` covers a qits-ci
+      # too old to inject $QITS_DOMAIN.
+      qits_domain=${QITS_DOMAIN:-wohlben.eu}
+      maven_root="https://registry.qits.$qits_domain/artifacts/maven/maven"
+      musl_url=$(sed -n 's/^ARG MUSL_URL=//p' docker/Dockerfile.musl-builder)
+      zlib_url=$(sed -n 's/^ARG ZLIB_URL=//p' docker/Dockerfile.musl-builder)
+      : "${musl_url:?docker/Dockerfile.musl-builder declares no ARG MUSL_URL}"
+      : "${zlib_url:?docker/Dockerfile.musl-builder declares no ARG ZLIB_URL}"
+      musl_url="$maven_root${musl_url#*/artifacts/maven/maven}"
+      zlib_url="$maven_root${zlib_url#*/artifacts/maven/maven}"
+      # The QA step's tarball credential, byte for byte: the run's token on the EDGE plane only.
+      tarball_auth=
+      if [ -n "${QITS_TOKEN:-}" ]; then
+        tarball_host=$(printf '%s\n' "$maven_root" | sed -E 's|^[A-Za-z]+://||; s|[/:?].*$||')
+        tarball_auth="--secret id=HTTP_AUTH_TOKEN_$tarball_host,env=QITS_TOKEN"
+      fi
+      # The QA step's derivation, byte for byte: the same tree names the same tag in both phases,
+      # so BUILDER_IMAGE is the same string and the native compile below is a cache hit.
+      builder_tag=$( { cat docker/Dockerfile.musl-builder; printf '%s\n%s\n' "$musl_url" "$zlib_url"; } | sha256sum | cut -c1-16 )
+      builder="registry.qits.$qits_domain/$QITS_IMAGE_REPOSITORY/graalvmce-musl-builder:jdk-25-$builder_tag"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=docker --local dockerfile=docker \
+        --opt filename=Dockerfile.musl-builder \
+        --opt build-arg:MUSL_URL="$musl_url" \
+        --opt build-arg:ZLIB_URL="$zlib_url" \
+        $tarball_auth \
+        --output "type=image,name=$builder,push=true"
+      # THE QA PIPELINE'S BUILD STAGE, BYTE FOR BYTE but for the target and the output:
+      # `push=true` IS THE PUBLISH.
+      ref="registry.qits.$qits_domain/$QITS_IMAGE_REPOSITORY/qits-system-runner:$QITS_VERSION"
+      echo "releasing $ref"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=image \
+        --opt build-arg:BUILDER_IMAGE="$builder" \
+        --opt build-arg:QITS_DOMAIN="$qits_domain" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output "type=image,name=$ref,push=true"
+      # THE DOCUMENT COMES OUT OF THE SAME BUILD AS THE IMAGE — the reactor exists only in there.
+      # Build args byte-identical to the push above, so every layer is a cache hit.
+      #
+      # GENERATED, NEVER SUBMITTED — the postlude PUTs it for the artifact that declares it.
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=sbom \
+        --opt build-arg:BUILDER_IMAGE="$builder" \
+        --opt build-arg:QITS_DOMAIN="$qits_domain" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output type=local,dest=out
+
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      # NO LONGER A DEPLOY: the CLI publishes this coordinate from the postlude, off the jar this
+      # step leaves in target/. This step only has to build it — and the jar depends on
+      # qits-runner-protocol, which only the platform's own repository has, so both invocations
+      # resolve through it. THE ADDRESSES ARE CODE (qits-731). `wohlben.eu` covers a qits-ci too old
+      # to inject $QITS_DOMAIN.
+      qits_domain=${QITS_DOMAIN:-wohlben.eu}
+      export QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$qits_domain/mirror/maven/central"
+      export QITS_MAVEN_REPOSITORY_URL="https://registry.qits.$qits_domain/artifacts/maven/maven"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl system-runner-protocol -am package -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl system-runner-protocol -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+        org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
+        -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6
