@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-system-runner</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>system-runner</artifactId>
+    <packaging>quarkus</packaging>
+
+    <!-- The target runner: a long-lived process on any Linux host with docker that registers once,
+         holds one WebSocket to qits-system through the edge, and runs the leases qits-system
+         allocates it — workspaces and desks today, CI later — as plain containers on its node, each
+         under its slot type's fixed policy (SlotPolicy). A Quarkus command-mode app with NO web
+         stack — it dials out and never listens — compiled to a fully static musl GraalVM native
+         image, exactly as qits-projects-desk-runner-daemon's binary is (see
+         ../docker/Dockerfile.musl-builder).
+
+         ALMOST EVERYTHING IS qits-runner-toolkit's: register-once, the bearer, the control socket,
+         the slot ledger, self-update, decommission, health, housekeeping and the runner's own log
+         shipping. This module is the RunnerIdentity, the RunnerDomain and the one @QuarkusMain that
+         hands both to RunnerLauncher — never a fork of a toolkit class.
+
+         The dependency set is qits-projects-desk-runner-daemon's: quarkus-arc for CDI + command
+         mode, quarkus-vertx for the managed Vertx the toolkit's socket and HTTP calls run on, and
+         the wire contract. The toolkit brings vertx-core (managed here by the quarkus-bom),
+         jboss-logging and qits-containers-driver. No Jackson, no REST client, no docker SDK. -->
+
+    <dependencies>
+        <!-- The wire contract, under its PUBLISHED coordinate; version-less so it always resolves
+             to the sibling in the reactor. -->
+        <dependency>
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-system-runner-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-runner-toolkit</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-vertx</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Plain JUnit 5, not quarkus-junit5: nothing here is a @QuarkusTest. The suite drives
+                 the runner against the toolkit's own FakeRunnerHost and FakeDocker. -->
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- qits-1163: the toolkit's token, log-export and register calls, pacted as this
+                 daemon's own consumer pacts (ToolkitPactTest). Brings qits-pact-consumer and
+                 qits-idp's and qits-observability's golden masters; qits-system's register door
+                 has none recorded yet, so its rows are skipped until it does. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-runner-toolkit-contracts</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- qits-1163: pins a newer qits-observability-golden-masters than the kit brings
+                 transitively, so "an empty telemetry buffer" resolves. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-observability-golden-masters</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- JBoss LogManager is on the test classpath through Quarkus; installed as the JUL
+                     manager from the start, the suite logs the way the binary does, and the manager
+                     does not complain that it was installed late (qits-runner-toolkit's surefire
+                     block, for the same reason). -->
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- GraalVM native build, qits-projects-desk-runner-daemon's shape: `-Dnative` disables the jar and
+             enables the native image. The musl/static specifics are in application.properties. -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+            </properties>
+        </profile>
+    </profiles>
+</project>

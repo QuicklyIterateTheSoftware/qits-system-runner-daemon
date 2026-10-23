@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Standalone parent for qits-system-runner-daemon, qits-projects-desk-runner-daemon's root with
+         this repository's names: the quarkus-bom import, the compiler/surefire pins, and the
+         platform's own maven repository, because the runner is built on qits-runner-javalib —
+         register, bearer, socket, slots, self-update, decommission, health and GC are its, not this
+         reactor's — and that library and qits-containers-driver under it are published only there.
+         A clone of this repo alone must `./mvnw verify` green.
+
+         The version is 1.0.0-SNAPSHOT until the first release stamps it; the release flow rewrites
+         every <version> here to the tag it cuts. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>qits-system-runner</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>system-runner-protocol</module>
+        <module>system-runner</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+        <quarkus.platform.version>3.40.1</quarkus.platform.version>
+
+        <!-- qits-runner-javalib: qits-runner-protocol and qits-runner-toolkit, one release, pinned to
+             a released calver and moved only by the maintenance dependencies bump — never by hand.
+             The pin this runner needs is the release that carries KnownRunnerNamespaces' entry for
+             qits.system.runner / qits-system-runner (qits-1524), which SystemRunnerIdentityTest
+             holds this runner's identity to. The toolkit brings qits-containers-driver at the
+             version it was released against. -->
+        <qits.runner.version>2026.1023.80958</qits.runner.version>
+
+        <!-- qits-observability's LOG_EXPORT row needs "an empty telemetry buffer" recorded, which
+             lands only at this version (qits-1163) — newer than the one qits-runner-toolkit-contracts
+             brings transitively. Pinned here, overriding the kit's, and added as an explicit test
+             dependency in system-runner so this version wins resolution; moved by the maintenance
+             bump like any other released pin. qits-system-service, the register host, records no
+             golden masters yet: its pin joins here when it does. -->
+        <qits.observability-golden-masters.version>2026.1018.155850</qits.observability-golden-masters.version>
+
+        <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
+             from QITS_DOMAIN; the default below is the public host. -->
+        <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>
+
+        <compiler-plugin.version>3.15.0</compiler-plugin.version>
+        <surefire-plugin.version>3.5.4</surefire-plugin.version>
+        <enforcer-plugin.version>3.5.0</enforcer-plugin.version>
+    </properties>
+
+    <!-- The platform's own Maven repository: qits-runner-protocol, qits-runner-toolkit and the
+         qits-containers-driver beneath them live only here. The id has to stay `qits-maven` — it is
+         what the settings file's exact-id mirror matches (Maven blocks external http:// repositories
+         otherwise) and what a locally cached copy is recorded under. -->
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Supplies the managed versions the children leave unversioned: junit-jupiter for
+                 both modules, quarkus-arc/quarkus-vertx for the application, and the vertx-core and
+                 jboss-logging the toolkit links, aligned with the platform's own. -->
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>${quarkus.platform.artifact-id}</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- The wire-contract module under its PUBLISHED coordinate, so `-pl system-runner -am`
+                 resolves it from the reactor beside it rather than from a registry. -->
+            <dependency>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-system-runner-protocol</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-runner-protocol</artifactId>
+                <version>${qits.runner.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-runner-toolkit</artifactId>
+                <version>${qits.runner.version}</version>
+            </dependency>
+            <!-- The consumer pacts of the toolkit's own REST calls (qits-1163), at the SAME version
+                 as the toolkit: the kit refuses a classpath where they differ. -->
+            <dependency>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-runner-toolkit-contracts</artifactId>
+                <version>${qits.runner.version}</version>
+            </dependency>
+            <!-- Overrides the older version qits-runner-toolkit-contracts brings transitively
+                 (qits-1163); see the property above. -->
+            <dependency>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-observability-golden-masters</artifactId>
+                <version>${qits.observability-golden-masters.version}</version>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>${quarkus.platform.group-id}</groupId>
+                    <artifactId>quarkus-maven-plugin</artifactId>
+                    <version>${quarkus.platform.version}</version>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${compiler-plugin.version}</version>
+                    <configuration>
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${surefire-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>${enforcer-plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

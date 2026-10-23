@@ -1,17 +1,28 @@
-# Build output and dependency directories are per-language; add yours as the component grows.
+# Build outputs
 target/
-build/
-dist/
-out/
-node_modules/
+target-ide/
 
-# Local environment and editor state — never committed.
+# Where docker/Dockerfile's `--output type=local,dest=out` drops the binary and its SBOM
+out/
+
+# IDE
+.vscode/
+.idea/
+.project
+.classpath
+.factorypath
+.settings/
+*.iml
+
+# OS
+.DS_Store
+
+# Home-relative caches a tool leaks into the repo root when run with the repo as its cwd
+.cache/
+.m2/
+.local/
+
+# Local environment — never committed. A runner's env file carries its registration token.
 .env
 .env.local
-.DS_Store
-*.swp
-.idea/
-.vscode/
-
-# Logs
 *.log

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-system-runner</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- PUBLISHED COORDINATES: `eu.wohlben.qits:qits-*` is what every artifact this platform
+         releases is called. The group is the parent's here, written out anyway so the coordinate
+         release.yml publishes reads in one place. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>qits-system-runner-protocol</artifactId>
+
+    <!-- The target runner's own control-socket frames (estate/probeLogin/healthCheck and
+         inventory/loginState/healthChecked), the Hello and Ack extension keys, their DomainCodec,
+         and the identity roots both peers derive every name from. The lifecycle frames
+         (hello/ack/heartbeat/backlog/reserve/nothing/upgrade/retire/quarantined/reinstated) are
+         qits-runner-protocol's and are NOT declared again here: RunnerCodec encodes those itself and
+         hands every other frame to SystemRunnerCodec.
+
+         ONE DEPENDENCY, qits-runner-protocol, and never another: qits-system-service (Jackson) and
+         the native runner (Vert.x) both link this jar, so it must drag in neither — enforced below,
+         not just written here.
+
+         IT CARRIES THE RELEASE'S OWN VERSION TOO (SystemRunnerBinary), for the reason
+         qits-projects-desk-runner-protocol does: the thing qits-system must pin and the thing it
+         must speak are the same release, and the jar's version is the image's tag. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-runner-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- FILTERING IS ON FOR THIS MODULE'S ONE RESOURCE AND NOTHING ELSE — see
+             qits-workspaces-runner-daemon's workspaces-runner-protocol/pom.xml. RunnerBinaryVersion refuses an
+             unfiltered value, so switching this block off fails loudly. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>eu/wohlben/qits/systemrunner/protocol/system-runner-binary.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>eu/wohlben/qits/systemrunner/protocol/system-runner-binary.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- qits-runner-protocol is the one compile/runtime dependency this jar may have,
+                     and it has none of its own. A JSON library, Vert.x or Quarkus arriving here
+                     would land in qits-system-service's classpath and in the native binary
+                     alike; it fails `verify`, not a reviewer. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>only-the-runner-protocol</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <searchTransitive>true</searchTransitive>
+                                    <excludes>
+                                        <exclude>*:*:*:*:compile</exclude>
+                                        <exclude>*:*:*:*:runtime</exclude>
+                                    </excludes>
+                                    <includes>
+                                        <include>eu.wohlben.qits:qits-runner-protocol</include>
+                                    </includes>
+                                </bannedDependencies>
+                            </rules>
+                            <fail>true</fail>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

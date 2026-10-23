@@ -1,0 +1,407 @@
+package eu.wohlben.qits.systemrunner.protocol;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import eu.wohlben.qits.runner.protocol.Ack;
+import eu.wohlben.qits.runner.protocol.Hello;
+import eu.wohlben.qits.runner.protocol.RunnerCodec;
+import eu.wohlben.qits.runner.protocol.RunnerDecodeException;
+import eu.wohlben.qits.runner.protocol.RunnerMessage;
+import eu.wohlben.qits.runner.protocol.health.CheckResult;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The target frames' contract, framework-free: every frame survives {@code encode → decode} through
+ * the base codec and this delegate unchanged; each frame's JSON spelling is pinned, key order
+ * included; the {@code Hello} and {@code Ack} extensions round-trip through the base; unknown
+ * fields are ignored and an unknown type is the base's typed error; and the lists that are desired
+ * or observed state refuse to be read as empty when they are absent.
+ *
+ * <p>The lifecycle frames' byte identity is qits-runner-protocol's and is not repeated here.
+ */
+class SystemRunnerCodecTest {
+
+  private static final RunnerCodec<SystemRunnerMessage> CODEC =
+      new RunnerCodec<>(SystemRunnerProtocol.VOCABULARY, new SystemRunnerCodec());
+
+  private static final String WS_IMAGE = "registry.qits.example.eu/qits/workspace:2026.1023.1";
+  private static final String DESK_IMAGE = "registry.qits.example.eu/qits/project-agent:2026.1023.1";
+
+  private static final String L1 = "8273c743-e0bb-4d93-90d4-391aa10d9151";
+  private static final String L2 = "5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397";
+  private static final String OLD_WS =
+      "qits-workspaces-runner-ws-dc112edc-4360-4a3b-858b-e75d372e708f-1a2b3c4d";
+
+  private static LeaseSpec fullSpec() {
+    Map<String, String> env = new LinkedHashMap<>();
+    env.put("QITS_TOKEN", "qits_tok_X");
+    env.put("TZ", "Europe/Berlin");
+    return new LeaseSpec(WS_IMAGE, env, "1000", new Limits("4g", "8g", 4096L, "2", 600));
+  }
+
+  private static LeaseSpec bareSpec() {
+    return new LeaseSpec(DESK_IMAGE, Map.of(), null, null);
+  }
+
+  private static LeaseEntry workspace() {
+    return new LeaseEntry(
+        L1,
+        SlotType.WORKSPACE,
+        DesiredState.RUNNING,
+        fullSpec(),
+        "sha256:aaa",
+        "ws-42",
+        new Adopt(OLD_WS, OLD_WS));
+  }
+
+  private static LeaseEntry endedDesk() {
+    return new LeaseEntry(L2, SlotType.DESK, DesiredState.ENDED, null, null, "desk-7", null);
+  }
+
+  /** One of every frame, and a second shape where a field is nullable or a list can be empty. */
+  private static List<SystemRunnerMessage> everyFrame() {
+    return List.of(
+        new Estate(
+            List.of(
+                workspace(),
+                endedDesk(),
+                new LeaseEntry(
+                    "l3", SlotType.CI, DesiredState.RUNNING, bareSpec(), "h", null, null)),
+            List.of("qits-system-runner-work-ws-9-1a2b3c4d")),
+        new Estate(List.of(), List.of()),
+        new ProbeLogin(),
+        new HealthCheck("req-1"),
+        new HealthCheck(null),
+        new Inventory(
+            List.of(
+                new LeaseReport(L1, LeaseState.RUNNING, "sha256:aaa", null, null),
+                new LeaseReport(L2, LeaseState.EXITED, "sha256:bbb", 137, null),
+                new LeaseReport("l3", LeaseState.FAILED, null, null, "no space left on device"),
+                new LeaseReport("l4", LeaseState.STARTING, null, null, null),
+                new LeaseReport("l5", LeaseState.ENDED, null, null, null)),
+            List.of("qits-system-runner-work-ws-42-1a2b3c4d")),
+        new Inventory(List.of(), List.of()),
+        new LoginState(
+            LoginPresence.PRESENT,
+            LoginPresence.ABSENT,
+            "2026-10-23T07:00:00Z",
+            "qits_shared_dot_claude"),
+        new LoginState(LoginPresence.UNKNOWN, LoginPresence.UNKNOWN, null, null),
+        new HealthChecked(
+            true,
+            "every check passed",
+            "req-1",
+            List.of(new CheckResult("docker", true, "29.0.0", Map.of("serverVersion", "29.0.0")))),
+        new HealthChecked(false, "it never ran", null, List.of()));
+  }
+
+  @Test
+  void everyFrameRoundTripsThroughTheBaseCodecAndTheDelegate() {
+    for (SystemRunnerMessage frame : everyFrame()) {
+      RunnerMessage back = CODEC.decode(CODEC.encode(frame));
+      assertEquals(frame, back, () -> "round trip of " + frame);
+    }
+  }
+
+  @Test
+  void theRoundTripCoversEveryPermittedFrame() {
+    Set<String> permitted =
+        Arrays.stream(SystemRunnerMessage.class.getPermittedSubclasses())
+            .map(Class::getSimpleName)
+            .collect(Collectors.toSet());
+    Set<String> covered =
+        everyFrame().stream().map(f -> f.getClass().getSimpleName()).collect(Collectors.toSet());
+    assertEquals(permitted, covered, "a frame was added without a round trip");
+    assertEquals(
+        SystemRunnerProtocol.Type.ALL,
+        everyFrame().stream()
+            .map(f -> (String) CODEC.encode(f).get("type"))
+            .collect(Collectors.toSet()),
+        "every wire type is spoken by a frame, and no frame by an undeclared type");
+  }
+
+  @Test
+  void theHelloCapabilitiesAndTheAckExtensionsRoundTripThroughTheBaseCodec() {
+    SystemRunnerCapabilities caps =
+        new SystemRunnerCapabilities(
+            true, "amd64", "linux", 4, 65536L, "ENGINE:ID", "node-1", "qits_shared_dot_claude", false);
+    Hello hello =
+        new Hello(
+            SystemRunnerBinary.VERSION,
+            SystemRunnerProtocol.CAPABILITY_VERSION,
+            4,
+            caps.toWire(),
+            List.of(L1),
+            Map.of());
+    Map<String, Object> wire = CODEC.encode(hello);
+    assertEquals(List.of(L1), wire.get("heldLeases"));
+    Hello back = (Hello) CODEC.decode(wire);
+    assertEquals(caps, SystemRunnerCapabilities.of(back.capabilities()));
+    @SuppressWarnings("unchecked")
+    Map<String, Object> capabilities = (Map<String, Object>) wire.get("capabilities");
+    assertEquals(
+        List.of(
+            "docker",
+            "arch",
+            "os",
+            "labels",
+            "slots",
+            "idRange",
+            "engineId",
+            "hostname",
+            "credentialVolume",
+            "buildkit"),
+        List.copyOf(capabilities.keySet()));
+
+    SystemRunnerAck ext =
+        new SystemRunnerAck(
+            new SlotImages(
+                "registry.qits.example.eu/qits/ci-",
+                "registry.qits.example.eu/qits/workspace",
+                "registry.qits.example.eu/qits/project-agent"),
+            WS_IMAGE,
+            Map.of("docker.io", "mirror.qits.example.eu/docker"));
+    Ack ack = new Ack(1, 4, List.of(L1), ext.extensions());
+    Map<String, Object> ackWire = CODEC.encode(ack);
+    assertEquals(List.of(L1), ackWire.get("adoptedLeases"));
+    Ack ackBack = (Ack) CODEC.decode(ackWire);
+    assertEquals(ext, SystemRunnerAck.of(ackBack));
+    assertEquals(
+        "{\"type\":\"ack\",\"capabilityVersion\":1,\"slots\":4,\"slotImages\":{\"ci\":"
+            + "\"registry.qits.example.eu/qits/ci-\",\"workspace\":"
+            + "\"registry.qits.example.eu/qits/workspace\",\"desk\":"
+            + "\"registry.qits.example.eu/qits/project-agent\"},\"probeImage\":\""
+            + WS_IMAGE
+            + "\",\"registryMirrors\":{\"docker.io\":\"mirror.qits.example.eu/docker\"},"
+            + "\"adoptedLeases\":[\""
+            + L1
+            + "\"]}",
+        Json.write(ackWire));
+
+    SystemRunnerAck none = SystemRunnerAck.of(new Ack(1, 4));
+    assertEquals(SlotImages.NONE, none.slotImages());
+    assertNull(none.probeImage());
+    assertNull(none.registryMirrors(), "not sent is not empty");
+  }
+
+  // --- the golden spelling ---------------------------------------------------------------------
+
+  private static final String FULL_SPEC_JSON =
+      "{\"image\":\""
+          + WS_IMAGE
+          + "\",\"env\":{\"QITS_TOKEN\":\"qits_tok_X\",\"TZ\":\"Europe/Berlin\"},\"user\":\"1000\","
+          + "\"limits\":{\"memory\":\"4g\",\"memorySwap\":\"8g\",\"pidsLimit\":4096,\"cpus\":\"2\","
+          + "\"oomScoreAdj\":600}}";
+
+  @Test
+  void eachFrameIsSpelledExactlyAsTheDossierSaysKeyOrderIncluded() {
+    assertJson(
+        "{\"type\":\"estate\",\"leases\":["
+            + "{\"leaseId\":\""
+            + L1
+            + "\",\"slotType\":\"WORKSPACE\",\"desired\":\"RUNNING\",\"spec\":"
+            + FULL_SPEC_JSON
+            + ",\"specHash\":\"sha256:aaa\",\"workVolume\":\"ws-42\",\"adopt\":{\"container\":\""
+            + OLD_WS
+            + "\",\"volume\":\""
+            + OLD_WS
+            + "\"}},"
+            + "{\"leaseId\":\""
+            + L2
+            + "\",\"slotType\":\"DESK\",\"desired\":\"ENDED\",\"spec\":null,\"specHash\":null,"
+            + "\"workVolume\":\"desk-7\",\"adopt\":null}],"
+            + "\"purges\":[\"qits-system-runner-work-ws-9-1a2b3c4d\"]}",
+        new Estate(List.of(workspace(), endedDesk()), List.of("qits-system-runner-work-ws-9-1a2b3c4d")));
+    assertJson("{\"type\":\"estate\",\"leases\":[],\"purges\":[]}", new Estate(List.of(), null));
+    assertJson("{\"type\":\"probeLogin\"}", new ProbeLogin());
+    assertJson("{\"type\":\"healthCheck\",\"requestId\":\"req-1\"}", new HealthCheck("req-1"));
+    assertJson(
+        "{\"type\":\"inventory\",\"leases\":["
+            + "{\"leaseId\":\""
+            + L1
+            + "\",\"state\":\"RUNNING\",\"specHash\":\"sha256:aaa\",\"exitCode\":null,"
+            + "\"detail\":null},"
+            + "{\"leaseId\":\"l2\",\"state\":\"EXITED\",\"specHash\":\"h\",\"exitCode\":137,"
+            + "\"detail\":null}],"
+            + "\"volumes\":[\"qits-system-runner-work-ws-42-1a2b3c4d\"]}",
+        new Inventory(
+            List.of(
+                new LeaseReport(L1, LeaseState.RUNNING, "sha256:aaa", null, null),
+                new LeaseReport("l2", LeaseState.EXITED, "h", 137, null)),
+            List.of("qits-system-runner-work-ws-42-1a2b3c4d")));
+    assertJson(
+        "{\"type\":\"loginState\",\"claude\":\"PRESENT\",\"kimi\":\"UNKNOWN\","
+            + "\"checkedAt\":\"2026-10-23T07:00:00Z\",\"volume\":\"qits-system-runner-dot-claude-1a2b3c4d\"}",
+        new LoginState(
+            LoginPresence.PRESENT,
+            LoginPresence.UNKNOWN,
+            "2026-10-23T07:00:00Z",
+            "qits-system-runner-dot-claude-1a2b3c4d"));
+    assertJson(
+        "{\"type\":\"healthChecked\",\"ok\":true,\"detail\":\"fine\",\"requestId\":\"req-1\","
+            + "\"checks\":[{\"name\":\"login\",\"ok\":true,\"detail\":\"x\",\"data\":{}}]}",
+        new HealthChecked(
+            true, "fine", "req-1", List.of(new CheckResult("login", true, "x", Map.of()))));
+  }
+
+  private static void assertJson(String expected, SystemRunnerMessage frame) {
+    assertEquals(expected, Json.write(CODEC.encode(frame)), () -> "spelling of " + frame);
+  }
+
+  // --- tolerance and refusals --------------------------------------------------------------------
+
+  @Test
+  void unknownFieldsAreIgnoredAndEitherBoxForANumberIsFine() {
+    Map<String, Object> estate =
+        new LinkedHashMap<>(CODEC.encode(new Estate(List.of(workspace()), List.of())));
+    estate.put("priority", 7);
+    @SuppressWarnings("unchecked")
+    Map<String, Object> lease =
+        new LinkedHashMap<>(((List<Map<String, Object>>) estate.get("leases")).getFirst());
+    @SuppressWarnings("unchecked")
+    Map<String, Object> spec = new LinkedHashMap<>((Map<String, Object>) lease.get("spec"));
+    @SuppressWarnings("unchecked")
+    Map<String, Object> limits = new LinkedHashMap<>((Map<String, Object>) spec.get("limits"));
+    limits.put("pidsLimit", 4096); // an Integer, as Jackson decodes a small number
+    spec.put("limits", limits);
+    spec.put("network", "qits-net"); // a field this version cannot express is not obeyed
+    spec.put("hostDockerSocket", true);
+    spec.put("mounts", List.of(Map.of("source", "/", "target", "/host")));
+    lease.put("spec", spec);
+    estate.put("leases", List.of(lease));
+    assertEquals(new Estate(List.of(workspace()), List.of()), CODEC.decode(estate));
+  }
+
+  @Test
+  void anUnknownTypeIsTheBasesTypedError() {
+    RunnerDecodeException e =
+        assertThrows(
+            RunnerDecodeException.class, () -> CODEC.decode(Map.of("type", "take", "leaseId", L1)));
+    assertEquals(RunnerDecodeException.Reason.UNKNOWN_TYPE, e.reason());
+  }
+
+  @Test
+  void anEstateOrInventoryWithoutItsListIsMalformedNeverEmpty() {
+    // Read as empty, an absent `leases` would have the runner end every lease on its node.
+    assertMalformed(Map.of("type", "estate", "purges", List.of()));
+    assertMalformed(Map.of("type", "estate", "leases", Map.of()));
+    assertMalformed(Map.of("type", "inventory", "volumes", List.of()));
+    assertMalformed(Map.of("type", "inventory", "leases", List.of()));
+    assertMalformed(
+        Map.of(
+            "type", "inventory", "leases", List.of(Map.of("state", "RUNNING")), "volumes", List.of()));
+  }
+
+  @Test
+  void aMissingLeaseTypeDesiredSpecHashOrImageAndAnUnknownStateAreMalformed() {
+    Map<String, Object> spec = Map.of("image", WS_IMAGE);
+    assertMalformed(estateOf(Map.of("slotType", "WORKSPACE", "desired", "RUNNING", "spec", spec, "specHash", "h")));
+    assertMalformed(estateOf(Map.of("leaseId", L1, "desired", "RUNNING", "spec", spec, "specHash", "h")));
+    assertMalformed(estateOf(Map.of("leaseId", L1, "slotType", "BATCH", "desired", "RUNNING", "spec", spec, "specHash", "h")));
+    assertMalformed(estateOf(Map.of("leaseId", L1, "slotType", "WORKSPACE", "spec", spec, "specHash", "h")));
+    assertMalformed(estateOf(Map.of("leaseId", L1, "slotType", "WORKSPACE", "desired", "PAUSED", "spec", spec, "specHash", "h")));
+    assertMalformed(estateOf(Map.of("leaseId", L1, "slotType", "WORKSPACE", "desired", "RUNNING", "specHash", "h")));
+    assertMalformed(estateOf(Map.of("leaseId", L1, "slotType", "WORKSPACE", "desired", "RUNNING", "spec", spec)));
+    assertMalformed(
+        estateOf(
+            Map.of(
+                "leaseId", L1, "slotType", "WORKSPACE", "desired", "RUNNING", "spec",
+                Map.of("env", Map.of()), "specHash", "h")));
+    assertMalformed(
+        Map.of(
+            "type",
+            "inventory",
+            "leases",
+            List.of(Map.of("leaseId", L1, "state", "EXPLODED")),
+            "volumes",
+            List.of()));
+  }
+
+  @Test
+  void anEndedEntryNeedsNoSpecAndAnUnknownLoginPresenceIsUnknown() {
+    Estate estate =
+        (Estate) CODEC.decode(estateOf(Map.of("leaseId", L2, "slotType", "DESK", "desired", "ENDED")));
+    assertEquals(
+        new LeaseEntry(L2, SlotType.DESK, DesiredState.ENDED, null, null, null, null),
+        estate.leases().getFirst());
+    assertEquals(
+        new LoginState(LoginPresence.UNKNOWN, LoginPresence.UNKNOWN, null, null),
+        CODEC.decode(Map.of("type", "loginState", "claude", "EXPIRED")));
+  }
+
+  private static Map<String, Object> estateOf(Map<String, Object> lease) {
+    return Map.of("type", "estate", "leases", List.of(lease), "purges", List.of());
+  }
+
+  private static void assertMalformed(Map<String, Object> wire) {
+    RunnerDecodeException e =
+        assertThrows(RunnerDecodeException.class, () -> CODEC.decode(wire), wire::toString);
+    assertEquals(RunnerDecodeException.Reason.MALFORMED, e.reason(), wire::toString);
+  }
+
+  /**
+   * The JSON a map becomes, in its own iteration order — what Jackson and Vert.x both write for
+   * these shapes. Test-only and deliberately minimal: strings, numbers, booleans, null, maps, lists.
+   */
+  static final class Json {
+
+    static String write(Object value) {
+      StringBuilder out = new StringBuilder();
+      write(value, out);
+      return out.toString();
+    }
+
+    private static void write(Object value, StringBuilder out) {
+      switch (value) {
+        case null -> out.append("null");
+        case String s -> {
+          out.append('"');
+          for (char c : s.toCharArray()) {
+            switch (c) {
+              case '"' -> out.append("\\\"");
+              case '\\' -> out.append("\\\\");
+              case '\n' -> out.append("\\n");
+              default -> out.append(c);
+            }
+          }
+          out.append('"');
+        }
+        case Number n -> out.append(n);
+        case Boolean b -> out.append(b);
+        case Map<?, ?> m -> {
+          out.append('{');
+          boolean first = true;
+          for (Map.Entry<?, ?> e : m.entrySet()) {
+            if (!first) {
+              out.append(',');
+            }
+            first = false;
+            write(String.valueOf(e.getKey()), out);
+            out.append(':');
+            write(e.getValue(), out);
+          }
+          out.append('}');
+        }
+        case List<?> l -> {
+          out.append('[');
+          for (int i = 0; i < l.size(); i++) {
+            if (i > 0) {
+              out.append(',');
+            }
+            write(l.get(i), out);
+          }
+          out.append(']');
+        }
+        default -> throw new IllegalArgumentException("not a wire value: " + value.getClass());
+      }
+    }
+  }
+}
