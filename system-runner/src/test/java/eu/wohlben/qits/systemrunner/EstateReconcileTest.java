@@ -354,10 +354,15 @@ class EstateReconcileTest {
     estateThenAck();
     start();
 
-    awaitCall(c -> has(c, List.of("rm", "-f", lease(L1))));
+    // FakeDocker records a call before it acts on its state, so the removal is awaited on the state
+    // itself, not on the recorded rm.
+    awaitTrue(() -> !docker.containers().containsKey(lease(L1)));
     List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
-    assertTrue(calls.contains(List.of("stop", "c-" + L1)), "stopped before the reconcile: " + calls);
-    assertFalse(docker.containers().containsKey(lease(L1)));
+    assertTrue(calls.contains(List.of("rm", "-f", lease(L1))), calls::toString);
+    int stop = calls.indexOf(List.of("stop", "c-" + L1));
+    assertTrue(
+        stop >= 0 && stop < calls.indexOf(List.of("rm", "-f", lease(L1))),
+        "stopped before the reconcile: " + calls);
   }
 
   // ---- adopt ------------------------------------------------------------------------------------
