@@ -15,7 +15,7 @@
          every <version> here to the tag it cuts. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-system-runner</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>2026.1023.84005</version>
     <packaging>pom</packaging>
 
     <modules>
