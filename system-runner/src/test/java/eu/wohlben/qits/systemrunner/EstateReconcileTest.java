@@ -1,0 +1,682 @@
+package eu.wohlben.qits.systemrunner;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import eu.wohlben.qits.runner.protocol.Ack;
+import eu.wohlben.qits.runner.protocol.Hello;
+import eu.wohlben.qits.runner.protocol.Reserve;
+import eu.wohlben.qits.runner.protocol.RunnerCodec;
+import eu.wohlben.qits.runner.toolkit.Decommission;
+import eu.wohlben.qits.runner.toolkit.HostFacts;
+import eu.wohlben.qits.runner.toolkit.Housekeeping;
+import eu.wohlben.qits.runner.toolkit.RunnerExit;
+import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
+import eu.wohlben.qits.runner.toolkit.RunnerRuntime;
+import eu.wohlben.qits.runner.toolkit.RunnerSettings;
+import eu.wohlben.qits.runner.toolkit.SelfUpdate;
+import eu.wohlben.qits.runner.toolkit.Telemetry;
+import eu.wohlben.qits.runner.toolkit.testing.FakeDocker;
+import eu.wohlben.qits.runner.toolkit.testing.FakeRunnerHost;
+import eu.wohlben.qits.systemrunner.protocol.Adopt;
+import eu.wohlben.qits.systemrunner.protocol.DesiredState;
+import eu.wohlben.qits.systemrunner.protocol.Estate;
+import eu.wohlben.qits.systemrunner.protocol.HealthCheck;
+import eu.wohlben.qits.systemrunner.protocol.HealthChecked;
+import eu.wohlben.qits.systemrunner.protocol.Inventory;
+import eu.wohlben.qits.systemrunner.protocol.LeaseEntry;
+import eu.wohlben.qits.systemrunner.protocol.LeaseReport;
+import eu.wohlben.qits.systemrunner.protocol.LeaseSpec;
+import eu.wohlben.qits.systemrunner.protocol.LeaseState;
+import eu.wohlben.qits.systemrunner.protocol.Limits;
+import eu.wohlben.qits.systemrunner.protocol.LoginPresence;
+import eu.wohlben.qits.systemrunner.protocol.LoginState;
+import eu.wohlben.qits.systemrunner.protocol.SlotImages;
+import eu.wohlben.qits.systemrunner.protocol.SlotType;
+import eu.wohlben.qits.systemrunner.protocol.SystemRunnerAck;
+import eu.wohlben.qits.systemrunner.protocol.SystemRunnerBinary;
+import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCapabilities;
+import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCodec;
+import eu.wohlben.qits.systemrunner.protocol.SystemRunnerMessage;
+import io.vertx.core.Vertx;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+
+/**
+ * The target runner's estate reconcile, end to end, against qits-runner-toolkit's own fixtures:
+ * {@link FakeRunnerHost} (register door, token endpoint, control socket, each scripted here) and
+ * {@link FakeDocker} (a script the production process seam forks as docker). The runtime is the
+ * toolkit's {@link RunnerRuntime} with {@link SystemRunnerDomain}, exactly what {@code Main} hands
+ * {@code RunnerLauncher}; only the node's clocks are shrunk. The shape is
+ * qits-projects-desk-runner-daemon's {@code DeskRunnerTest}: start, recreate on a spec hash, remove
+ * on ENDED, adopt — and the refusals a lease is FAILED for.
+ */
+@EnabledOnOs(OS.LINUX)
+class EstateReconcileTest {
+
+  private static final RunnerIdentity IDENTITY = SystemRunnerIdentity.IDENTITY;
+
+  private static final RunnerCodec<SystemRunnerMessage> CODEC =
+      new RunnerCodec<>(IDENTITY.vocabulary(), new SystemRunnerCodec());
+
+  private static final String SELF = "0123456789ab";
+  private static final String TARGET = "r1";
+
+  private static final String REGISTRY = "registry.example:5000/qits/";
+  private static final String WS_IMAGE = REGISTRY + "workspace:2026.1023.1";
+  private static final String DESK_IMAGE = REGISTRY + "project-agent:2026.1023.1";
+  private static final SystemRunnerAck ACK =
+      new SystemRunnerAck(
+          new SlotImages(REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent"),
+          WS_IMAGE,
+          null);
+
+  private static final String L1 = "8273c743-e0bb-4d93-90d4-391aa10d9151";
+  private static final String L2 = "5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397";
+  private static final String L3 = "dc112edc-4360-4a3b-858b-e75d372e708f";
+  private static final String DESK_ID = "9d6f1c2a-1b2c-4d5e-8f90-0a1b2c3d4e5f";
+
+  private static final String H1 = "sha256-hash-one";
+  private static final String H2 = "sha256-hash-two";
+
+  private static final String DOT_CLAUDE = "qits-system-runner-dot-claude-r1";
+  private static final String M2 = "qits-system-runner-m2-r1";
+  private static final String PNPM = "qits-system-runner-pnpm-r1";
+
+  private static final String OLD_WS = "qits-workspaces-runner-ws-" + L3 + "-0f0e0d0c";
+
+  private final Vertx vertx = Vertx.vertx();
+  private FakeRunnerHost host;
+  private FakeDocker docker;
+  private SystemRunnerDomain domain;
+  private RunnerRuntime<SystemRunnerMessage> runner;
+  private CompletableFuture<Integer> exit;
+  private final Map<String, String> extraEnv = new HashMap<>();
+
+  @TempDir Path state;
+  @TempDir Path dockerDir;
+  @TempDir Path procSelf;
+
+  @BeforeEach
+  void setUp() throws Exception {
+    host = new FakeRunnerHost(vertx, IDENTITY, CODEC);
+    docker = new FakeDocker(dockerDir);
+    docker.answerFor("run", "status", 0, "{\"loggedIn\": true}\n", "");
+    docker.answerFor("run", LoginProbe.KIMI_CHECK, 0, "", "");
+    docker.answer("info", 0, "ENGINE-ID-1|node-1\n", "");
+    Files.writeString(procSelf.resolve("uid_map"), "0 100000 65536\n");
+    Files.writeString(procSelf.resolve("gid_map"), "0 100000 65536\n");
+  }
+
+  @AfterEach
+  void tearDown() throws Exception {
+    if (runner != null) {
+      runner.stop(RunnerExit.OK);
+      exit.get(10, TimeUnit.SECONDS);
+    }
+    if (domain != null) {
+      domain.close();
+    }
+    host.close();
+    vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+  }
+
+  // ---- register and hello -----------------------------------------------------------------------
+
+  @Test
+  void itRegistersAtTheSystemDoorAndSaysHelloWithTheTargetsCapabilities() throws Exception {
+    estateThenAck();
+    start();
+
+    Hello hello = host.await(Hello.class);
+    assertEquals(List.of("/system/api/targets/r1/register"), host.registerPaths);
+    assertEquals(SystemRunnerBinary.VERSION, hello.runnerVersion());
+    assertEquals(1, hello.capabilityVersion());
+    assertEquals(
+        new SystemRunnerCapabilities(
+            true, "amd64", "linux", 2, 65536L, "ENGINE-ID-1", "node-1", DOT_CLAUDE, false),
+        SystemRunnerCapabilities.of(hello.capabilities()));
+    assertFalse(CODEC.encode(hello).containsKey("heldLeases"), "absent on a first connection");
+  }
+
+  // ---- start ------------------------------------------------------------------------------------
+
+  @Test
+  void anEstateStartsAnAbsentWorkspaceLeaseUnderItsPolicyWithItsVolumesMadeLabelledFirst()
+      throws Exception {
+    docker.answerFor("image-inspect", WS_IMAGE, 1, "", "Error: No such image");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<String> run = runOf(lease(L1));
+    assertEquals(
+        List.of(
+            "run",
+            "-d",
+            "--name",
+            lease(L1),
+            "--network",
+            "bridge",
+            "--user",
+            "1000",
+            "--label",
+            "qits.system.runner=r1",
+            "--label",
+            "qits.system.runner.lease=" + L1,
+            "--label",
+            "qits.system.runner.mounts=" + mounts(work("ws-42")),
+            "--label",
+            "qits.system.runner.slot-type=WORKSPACE",
+            "--label",
+            "qits.system.runner.spec-hash=" + H1,
+            "--memory",
+            "4g",
+            "--memory-swap",
+            "4g",
+            "--pids-limit",
+            "512",
+            "--cpus",
+            "2",
+            "--oom-score-adj",
+            "800",
+            "-v",
+            work("ws-42") + ":/workspace",
+            "-v",
+            DOT_CLAUDE + ":/claude-home",
+            "-v",
+            M2 + ":/caches/m2",
+            "-v",
+            PNPM + ":/caches/pnpm",
+            "-e",
+            "CLAUDE_CONFIG_DIR=/claude-home/.claude",
+            "-e",
+            "QITS_TOKEN=qits_tok_LEASE",
+            "-e",
+            "TZ=UTC",
+            WS_IMAGE),
+        run,
+        "the bridge, no extra host, no docker socket, no --init, no restart, no sandbox flags");
+    List<List<String>> calls = docker.calls();
+    List<String> pull =
+        calls.stream()
+            .filter(c -> c.contains("pull") && c.contains(WS_IMAGE))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(calls));
+    assertEquals("--config", pull.getFirst(), "pulled under the runner's own throwaway login");
+    assertTrue(calls.indexOf(pull) < calls.indexOf(run), "pulled before it is run: " + calls);
+    assertEquals(
+        Map.of("qits.system.runner", TARGET, "qits.system.runner.work-key", "ws-42"),
+        docker.volumes().get(work("ws-42")));
+    for (String node : List.of(DOT_CLAUDE, M2, PNPM)) {
+      assertEquals(Map.of("qits.system.runner", TARGET), docker.volumes().get(node), node);
+    }
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    assertTrue(host.all(Reserve.class).isEmpty(), "the server allocates: no reserve, ever");
+  }
+
+  @Test
+  void aDeskLeaseRunsWithInitAndRestartUnlessStopped() throws Exception {
+    estateThenAck(desk(L2, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L2)).isEmpty());
+    List<String> run = runOf(lease(L2));
+    assertEquals(List.of("run", "-d", "--init", "--name", lease(L2)), run.subList(0, 5));
+    int restart = run.indexOf("--restart");
+    assertTrue(restart > 0 && run.get(restart + 1).equals("unless-stopped"), run::toString);
+    assertTrue(run.contains(work("desk-" + DESK_ID) + ":/workspace"), run::toString);
+    assertTrue(run.contains(DOT_CLAUDE + ":/claude-home"), run::toString);
+    assertTrue(run.contains("qits.system.runner.slot-type=DESK"), run::toString);
+  }
+
+  @Test
+  void aRunningLeaseOfTheSameSpecIsLeftAloneAndReportedRunning() throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.leaseId().equals(L1)));
+    assertEquals(
+        new LeaseReport(L1, LeaseState.RUNNING, H1, null, null), report(inventory, L1));
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    for (String verb : List.of("run", "start", "stop", "rm")) {
+      assertFalse(touched(verb, lease(L1)), docker.calls()::toString);
+    }
+  }
+
+  @Test
+  void anExitedLeaseIsReportedWithItsExitCodeAndNeverRestarted() throws Exception {
+    seen(L1, "exited", 137, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(
+            i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.EXITED));
+    assertEquals(new LeaseReport(L1, LeaseState.EXITED, H1, 137, null), report(inventory, L1));
+    assertFalse(touched("start", lease(L1)), "its token may be gone; the owner ends it");
+    assertFalse(touched("run", lease(L1)));
+  }
+
+  // ---- recreate on a spec hash --------------------------------------------------------------------
+
+  @Test
+  void aLeaseOfAnotherSpecHashIsStoppedRemovedAndRunAgainKeepingItsWorkVolume() throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", "an-older-hash", mounts(work("ws-42")));
+    Map<String, String> labels =
+        Map.of("qits.system.runner", TARGET, "qits.system.runner.work-key", "ws-42");
+    docker.volume(work("ws-42"), labels);
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
+    int stop = calls.indexOf(List.of("stop", lease(L1)));
+    int removed = calls.indexOf(List.of("rm", "-f", lease(L1)));
+    int run = calls.indexOf(runOf(lease(L1)));
+    assertTrue(stop >= 0 && removed > stop && run > removed, "stop, rm, run: " + calls);
+    assertTrue(runOf(lease(L1)).contains("qits.system.runner.spec-hash=" + H1));
+    assertEquals(labels, docker.volumes().get(work("ws-42")), "the volume is the work; it stays");
+    assertTrue(docker.calls("volume").stream().noneMatch(c -> c.contains("rm")), calls::toString);
+  }
+
+  // ---- remove on ENDED, and on absence ----------------------------------------------------------
+
+  @Test
+  void anEndedLeaseIsStoppedAndRemovedItsWorkVolumeKeptAndReportedEnded() throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    docker.volume(
+        work("ws-42"), Map.of("qits.system.runner", TARGET, "qits.system.runner.work-key", "ws-42"));
+    estateThenAck(workspace(L1, H1));
+    start();
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+
+    // Once removed, docker's inspect of the name answers nothing.
+    host.send(
+        new Estate(
+            List.of(
+                new LeaseEntry(L1, SlotType.WORKSPACE, DesiredState.ENDED, null, null, "ws-42", null)),
+            List.of()));
+    awaitCall(c -> has(c, List.of("rm", "-f", lease(L1))));
+    docker.answerFor("inspect", lease(L1), 0, "", "");
+    host.send(
+        new Estate(
+            List.of(
+                new LeaseEntry(L1, SlotType.WORKSPACE, DesiredState.ENDED, null, null, "ws-42", null)),
+            List.of()));
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.ENDED));
+    assertEquals(new LeaseReport(L1, LeaseState.ENDED, null, null, null), report(inventory, L1));
+    awaitTrue(() -> runner.session().held().isEmpty());
+    List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
+    assertTrue(calls.indexOf(List.of("stop", lease(L1))) < calls.indexOf(List.of("rm", "-f", lease(L1))));
+    assertTrue(docker.volumes().containsKey(work("ws-42")), "kept until a purge names it");
+    assertEquals(List.of(work("ws-42")), inventory.volumes());
+  }
+
+  @Test
+  void aHeldLeaseTheEstateNoLongerListsIsStoppedAndRemovedOnlyAfterAnEstate() throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck();
+    start();
+
+    awaitCall(c -> has(c, List.of("rm", "-f", lease(L1))));
+    List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
+    assertTrue(calls.contains(List.of("stop", "c-" + L1)), "stopped before the reconcile: " + calls);
+    assertFalse(docker.containers().containsKey(lease(L1)));
+  }
+
+  // ---- adopt ------------------------------------------------------------------------------------
+
+  @Test
+  void anAdoptingLeaseRemovesTheRetiredContainerAndMountsItsVolumeAsTheWorkVolume()
+      throws Exception {
+    docker.container(OLD_WS, Map.of("qits.workspaces.runner", "0f0e0d0c-old"));
+    docker.answerFor("inspect", OLD_WS, 0, "old-container-id\n", "");
+    docker.volume(OLD_WS, Map.of("qits.workspaces.runner", "0f0e0d0c-old"));
+    docker.answerFor("volume-inspect", OLD_WS, 0, OLD_WS + "\n", "");
+    LeaseEntry adopting =
+        new LeaseEntry(
+            L1,
+            SlotType.WORKSPACE,
+            DesiredState.RUNNING,
+            spec(WS_IMAGE, env()),
+            H1,
+            "ws-42",
+            new Adopt(OLD_WS, OLD_WS));
+    estateThenAck(adopting);
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
+    int stop = calls.indexOf(List.of("stop", OLD_WS));
+    int rm = calls.indexOf(List.of("rm", "-f", OLD_WS));
+    int run = calls.indexOf(runOf(lease(L1)));
+    assertTrue(stop >= 0 && rm > stop && run > rm, "stop, rm the retired container, run: " + calls);
+    List<String> argv = runOf(lease(L1));
+    assertTrue(argv.contains(OLD_WS + ":/workspace"), argv::toString);
+    assertTrue(argv.contains("qits.system.runner.mounts=" + mounts(OLD_WS)), argv::toString);
+    assertFalse(docker.volumes().containsKey(work("ws-42")), "no work volume of its own");
+    assertEquals(
+        Map.of("qits.workspaces.runner", "0f0e0d0c-old"),
+        docker.volumes().get(OLD_WS),
+        "the adopted volume is mounted, never created, relabelled or removed");
+    assertFalse(docker.containers().containsKey(OLD_WS));
+  }
+
+  @Test
+  void anAdoptOfANameOutsideTheRetiredRunnersPatternsFailsTheLeaseAndTouchesNothing()
+      throws Exception {
+    docker.container("postgres", Map.of());
+    LeaseEntry adopting =
+        new LeaseEntry(
+            L1,
+            SlotType.WORKSPACE,
+            DesiredState.RUNNING,
+            spec(WS_IMAGE, env()),
+            H1,
+            "ws-42",
+            new Adopt("postgres", "pgdata"));
+    estateThenAck(adopting);
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    assertEquals(
+        new LeaseReport(L1, LeaseState.FAILED, null, null, "adopt name not allowed"),
+        report(inventory, L1));
+    assertTrue(docker.containers().containsKey("postgres"));
+    assertFalse(touched("stop", "postgres") || touched("rm", "postgres"), docker.calls()::toString);
+    assertTrue(runsOf(lease(L1)).isEmpty());
+  }
+
+  // ---- refusals ---------------------------------------------------------------------------------
+
+  @Test
+  void aCiLeaseFailsWithTheDossiersDetailAndRunsNothing() throws Exception {
+    LeaseEntry ci =
+        new LeaseEntry(
+            L1,
+            SlotType.CI,
+            DesiredState.RUNNING,
+            new LeaseSpec(REGISTRY + "ci-step:1", Map.of(), "1001", null),
+            H1,
+            null,
+            null);
+    estateThenAck(ci);
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    assertEquals(
+        new LeaseReport(
+            L1, LeaseState.FAILED, null, null, "ci slots are not enabled on this runner version"),
+        report(inventory, L1));
+    assertTrue(runsOf(lease(L1)).isEmpty());
+  }
+
+  @Test
+  void aSpecEnvCollidingWithAPolicyKeyFailsTheLeaseNamingTheKey() throws Exception {
+    Map<String, String> env = env();
+    env.put("HOME", "/root");
+    estateThenAck(
+        new LeaseEntry(
+            L1, SlotType.DESK, DesiredState.RUNNING, spec(DESK_IMAGE, env), H1, "desk-" + DESK_ID, null));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    LeaseReport failed = report(inventory, L1);
+    assertEquals(LeaseState.FAILED, failed.state());
+    assertTrue(failed.detail().contains("HOME"), failed.detail());
+    assertTrue(runsOf(lease(L1)).isEmpty());
+  }
+
+  // ---- purges -----------------------------------------------------------------------------------
+
+  @Test
+  void aPurgeRemovesAnOwnWorkVolumeOrARetiredOneAndNothingElse() throws Exception {
+    docker.volume(work("ws-9"), Map.of("qits.system.runner", TARGET));
+    docker.volume(OLD_WS, Map.of());
+    docker.volume("qits_shared_dot_claude", Map.of());
+    docker.volume("qits-system-runner-work-ws-9-ffffffff", Map.of());
+    host.script =
+        (h, message) -> {
+          if (message instanceof Hello) {
+            h.send(new Ack(IDENTITY.capabilityVersion(), 2, null, ACK.extensions()));
+            h.send(
+                new Estate(
+                    List.of(),
+                    List.of(
+                        work("ws-9"),
+                        OLD_WS,
+                        "qits_shared_dot_claude",
+                        "qits-system-runner-work-ws-9-ffffffff")));
+          }
+        };
+    start();
+
+    awaitTrue(() -> !docker.volumes().containsKey(work("ws-9")));
+    awaitTrue(() -> !docker.volumes().containsKey(OLD_WS));
+    assertTrue(docker.volumes().containsKey("qits_shared_dot_claude"));
+    assertTrue(docker.volumes().containsKey("qits-system-runner-work-ws-9-ffffffff"), "another target's");
+  }
+
+  // ---- login and health -------------------------------------------------------------------------
+
+  @Test
+  void theLoginIsProbedAtTheAckWithTheProbeImageAndTheHealthCheckReportsIt() throws Exception {
+    estateThenAck();
+    start();
+
+    LoginState login = host.await(LoginState.class);
+    assertEquals(LoginPresence.PRESENT, login.claude());
+    assertEquals(LoginPresence.PRESENT, login.kimi());
+    assertEquals(DOT_CLAUDE, login.volume());
+    assertTrue(
+        docker.calls("run").stream().anyMatch(c -> c.contains(WS_IMAGE) && c.contains("claude")));
+
+    host.send(new HealthCheck("req-1"));
+    HealthChecked checked = host.await(HealthChecked.class);
+    assertEquals("req-1", checked.requestId());
+    assertEquals(
+        List.of("docker", "nodeInventory", "login", "session"),
+        checked.checks().stream().map(c -> c.name()).toList());
+    assertTrue(checked.checks().get(2).ok(), "login reports, never fails");
+    assertEquals(DOT_CLAUDE, checked.checks().get(2).data().get("volume"));
+  }
+
+  @Test
+  void beforeAnyEstateNothingIsRemoved() throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    host.script =
+        (h, message) -> {
+          if (message instanceof Hello) {
+            h.send(new Ack(IDENTITY.capabilityVersion(), 2, null, ACK.extensions()));
+          }
+        };
+    start();
+
+    awaitInventory(i -> i.leases().stream().anyMatch(r -> r.leaseId().equals(L1)));
+    assertFalse(touched("rm", lease(L1)));
+    assertFalse(touched("stop", lease(L1)));
+  }
+
+  // ---- the runner, the host's scripts and the node -------------------------------------------------
+
+  private void start() throws Exception {
+    Map<String, String> env = new HashMap<>();
+    env.put(IDENTITY.env(RunnerSettings.URL), host.base());
+    env.put(IDENTITY.env(RunnerSettings.ID), TARGET);
+    env.put(IDENTITY.env(RunnerSettings.REGISTRATION_TOKEN), "token-1");
+    env.put(IDENTITY.env(RunnerSettings.STATE_DIR), state.toString());
+    env.put(IDENTITY.env(RunnerSettings.SLOTS), "2");
+    env.put(IDENTITY.env(RunnerSettings.DOCKER_BINARY), docker.binary());
+    env.put(IDENTITY.env(RunnerSettings.DOCKER_TIMEOUT), "10");
+    env.putAll(extraEnv);
+    RunnerSettings settings =
+        RunnerSettings.parse(IDENTITY, env::get)
+            .withTiming(new RunnerSettings.Timing(10_000, 50, 200, 5_000, 300_000, 5));
+    domain =
+        new SystemRunnerDomain(
+            settings,
+            ExternalVolumes.parse(IDENTITY, env::get),
+            new SystemRunnerDomain.Timing(
+                Duration.ofMillis(200), Duration.ofSeconds(60), Duration.ofSeconds(60)),
+            Clock.systemUTC(),
+            procSelf);
+    runner =
+        new RunnerRuntime<>(
+            vertx,
+            IDENTITY,
+            settings,
+            domain,
+            new HostFacts(true, "amd64", "linux"),
+            Telemetry.off(),
+            new RunnerRuntime.NodeOptions(
+                Optional.of(SELF),
+                new SelfUpdate.Settings(100, 400, 3_000, 400, 50),
+                new Decommission.Settings(200, 20, 2),
+                new Housekeeping.Settings(TimeUnit.HOURS.toMillis(6)),
+                Clock.systemUTC()));
+    exit = CompletableFuture.supplyAsync(runner::run);
+  }
+
+  /** Ack every Hello with the slot and probe images, then the estate right after it. */
+  private void estateThenAck(LeaseEntry... leases) {
+    host.script =
+        (h, message) -> {
+          if (message instanceof Hello) {
+            h.send(new Ack(IDENTITY.capabilityVersion(), 2, null, ACK.extensions()));
+            h.send(new Estate(List.of(leases), List.of()));
+          }
+        };
+  }
+
+  private static Map<String, String> env() {
+    Map<String, String> env = new LinkedHashMap<>();
+    env.put("TZ", "UTC");
+    env.put("QITS_TOKEN", "qits_tok_LEASE");
+    return env;
+  }
+
+  private static LeaseSpec spec(String image, Map<String, String> env) {
+    return new LeaseSpec(image, env, "1000", new Limits("4g", "4g", 512L, "2", 800));
+  }
+
+  private static LeaseEntry workspace(String leaseId, String hash) {
+    return new LeaseEntry(
+        leaseId, SlotType.WORKSPACE, DesiredState.RUNNING, spec(WS_IMAGE, env()), hash, "ws-42", null);
+  }
+
+  private static LeaseEntry desk(String leaseId, String hash) {
+    return new LeaseEntry(
+        leaseId,
+        SlotType.DESK,
+        DesiredState.RUNNING,
+        spec(DESK_IMAGE, env()),
+        hash,
+        "desk-" + DESK_ID,
+        null);
+  }
+
+  private static String lease(String leaseId) {
+    return "qits-system-runner-lease-" + leaseId + "-r1";
+  }
+
+  private static String work(String key) {
+    return "qits-system-runner-work-" + key + "-r1";
+  }
+
+  private static String mounts(String workVolume) {
+    return new TargetVolumes(IDENTITY, TARGET, ExternalVolumes.NONE).mountsHash(workVolume);
+  }
+
+  /** The lease's container on the node, as docker's inspect answers it from now on. */
+  private void seen(
+      String leaseId, String status, int exitCode, String slotType, String specHash, String mounts)
+      throws Exception {
+    Map<String, String> labels = new HashMap<>();
+    labels.put("qits.system.runner", TARGET);
+    labels.put("qits.system.runner.lease", leaseId);
+    labels.put("qits.system.runner.slot-type", slotType);
+    labels.put("qits.system.runner.spec-hash", specHash);
+    labels.put("qits.system.runner.mounts", mounts);
+    docker.container(lease(leaseId), labels);
+    docker.answerFor(
+        "inspect",
+        lease(leaseId),
+        0,
+        "c-" + leaseId + "|" + status + "|" + exitCode + "|" + leaseId + "|" + slotType + "|"
+            + specHash + "|" + mounts + "\n",
+        "");
+  }
+
+  private Inventory awaitInventory(Predicate<Inventory> condition) throws InterruptedException {
+    awaitTrue(() -> host.all(Inventory.class).stream().anyMatch(condition));
+    List<Inventory> all = new ArrayList<>(host.all(Inventory.class));
+    return all.stream().filter(condition).reduce((a, b) -> b).orElseThrow();
+  }
+
+  private static LeaseReport report(Inventory inventory, String leaseId) {
+    return inventory.leases().stream()
+        .filter(r -> r.leaseId().equals(leaseId))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no " + leaseId + " in " + inventory));
+  }
+
+  private List<List<String>> runsOf(String name) {
+    return docker.calls("run").stream().filter(c -> c.contains(name)).toList();
+  }
+
+  private List<String> runOf(String name) {
+    List<List<String>> runs = runsOf(name);
+    assertFalse(runs.isEmpty(), () -> "no run of " + name + ": " + docker.calls());
+    return runs.getFirst();
+  }
+
+  private boolean touched(String verb, String name) {
+    return docker.calls(verb).stream().anyMatch(c -> c.contains(name));
+  }
+
+  private void awaitCall(Predicate<List<List<String>>> condition) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+    while (!condition.test(docker.calls()) && System.nanoTime() < deadline) {
+      Thread.sleep(20);
+    }
+    assertTrue(condition.test(docker.calls()), () -> "docker calls: " + docker.calls());
+  }
+
+  private static boolean has(List<List<String>> calls, List<String> call) {
+    return calls.stream().map(FakeDocker::withoutConfig).anyMatch(call::equals);
+  }
+
+  private static void awaitTrue(BooleanSupplier condition) throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+    while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+      Thread.sleep(20);
+    }
+    assertTrue(condition.getAsBoolean(), "the condition never held");
+  }
+}
