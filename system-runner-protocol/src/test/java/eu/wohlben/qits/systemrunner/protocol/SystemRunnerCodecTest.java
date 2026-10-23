@@ -37,8 +37,7 @@ class SystemRunnerCodecTest {
 
   private static final String L1 = "8273c743-e0bb-4d93-90d4-391aa10d9151";
   private static final String L2 = "5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397";
-  private static final String OLD_WS =
-      "qits-workspaces-runner-ws-dc112edc-4360-4a3b-858b-e75d372e708f-1a2b3c4d";
+  private static final String OLD_WS = "qits-workspaces-runner-ws-42-1a2b3c4d";
 
   private static LeaseSpec fullSpec() {
     Map<String, String> env = new LinkedHashMap<>();

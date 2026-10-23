@@ -92,7 +92,6 @@ class EstateReconcileTest {
 
   private static final String L1 = "8273c743-e0bb-4d93-90d4-391aa10d9151";
   private static final String L2 = "5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397";
-  private static final String L3 = "dc112edc-4360-4a3b-858b-e75d372e708f";
   private static final String DESK_ID = "9d6f1c2a-1b2c-4d5e-8f90-0a1b2c3d4e5f";
 
   private static final String H1 = "sha256-hash-one";
@@ -109,7 +108,7 @@ class EstateReconcileTest {
   private static final String BUILDER = "qits-system-runner-buildkitd-r1";
   private static final String BUILD_NET = "qits-system-runner-build-r1";
 
-  private static final String OLD_WS = "qits-workspaces-runner-ws-" + L3 + "-0f0e0d0c";
+  private static final String OLD_WS = "qits-workspaces-runner-ws-42-0f0e0d0c";
 
   private final Vertx vertx = Vertx.vertx();
   private FakeRunnerHost host;
