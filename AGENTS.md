@@ -39,8 +39,15 @@ asserts every cell. A `LeaseSpec` can say an image, an environment, a user and l
 mount, a network, a capability, `--init` or a restart. A change to what a slot type may do is a
 change to that table, reviewed as one, with the test cell beside it.
 
-- **CI is declared and disabled**: its cells are the dossier's, and every CI lease is `FAILED`
-  with `SystemRunnerProtocol.CI_NOT_ENABLED` until the CI feature (the build plane) lands.
+- **CI never mounts the credential volume, the agent caches or a work volume**, and WORKSPACE and
+  DESK never a CI cache or `BUILDKIT_HOST`; `SlotPolicyTest` holds both. A CI lease's second
+  network is a `docker network connect` after the driver's run (`BuildPlane.connect`), because
+  `ContainerSpec` carries one network; a failed connect removes the container again.
+- **The build plane is the target's own** (`BuildPlane`): every name derived, none configurable,
+  never `qits-buildkitd` / `qits-buildkitd-state` (`BuildPlaneNamesTest`). The builder carries the
+  stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled
+  container that is not a held lease. It is the one privileged `docker run`, a fixed argv through
+  `RunnerDocker`, and its three names are the domain's `TeardownItem`s.
 - **The user is the spec's and never root** (`0`, `root`, with or without a group).
 - **The image must start with `Ack.slotImages.<type>`**.
 - **Policy-owned env keys** (`BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR`) in a spec fail the lease
@@ -61,7 +68,9 @@ Plain records, plain constructors, no annotations; fields are read through `Wire
 **`Main` is the only CDI bean.** Everything below it is a plain class taking its collaborators as
 constructor arguments; nothing reads configuration — the toolkit's `RunnerSettings` parses the
 environment (`QITS_SYSTEM_RUNNER_*`), and `Main` parses the runner's own beside it
-(`ExternalVolumes`: `…_CREDENTIAL_VOLUME`, `…_M2_VOLUME`, `…_PNPM_VOLUME`, exit 2 on a bad name).
+(`ExternalVolumes`: `…_CREDENTIAL_VOLUME`, `…_M2_VOLUME`, `…_PNPM_VOLUME`, exit 2 on a bad name;
+`BuildkitSettings`: `…_BUILDKIT_IMAGE`, `…_BUILDKIT_MAX_PARALLELISM`, `…_BUILDKIT_HTTP_REGISTRIES`,
+`…_BUILDKIT_REGISTRY_MIRRORS`, likewise).
 
 **An external node volume is never the runner's.** It is never created, labelled or removed; a
 missing one fails the lease before `docker run`, because `-v` would create it empty.

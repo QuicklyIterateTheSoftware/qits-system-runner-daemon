@@ -102,6 +102,13 @@ class EstateReconcileTest {
   private static final String M2 = "qits-system-runner-m2-r1";
   private static final String PNPM = "qits-system-runner-pnpm-r1";
 
+  private static final String CI_IMAGE = REGISTRY + "ci-slot@sha256:0123";
+  private static final String CI_GIT = "qits-system-runner-ci-git-r1";
+  private static final String CI_M2 = "qits-system-runner-ci-m2-r1";
+  private static final String CI_PNPM = "qits-system-runner-ci-pnpm-r1";
+  private static final String BUILDER = "qits-system-runner-buildkitd-r1";
+  private static final String BUILD_NET = "qits-system-runner-build-r1";
+
   private static final String OLD_WS = "qits-workspaces-runner-ws-" + L3 + "-0f0e0d0c";
 
   private final Vertx vertx = Vertx.vertx();
@@ -153,7 +160,7 @@ class EstateReconcileTest {
     assertEquals(1, hello.capabilityVersion());
     assertEquals(
         new SystemRunnerCapabilities(
-            true, "amd64", "linux", 2, 65536L, "ENGINE-ID-1", "node-1", DOT_CLAUDE, false),
+            true, "amd64", "linux", 2, 65536L, "ENGINE-ID-1", "node-1", DOT_CLAUDE, true),
         SystemRunnerCapabilities.of(hello.capabilities()));
     assertFalse(CODEC.encode(hello).containsKey("heldLeases"), "absent on a first connection");
   }
@@ -230,6 +237,12 @@ class EstateReconcileTest {
     for (String node : List.of(DOT_CLAUDE, M2, PNPM)) {
       assertEquals(Map.of("qits.system.runner", TARGET), docker.volumes().get(node), node);
     }
+    // FakeDocker's inspect answers nothing unscripted, so the periodic look reads the new container
+    // as gone; say it runs, and the next estate holds it for good.
+    docker.answerFor(
+        "inspect", lease(L1), 0, "c-" + L1 + "|running|0|" + L1 + "|WORKSPACE|" + H1 + "|"
+            + mounts(work("ws-42")) + "\n", "");
+    host.send(new Estate(List.of(workspace(L1, H1)), List.of()));
     awaitTrue(() -> runner.session().held().equals(List.of(L1)));
     assertTrue(host.all(Reserve.class).isEmpty(), "the server allocates: no reserve, ever");
   }
@@ -414,26 +427,80 @@ class EstateReconcileTest {
   // ---- refusals ---------------------------------------------------------------------------------
 
   @Test
-  void aCiLeaseFailsWithTheDossiersDetailAndRunsNothing() throws Exception {
-    LeaseEntry ci =
-        new LeaseEntry(
-            L1,
-            SlotType.CI,
-            DesiredState.RUNNING,
-            new LeaseSpec(REGISTRY + "ci-step:1", Map.of(), "1001", null),
-            H1,
-            null,
-            null);
-    estateThenAck(ci);
+  void aCiLeaseStartsTheBuildPlaneThenRunsSandboxedOnBothNetworksWithItsCachesOnly()
+      throws Exception {
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+    List<String> run = runOf(lease(L1));
+    assertEquals(List.of("run", "-d", "--init", "--name", lease(L1)), run.subList(0, 5));
+    assertEquals("bridge", run.get(run.indexOf("--network") + 1));
+    assertTrue(run.contains("--security-opt=no-new-privileges"), run::toString);
+    assertTrue(run.contains("--cap-drop=ALL"), run::toString);
+    assertFalse(run.contains("--restart"), "restart: no");
+    assertTrue(run.contains("BUILDKIT_HOST=tcp://" + BUILDER + ":1234"), run::toString);
+    assertTrue(run.contains("qits.system.runner.slot-type=CI"), run::toString);
+    assertTrue(run.contains(CI_GIT + ":/cache/git"), run::toString);
+    assertTrue(run.contains(CI_M2 + ":/caches/m2"), run::toString);
+    assertTrue(run.contains(CI_PNPM + ":/caches/pnpm"), run::toString);
+    for (String never : List.of(DOT_CLAUDE, M2, PNPM, "/claude-home", "/workspace")) {
+      assertTrue(run.stream().noneMatch(e -> e.contains(never)), never + " in " + run);
+    }
+    assertFalse(run.contains("CLAUDE_CONFIG_DIR=/claude-home/.claude"));
+    for (String cache : List.of(CI_GIT, CI_M2, CI_PNPM)) {
+      assertEquals(Map.of("qits.system.runner", TARGET), docker.volumes().get(cache), cache);
+    }
+    List<List<String>> calls = docker.calls();
+    List<String> builder =
+        calls.stream()
+            .filter(c -> c.size() > 4 && c.get(0).equals("run") && c.contains(BUILDER))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(calls));
+    assertTrue(calls.indexOf(builder) < calls.indexOf(run), "the builder first: " + calls);
+    assertTrue(builder.contains("--privileged"));
+    assertTrue(builder.contains(BUILD_NET));
+    assertTrue(
+        calls.stream().flatMap(List::stream).noneMatch(e -> e.startsWith("qits-buildkitd")),
+        "never the platform builder");
+    docker.answerFor(
+        "inspect", lease(L1), 0, "c-" + L1 + "|running|0|" + L1 + "|CI|" + H1 + "|" + ciMounts()
+            + "\n", "");
+    host.send(new Estate(List.of(ci(L1, H1)), List.of()));
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.RUNNING));
+    assertEquals(LeaseState.RUNNING, report(inventory, L1).state());
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    assertEquals(1, runsOf(lease(L1)).size(), "the same spec and mounts: left alone");
+  }
+
+  @Test
+  void aCiLeaseWhoseBuildPlaneCannotStartFailsAndRunsNothing() throws Exception {
+    docker.answerFor("network-inspect", BUILD_NET, 0, "bridge\n", "");
+    docker.answerFor("inspect", BUILDER, 0, "<no value>|running\n", "");
+    estateThenAck(ci(L1, H1));
     start();
 
     Inventory inventory =
         awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
-    assertEquals(
-        new LeaseReport(
-            L1, LeaseState.FAILED, null, null, "ci slots are not enabled on this runner version"),
-        report(inventory, L1));
+    assertTrue(report(inventory, L1).detail().contains("not this runner's builder"));
     assertTrue(runsOf(lease(L1)).isEmpty());
+  }
+
+  @Test
+  void anEndedCiLeaseIsRemovedAndTheBuilderStays() throws Exception {
+    seen(L1, "running", 0, "CI", H1, ciMounts());
+    LeaseEntry ended =
+        new LeaseEntry(L1, SlotType.CI, DesiredState.ENDED, null, H1, null, null);
+    estateThenAck(ended);
+    start();
+
+    awaitCall(calls -> has(calls, List.of("rm", "-f", lease(L1))));
+    assertFalse(touched("rm", BUILDER));
+    assertFalse(touched("stop", BUILDER));
   }
 
   @Test
@@ -501,7 +568,7 @@ class EstateReconcileTest {
     HealthChecked checked = host.await(HealthChecked.class);
     assertEquals("req-1", checked.requestId());
     assertEquals(
-        List.of("docker", "nodeInventory", "login", "session"),
+        List.of("docker", "nodeInventory", "login", "session", "buildkit", "network", "idRange"),
         checked.checks().stream().map(c -> c.name()).toList());
     assertTrue(checked.checks().get(2).ok(), "login reports, never fails");
     assertEquals(DOT_CLAUDE, checked.checks().get(2).data().get("volume"));
@@ -599,6 +666,22 @@ class EstateReconcileTest {
         hash,
         "desk-" + DESK_ID,
         null);
+  }
+
+  private static LeaseEntry ci(String leaseId, String hash) {
+    return new LeaseEntry(
+        leaseId,
+        SlotType.CI,
+        DesiredState.RUNNING,
+        new LeaseSpec(CI_IMAGE, env(), "1001", new Limits("4g", "4g", 512L, "2", 800)),
+        hash,
+        null,
+        null);
+  }
+
+  private static String ciMounts() {
+    return new TargetVolumes(IDENTITY, TARGET, ExternalVolumes.NONE)
+        .mountsHash(SlotPolicy.CI, null);
   }
 
   private static String lease(String leaseId) {

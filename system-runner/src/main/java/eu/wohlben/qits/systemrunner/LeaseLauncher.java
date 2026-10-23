@@ -13,7 +13,9 @@ import eu.wohlben.qits.systemrunner.protocol.SlotImages;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 import org.jboss.logging.Logger;
 
 /**
@@ -36,6 +38,14 @@ import org.jboss.logging.Logger;
  *       <b>never its volume</b>, which holds the work — then {@code run} the new spec;
  *   <li><b>ENDED</b> → {@code stop}, {@code rm}; the work volume stays until a purge names it.
  * </ul>
+ *
+ * <p><b>A CI lease</b> starts the target's {@link BuildPlane} first (on the first one, and
+ * re-checked on every later one), makes the CI caches labelled, runs on {@code bridge} with {@code
+ * BUILDKIT_HOST} injected, and is then joined to the build network with a {@code docker network
+ * connect}: the driver's {@code ContainerSpec} carries one network (qits-1302's {@code
+ * extraNetworks} was never built). A connect that fails removes the container again and fails the
+ * lease, so a CI container never runs without its builder. It mounts no external node volume, so
+ * none is asked after.
  *
  * <p>The hash is the server's, carried on the frame and written to the label as is: the runner
  * never computes one, so the two can never disagree about a canonical form.
@@ -76,18 +86,21 @@ final class LeaseLauncher {
   private final TargetNames names;
   private final TargetVolumes volumes;
   private final LeaseContainers containers;
+  private final Supplier<BuildPlane> buildPlane;
 
   LeaseLauncher(
       RunnerIdentity identity,
       RunnerDocker docker,
       TargetNames names,
       TargetVolumes volumes,
-      LeaseContainers containers) {
+      LeaseContainers containers,
+      Supplier<BuildPlane> buildPlane) {
     this.identity = identity;
     this.docker = docker;
     this.names = names;
     this.volumes = volumes;
     this.containers = containers;
+    this.buildPlane = buildPlane;
   }
 
   /**
@@ -124,7 +137,7 @@ final class LeaseLauncher {
     } catch (RuntimeException e) {
       return failed(leaseId, e.getMessage());
     }
-    String mounts = volumes.mountsHash(workVolume);
+    String mounts = volumes.mountsHash(policy, workVolume);
     if (seen.isPresent()
         && entry.specHash().equals(seen.get().specHash())
         && mounts.equals(seen.get().mounts())) {
@@ -137,9 +150,11 @@ final class LeaseLauncher {
     // An external node volume is the operator's: asked after, never made — a -v naming one that is
     // not there would create it empty, unlabelled, and the lease would run with no login. Asked
     // before an old container goes, so a missing one never costs a lease that still runs.
-    Optional<String> missing;
+    Optional<String> missing = Optional.empty();
     try {
-      missing = volumes.missing(docker);
+      if (policy.agentVolumes()) {
+        missing = volumes.missing(docker);
+      }
     } catch (RuntimeException e) {
       return failed(leaseId, e.getMessage());
     }
@@ -222,13 +237,15 @@ final class LeaseLauncher {
     String leaseId = entry.leaseId();
     ContainersDriver driver = session.driver();
     Duration deadline = docker.deadline();
+    BuildPlane plane = null;
+    SlotPolicy.Build build = null;
+    if (policy.buildNetwork) {
+      plane = buildPlane.get();
+      build = new SlotPolicy.Build(plane.names().network(), plane.names().address());
+    }
     ContainerSpec container;
     try {
-      container =
-          policy.containerSpec(
-              name,
-              entry.spec(),
-              new SlotPolicy.Mounts(workVolume, volumes.credential(), volumes.m2(), volumes.pnpm()));
+      container = policy.containerSpec(name, entry.spec(), volumes.mounts(workVolume), build);
     } catch (IllegalArgumentException | IllegalStateException refused) {
       return failed(leaseId, "the lease spec was refused: " + refused.getMessage());
     }
@@ -245,7 +262,14 @@ final class LeaseLauncher {
             "docker could not create the volume " + workVolume + ": " + brief(work.detail()));
       }
     }
-    for (String node : volumes.owned()) {
+    if (plane != null) {
+      Optional<String> notUp = plane.ensure();
+      if (notUp.isPresent()) {
+        return failed(leaseId, "the build plane is not up: " + brief(notUp.get()));
+      }
+    }
+    List<String> nodeVolumes = policy.agentVolumes() ? volumes.owned() : volumes.ciCaches();
+    for (String node : nodeVolumes) {
       ContainersDriver.OpResult made = volumes.ensureNode(driver, node, deadline);
       if (!made.ok()) {
         return failed(
@@ -260,6 +284,13 @@ final class LeaseLauncher {
         driver.run(container, name, labels, policy.lifecycle(), deadline);
     if (!started.started()) {
       return failed(leaseId, "docker could not run " + name + ": " + brief(started.detail()));
+    }
+    if (plane != null) {
+      Optional<String> joined = plane.connect(name);
+      if (joined.isPresent()) {
+        stopAndRemove(driver, name, deadline);
+        return failed(leaseId, brief(joined.get()));
+      }
     }
     LOG.infof("system-runner runs %s lease %s as %s", entry.slotType(), leaseId, name);
     return Outcome.of(LeaseState.RUNNING);

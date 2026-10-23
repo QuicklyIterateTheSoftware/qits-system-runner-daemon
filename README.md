@@ -3,7 +3,7 @@
 The **qits target runner**: a container you start on any Linux machine with docker so that machine
 becomes an **execution target** of qits-system — a host with typed slots that runs the **leases**
 qits-system allocates it: coding workspaces (qits-workspaces) and project front desks
-(qits-projects) today, CI steps once the CI feature lands. It registers once, holds one outbound
+(qits-projects) and CI runs (qits-ci), one lease per run. It registers once, holds one outbound
 connection to qits-system through the platform's public edge, and keeps every lease it is told
 about converged as a plain `docker run` container on this machine, under its slot type's fixed
 policy.
@@ -57,7 +57,8 @@ It reports an `inventory` at the greeting, around every convergence and whenever
 sees a change; probes the agent logins on the credential volume (`loginState`) after every
 connection, on request, then every 5 minutes while either is not PRESENT and hourly otherwise; and
 answers a `healthCheck` with the toolkit's `docker`, `nodeInventory` and `session` checks plus
-`login` (reports only — the server decides). It never asks for work: there is no `reserve`, the
+`login` (reports only — the server decides), `buildkit`, `network` and `idRange` (see "The build
+plane"). It never asks for work: there is no `reserve`, the
 server allocates.
 
 ### Slot policies
@@ -79,8 +80,11 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | restart | no | no | unless-stopped |
 | on ENDED | container removed | container removed, work volume kept | as WORKSPACE |
 
-**CI is declared and not enabled on this version**: every CI lease is `FAILED` with `ci slots are
-not enabled on this runner version`. WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
+A CI lease gets `BUILDKIT_HOST=tcp://qits-system-runner-buildkitd-<id8>:1234`, mounts the CI caches
+and nothing else — **never the credential volume, the agent caches or a work volume** — and is run
+on `bridge`, then joined to the build network with `docker network connect` (the driver's
+`ContainerSpec` carries one network); a connect that fails removes the container again and fails
+the lease. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
 from the policy; a spec env key the policy owns — `BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR` — is
 `FAILED` with a detail naming it. A WORKSPACE lease's work key is `ws-<rowId>`, a DESK lease's
 `desk-<deskId>`.
@@ -164,9 +168,34 @@ the running leases by their label.
 | the agent caches | `…_M2_VOLUME` / `…_PNPM_VOLUME`, else `qits-system-runner-m2-<id8>` / `qits-system-runner-pnpm-<id8>` | as the credential volume |
 | the login probe | container `qits-system-runner-login-probe-<id8>` (`--rm`) | `qits.system.runner=<id>` |
 
-The CI names (`qits-system-runner-ci-git|ci-m2|ci-pnpm-<id8>`, the build plane's
-`qits-system-runner-buildkitd-<id8>`, `qits-system-runner-build-<id8>`,
-`qits-system-runner-buildkitd-state-<id8>`) arrive with the CI feature.
+| the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
+| the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
+| the build network | bridge `qits-system-runner-build-<id8>` | `qits.system.runner=<id>` |
+| the builder's state | volume `qits-system-runner-buildkitd-state-<id8>` | `qits.system.runner.buildkitd=state` |
+
+Never `qits-buildkitd` or `qits-buildkitd-state`: those are qits-containers' platform builder and
+its volume, on the same docker on the platform host. No build-plane name is configurable.
+
+### The build plane
+
+`BuildPlane`, ported from qits-ci-runner-daemon. Started on the **first CI lease**, not at boot,
+and re-checked on every later one: the network and the state volume made, the builder run (its
+image pulled when absent) or started, or replaced when its **stamp** — a hash of the image, the
+rendered `buildkitd.toml`, the bootstrap and the state volume — moved; the state volume rides
+across. A container under the builder's name without the stamp label is somebody else's: the CI
+lease fails and the container is left alone. The toml bounds the worker (`max-parallelism`, GC at
+72h / 20 GiB) and carries one `[registry."host"]` table per host: the environment's
+`_BUILDKIT_HTTP_REGISTRIES` (`http = true`) and `_BUILDKIT_REGISTRY_MIRRORS`, with the `Ack`'s
+`registryMirrors` merged over the latter per source host. The builder runs through the runner's
+docker process seam, not the driver: `ContainerSpec` cannot say `--privileged`, and the driver's
+`runBuildkitd` always names `qits-buildkitd`. There is no host CA bundle mount (the CI runner's
+in-container behaviour). At decommission the builder, the network and the state volume are the
+domain's teardown items, removed in that order after the lease containers.
+
+Health: `buildkit` fails on a stale stamp, a stopped builder or a foreign container under its name,
+and is ok while no CI lease ever needed one; `network` is ok while missing only when no builder
+exists; `idRange` fails when this process's user namespace maps fewer than 4294967295 uids/gids
+(buildkit could not unpack every layer), ok when unknown. All three are read-only.
 
 ### Environment
 
@@ -188,8 +217,10 @@ The CI names (`qits-system-runner-ci-git|ci-m2|ci-pnpm-<id8>`, the build plane's
 | `QITS_SYSTEM_RUNNER_PRINT_VERSION` | `1`: print the version and exit 0, needing nothing else. | unset |
 | `QITS_SYSTEM_RUNNER_DECOMMISSION` | The decommission helper's mode (the toolkit's). | unset |
 
-The build plane's `_BUILDKIT_IMAGE`, `_BUILDKIT_MAX_PARALLELISM`, `_BUILDKIT_HTTP_REGISTRIES` and
-`_BUILDKIT_REGISTRY_MIRRORS` arrive with the CI feature.
+| `QITS_SYSTEM_RUNNER_BUILDKIT_IMAGE` | The builder's image. | `moby/buildkit:v0.33.0` |
+| `QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM` | Build operations the builder runs at once. | `1` |
+| `QITS_SYSTEM_RUNNER_BUILDKIT_HTTP_REGISTRIES` | Comma list of `host[:port]` the builder speaks plain HTTP to. | none |
+| `QITS_SYSTEM_RUNNER_BUILDKIT_REGISTRY_MIRRORS` | Comma list of `from=to` (`to` may carry a path); the `Ack`'s `registryMirrors` win per host. | none |
 
 ### Exit codes
 
@@ -225,7 +256,7 @@ pidsLimit, cpus, oomScoreAdj}}`; `workVolume` is the lease's **work key** (`ws-<
   on `qits-runner-protocol` only.
 - `system-runner/` — the binary: `Main`, `SystemRunnerIdentity`, `SystemRunnerDomain`,
   `SlotPolicy`, `LeaseLauncher`, `LeaseContainers`, `TargetVolumes`, `LegacyAdoption`,
-  `LoginProbe`, `TargetHealthChecks`, on `qits-runner-toolkit`.
+  `LoginProbe`, `BuildPlane`, `BuildkitSettings`, `TargetHealthChecks`, on `qits-runner-toolkit`.
 - `docker/` — the native musl compile and the image (`Dockerfile`), and the toolchain
   (`Dockerfile.musl-builder`, a copy of qits-workspaces-runner-daemon's).
 - `pacts/` — the toolkit's REST calls as this daemon's consumer pacts.

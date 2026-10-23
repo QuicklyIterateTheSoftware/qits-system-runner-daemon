@@ -12,6 +12,7 @@ import eu.wohlben.qits.runner.toolkit.RunnerDomain;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.RunnerSession;
 import eu.wohlben.qits.runner.toolkit.RunnerSettings;
+import eu.wohlben.qits.runner.toolkit.TeardownItem;
 import eu.wohlben.qits.runner.toolkit.health.HealthChecks;
 import eu.wohlben.qits.runner.toolkit.health.HealthContext;
 import eu.wohlben.qits.runner.toolkit.health.SessionFacts;
@@ -105,6 +106,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   private final LeaseContainers containers;
   private final LeaseLauncher launcher;
   private final LoginProbe loginProbe;
+
+  /** The build plane under the environment's settings alone: what every {@code Ack} merges over. */
+  private final BuildPlane basePlane;
+
+  /** The build plane with the latest {@code Ack}'s registry mirrors merged in. */
+  private volatile BuildPlane buildPlane;
+
   private final HealthChecks healthChecks;
   private final Timing timing;
   private final Clock clock;
@@ -168,7 +176,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /** The same, with the external node volumes {@link Main} parsed beside the settings. */
   SystemRunnerDomain(RunnerSettings settings, ExternalVolumes external) {
-    this(settings, external, Timing.defaults(), Clock.systemUTC());
+    this(settings, external, BuildkitSettings.DEFAULTS);
+  }
+
+  /** The same, with the external node volumes and the build plane's settings {@link Main} parsed. */
+  SystemRunnerDomain(
+      RunnerSettings settings, ExternalVolumes external, BuildkitSettings buildkit) {
+    this(settings, external, buildkit, Timing.defaults(), Clock.systemUTC(), Path.of("/proc/self"));
   }
 
   /** The same domain with external node volumes and the node's clocks a suite shrinks. */
@@ -183,13 +197,26 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       Timing timing,
       Clock clock,
       Path procSelf) {
+    this(settings, external, BuildkitSettings.DEFAULTS, timing, clock, procSelf);
+  }
+
+  SystemRunnerDomain(
+      RunnerSettings settings,
+      ExternalVolumes external,
+      BuildkitSettings buildkit,
+      Timing timing,
+      Clock clock,
+      Path procSelf) {
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
     this.slots = settings.slots();
     this.names = new TargetNames(identity, settings.runnerId());
     this.volumes = new TargetVolumes(identity, settings.runnerId(), external);
     this.containers = new LeaseContainers(identity, settings.runnerId(), docker);
-    this.launcher = new LeaseLauncher(identity, docker, names, volumes, containers);
+    this.basePlane = new BuildPlane(identity, settings.runnerId(), docker, buildkit);
+    this.buildPlane = basePlane;
+    this.launcher =
+        new LeaseLauncher(identity, docker, names, volumes, containers, () -> buildPlane);
     this.loginProbe =
         new LoginProbe(
             identity,
@@ -198,7 +225,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             volumes,
             clock);
     this.healthChecks = new HealthChecks(docker.deadline().multipliedBy(3));
-    TargetHealthChecks.registerDefaults(healthChecks, identity, targetId, () -> lastLogin);
+    TargetHealthChecks.registerDefaults(
+        healthChecks,
+        identity,
+        targetId,
+        () -> lastLogin,
+        () -> buildPlane,
+        () -> IdRange.read(procSelf));
     this.timing = timing;
     this.clock = clock;
     this.procSelf = procSelf;
@@ -222,8 +255,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /**
    * The base's three facts and this target's own: {@code slots} (the server's total), {@code
    * idRange}, {@code engineId} and {@code hostname} from {@code docker info} (asked until docker
-   * answers once), the credential volume every lease mounts, and {@code buildkit: false} until the
-   * CI feature.
+   * answers once), the credential volume every agent lease mounts, and {@code buildkit: true}: every
+   * CI lease gets the target's own builder ({@link BuildPlane}).
    */
   @Override
   public RunnerCapabilities capabilities(HostFacts host) {
@@ -243,7 +276,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
         engineId,
         engineHost,
         volumes.credential(),
-        false);
+        true);
   }
 
   private void readEngine() {
@@ -291,6 +324,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     } catch (IllegalArgumentException malformed) {
       LOG.warnf("system-runner ignored the Ack's own keys: %s", malformed.getMessage());
     }
+    // Merged over the environment's plane, never the previous merge: the host sends its whole map.
+    // A changed map changes the stamp, so the next CI lease replaces the builder.
+    buildPlane = basePlane.withRegistryMirrors(this.ack.registryMirrors());
     connectedSince = clock.instant();
     ackSlots = ack.slots();
     if (decommissioning) {
@@ -372,6 +408,21 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
         LOG.warnf("system-runner could not stop lease %s: %s", s.leaseId(), stopped.detail());
       }
     }
+  }
+
+  /**
+   * The build plane's builder, network and state volume, in that order — named, because none of
+   * them carries the owner label the helper removes by. The CI caches do carry it, and go with the
+   * labelled volumes.
+   */
+  @Override
+  public List<TeardownItem> teardown() {
+    return basePlane.names().teardown();
+  }
+
+  /** The build plane now: the environment's settings with the latest {@code Ack}'s mirrors. */
+  BuildPlane buildPlane() {
+    return buildPlane;
   }
 
   /** The old lease images, after the toolkit's own passes. */

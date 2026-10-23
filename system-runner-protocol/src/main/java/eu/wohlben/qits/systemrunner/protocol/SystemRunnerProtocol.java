@@ -46,7 +46,10 @@ public final class SystemRunnerProtocol {
   public static final RunnerVocabulary VOCABULARY =
       new RunnerVocabulary("heldLeases", "adoptedLeases");
 
-  /** A CI lease's {@code FAILED} detail on this runner version. */
+  /**
+   * A CI lease's {@code FAILED} detail on runner versions before the CI slot policy (qits-1543);
+   * kept so a server can still read an old target's answer.
+   */
   public static final String CI_NOT_ENABLED = "ci slots are not enabled on this runner version";
 
   /** An {@code adopt} naming something outside the retired runners' patterns. */

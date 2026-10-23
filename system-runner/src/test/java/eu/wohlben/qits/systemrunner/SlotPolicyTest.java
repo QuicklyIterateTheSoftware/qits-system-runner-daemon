@@ -14,7 +14,6 @@ import eu.wohlben.qits.systemrunner.protocol.LeaseSpec;
 import eu.wohlben.qits.systemrunner.protocol.Limits;
 import eu.wohlben.qits.systemrunner.protocol.SlotImages;
 import eu.wohlben.qits.systemrunner.protocol.SlotType;
-import eu.wohlben.qits.systemrunner.protocol.SystemRunnerProtocol;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,8 +23,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Every cell of the dossier's slot policy table, as {@link SlotPolicy} holds it and as the container
- * spec it builds carries it — and the refusals: CI on this runner version, an image outside its
- * type's prefix, no user or root, a policy-owned environment key (named in the detail), and a
+ * spec it builds carries it — and the refusals: an image outside its type's prefix, no user or root, a policy-owned environment key (named in the detail), and a
  * missing or misshapen work key.
  */
 class SlotPolicyTest {
@@ -35,6 +33,7 @@ class SlotPolicyTest {
       new SlotImages(REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent");
   private static final String WS_IMAGE = REGISTRY + "workspace:2026.1023.1";
   private static final String DESK_IMAGE = REGISTRY + "project-agent:2026.1023.1";
+  private static final String CI_IMAGE = REGISTRY + "ci-slot@sha256:abc";
   private static final String NAME = "qits-system-runner-lease-l1-1a2b3c4d";
   private static final SlotPolicy.Mounts MOUNTS =
       new SlotPolicy.Mounts(
@@ -42,13 +41,25 @@ class SlotPolicyTest {
           "qits_shared_dot_claude",
           "qits_shared_m2",
           "qits_shared_pnpm");
+  private static final SlotPolicy.Mounts ALL_MOUNTS =
+      new SlotPolicy.Mounts(
+          "qits-system-runner-work-ws-42-1a2b3c4d",
+          "qits_shared_dot_claude",
+          "qits_shared_m2",
+          "qits_shared_pnpm",
+          "qits-system-runner-ci-git-1a2b3c4d",
+          "qits-system-runner-ci-m2-1a2b3c4d",
+          "qits-system-runner-ci-pnpm-1a2b3c4d");
+  private static final SlotPolicy.Build BUILD =
+      new SlotPolicy.Build(
+          "qits-system-runner-build-1a2b3c4d", "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234");
 
   // --- the table ---------------------------------------------------------------------------------
 
   @Test
-  void ciIsDeclaredWithItsCellsAndIsNotEnabledOnThisVersion() {
+  void ciIsTheDossiersColumn() {
     SlotPolicy ci = SlotPolicy.of(SlotType.CI);
-    assertFalse(ci.enabled);
+    assertTrue(ci.enabled);
     assertFalse(ci.credentialHome, "/claude-home: never");
     assertFalse(ci.workVolume, "/workspace: the container filesystem");
     assertEquals(List.of(Cache.CI_GIT, Cache.CI_M2, Cache.CI_PNPM), ci.caches);
@@ -61,11 +72,89 @@ class SlotPolicyTest {
     assertTrue(ci.noNewPrivileges);
     assertTrue(ci.init);
     assertFalse(ci.restartUnlessStopped);
-    assertFalse(ci.lifecycle().restartsUnlessStopped());
+    assertFalse(ci.lifecycle().restartsUnlessStopped(), "restart: no");
+    assertFalse(ci.agentVolumes(), "no external node volume is ever asked after for CI");
     assertNull(ci.workKeyPrefix);
+    assertEquals(List.of("bridge", BUILD.network()), ci.networks(BUILD));
+
+    ContainerSpec c = ci.containerSpec(NAME, spec(CI_IMAGE, env(), "1001"), ALL_MOUNTS, BUILD);
+    assertEquals(CI_IMAGE, c.image());
+    assertEquals(NAME, c.explicitName());
+    assertEquals("1001", c.user());
+    assertTrue(c.init(), "--init");
+    assertEquals("bridge", c.network(), "the run's network; the build network is joined after");
+    assertTrue(c.aliases().isEmpty());
+    assertTrue(c.addHosts().isEmpty());
+    assertFalse(c.hostDockerSocket(), "never the docker socket");
+    assertTrue(c.entrypoint().isEmpty() && c.args().isEmpty(), "the image's own command");
+    assertTrue(c.volumeMounts().isEmpty(), "/workspace is the container filesystem");
+    assertEquals(
+        List.of(
+            new ContainerSpec.SharedMount("qits-system-runner-ci-git-1a2b3c4d", "/cache/git"),
+            new ContainerSpec.SharedMount("qits-system-runner-ci-m2-1a2b3c4d", "/caches/m2"),
+            new ContainerSpec.SharedMount("qits-system-runner-ci-pnpm-1a2b3c4d", "/caches/pnpm")),
+        c.sharedMounts());
+    Map<String, String> expected = new LinkedHashMap<>(env());
+    expected.put("BUILDKIT_HOST", "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234");
+    assertEquals(expected, c.env());
+    assertFalse(c.env().containsKey("CLAUDE_CONFIG_DIR"), "no /claude-home, no config dir");
+    assertFalse(c.env().containsKey("HOME"), "the image's own");
+    assertEquals(
+        new ContainerSpec.SecurityPosture(true, true, "4g", "8g", 512L, "2", 800), c.security(),
+        "cap-drop ALL and no-new-privileges, with the spec's limits");
+    assertEquals(ContainerSpec.PullPolicy.MISSING, c.pullPolicy());
+  }
+
+  @Test
+  void aCiLeaseNeverMountsTheCredentialVolumeTheAgentCachesOrAWorkVolume() {
+    for (SlotPolicy.Mounts mounts :
+        List.of(
+            ALL_MOUNTS,
+            new SlotPolicy.Mounts(
+                "qits-system-runner-work-ws-42-1a2b3c4d",
+                "qits-system-runner-dot-claude-1a2b3c4d",
+                "qits-system-runner-m2-1a2b3c4d",
+                "qits-system-runner-pnpm-1a2b3c4d",
+                "qits-system-runner-ci-git-1a2b3c4d",
+                "qits-system-runner-ci-m2-1a2b3c4d",
+                "qits-system-runner-ci-pnpm-1a2b3c4d"))) {
+      ContainerSpec c =
+          SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, Map.of(), "1001"), mounts, BUILD);
+      List<String> mounted = new java.util.ArrayList<>();
+      c.volumeMounts().forEach(m -> mounted.add(m.volumeName()));
+      c.sharedMounts().forEach(m -> mounted.add(m.sharedName()));
+      for (String never :
+          List.of(mounts.workVolume(), mounts.credential(), mounts.m2(), mounts.pnpm())) {
+        assertFalse(mounted.contains(never), never + " in " + mounted);
+      }
+      assertEquals(List.of(mounts.ciGit(), mounts.ciM2(), mounts.ciPnpm()), mounted);
+      List<String> targets = new java.util.ArrayList<>();
+      c.volumeMounts().forEach(m -> targets.add(m.containerPath()));
+      c.sharedMounts().forEach(m -> targets.add(m.containerPath()));
+      assertFalse(targets.contains("/claude-home"));
+      assertFalse(targets.contains("/workspace"));
+    }
+  }
+
+  @Test
+  void aWorkspaceOrDeskLeaseNeverMountsACiCacheOrGetsBuildkitHost() {
+    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
+      ContainerSpec c =
+          SlotPolicy.of(type).containerSpec(NAME, spec(imageOf(type), env(), "1000"), ALL_MOUNTS, BUILD);
+      for (ContainerSpec.SharedMount m : c.sharedMounts()) {
+        assertFalse(m.sharedName().contains("-ci-"), type + " " + m);
+      }
+      assertFalse(c.env().containsKey("BUILDKIT_HOST"), type.name());
+      assertEquals(List.of("bridge"), SlotPolicy.of(type).networks(BUILD), type.name());
+    }
+  }
+
+  @Test
+  void aCiLeaseWithoutItsBuildPlaneIsNeverSpecified() {
     assertThrows(
         IllegalStateException.class,
-        () -> ci.containerSpec(NAME, spec(REGISTRY + "ci-step:1", Map.of(), "1001"), MOUNTS));
+        () -> SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, Map.of(), "1001"), ALL_MOUNTS));
+    assertThrows(IllegalStateException.class, () -> SlotPolicy.CI.networks(null));
   }
 
   @Test
@@ -163,18 +252,26 @@ class SlotPolicyTest {
   // --- the refusals ------------------------------------------------------------------------------
 
   @Test
-  void aCiLeaseFailsWithTheDossiersDetail() {
+  void aCiLeaseOfTheCiImageAndANonRootUserPasses() {
     assertEquals(
-        Optional.of("ci slots are not enabled on this runner version"),
-        SlotPolicy.CI.refusal(
-            entry(SlotType.CI, spec(REGISTRY + "ci-step:1", Map.of(), "1001"), null), IMAGES));
-    assertEquals(SystemRunnerProtocol.CI_NOT_ENABLED, SlotPolicy.CI.refusal(
-        entry(SlotType.CI, spec(REGISTRY + "ci-step:1", Map.of(), "1001"), null), IMAGES).get());
+        Optional.empty(),
+        SlotPolicy.CI.refusal(entry(SlotType.CI, spec(CI_IMAGE, env(), "1001"), null), IMAGES),
+        "no work key: CI has no work volume");
+    assertTrue(
+        SlotPolicy.CI
+            .refusal(entry(SlotType.CI, spec(WS_IMAGE, env(), "1001"), null), IMAGES)
+            .orElseThrow()
+            .contains("is not a CI image"));
+    assertTrue(
+        SlotPolicy.CI
+            .refusal(entry(SlotType.CI, spec(CI_IMAGE, env(), "0"), null), IMAGES)
+            .orElseThrow()
+            .contains("may not run as user 0"));
   }
 
   @Test
   void aSpecEnvKeyThePolicyOwnsIsRefusedNamingIt() {
-    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
+    for (SlotType type : List.of(SlotType.CI, SlotType.WORKSPACE, SlotType.DESK)) {
       for (String key : Set.of("BUILDKIT_HOST", "HOME", "CLAUDE_CONFIG_DIR")) {
         Map<String, String> env = new LinkedHashMap<>(env());
         env.put(key, "/somewhere");
@@ -274,10 +371,18 @@ class SlotPolicyTest {
   }
 
   private static String imageOf(SlotType type) {
-    return type == SlotType.DESK ? DESK_IMAGE : WS_IMAGE;
+    return switch (type) {
+      case CI -> CI_IMAGE;
+      case WORKSPACE -> WS_IMAGE;
+      case DESK -> DESK_IMAGE;
+    };
   }
 
   private static String key(SlotType type) {
-    return type == SlotType.DESK ? "desk-7" : "ws-42";
+    return switch (type) {
+      case CI -> null;
+      case WORKSPACE -> "ws-42";
+      case DESK -> "desk-7";
+    };
   }
 }

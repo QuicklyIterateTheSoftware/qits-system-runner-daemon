@@ -20,7 +20,7 @@ import java.util.Set;
  * tenant's volume. {@code SlotPolicyTest} asserts every cell.
  *
  * <pre>
- *                     CI (declared, not enabled)      WORKSPACE                DESK
+ *                     CI                              WORKSPACE                DESK
  *   image prefix      Ack.slotImages.ci               Ack.slotImages.workspace Ack.slotImages.desk
  *   user              spec, never 0                   spec, never 0            spec, never 0
  *   /claude-home      never                           credential volume, rw    credential volume, rw
@@ -42,7 +42,7 @@ import java.util.Set;
 enum SlotPolicy {
   CI(
       SlotType.CI,
-      false,
+      true,
       false,
       false,
       List.of(Cache.CI_GIT, Cache.CI_M2, Cache.CI_PNPM),
@@ -119,8 +119,29 @@ enum SlotPolicy {
     }
   }
 
-  /** The volumes a lease of a type that has them mounts, as the runner named them. */
-  record Mounts(String workVolume, String credential, String m2, String pnpm) {}
+  /**
+   * The volumes a lease of a type that has them mounts, as the runner named them: the work volume,
+   * the credential volume and the agent caches for WORKSPACE and DESK, the CI caches for CI. A type
+   * never mounts the others' — CI never the credential volume, the agent caches or a work volume,
+   * and WORKSPACE and DESK never a CI cache — whatever this record carries.
+   */
+  record Mounts(
+      String workVolume,
+      String credential,
+      String m2,
+      String pnpm,
+      String ciGit,
+      String ciM2,
+      String ciPnpm) {
+
+    /** The agent types' volumes alone. */
+    Mounts(String workVolume, String credential, String m2, String pnpm) {
+      this(workVolume, credential, m2, pnpm, null, null, null);
+    }
+  }
+
+  /** The build plane a CI lease joins: its network and the {@code BUILDKIT_HOST} it dials. */
+  record Build(String network, String buildkitHost) {}
 
   final SlotType type;
   final boolean enabled;
@@ -219,15 +240,26 @@ enum SlotPolicy {
     return Optional.empty();
   }
 
+  /** {@link #containerSpec(String, LeaseSpec, Mounts, Build)} for a type without a build plane. */
+  ContainerSpec containerSpec(String name, LeaseSpec spec, Mounts mounts) {
+    return containerSpec(name, spec, mounts, null);
+  }
+
   /**
    * The driver's spec of a lease container under this policy. Only for an entry {@link #refusal}
-   * passed; CI's build plane is the CI feature's, so CI has no container yet.
+   * passed. The spec's network is {@code bridge} for every type; a CI lease's second network, the
+   * build network, is {@link #networks}' and joined after the run ({@link BuildPlane#connect}),
+   * because the driver's {@code ContainerSpec} carries one network.
    *
-   * @throws IllegalStateException for a policy this runner version does not run
+   * @throws IllegalStateException for a policy this runner version does not run, or a CI lease
+   *     without its build plane
    */
-  ContainerSpec containerSpec(String name, LeaseSpec spec, Mounts mounts) {
+  ContainerSpec containerSpec(String name, LeaseSpec spec, Mounts mounts, Build build) {
     if (!enabled) {
       throw new IllegalStateException(SystemRunnerProtocol.CI_NOT_ENABLED);
+    }
+    if (injectsBuildkitHost && (build == null || build.buildkitHost() == null)) {
+      throw new IllegalStateException("a " + type + " lease needs its build plane");
     }
     ContainerSpec.Builder b =
         ContainerSpec.builder(spec.image())
@@ -249,6 +281,9 @@ enum SlotPolicy {
     if (credentialHome) {
       b.env(CLAUDE_CONFIG_DIR, CLAUDE_CONFIG_DIR_VALUE);
     }
+    if (injectsBuildkitHost) {
+      b.env(BUILDKIT_HOST, build.buildkitHost());
+    }
     if (workVolume) {
       b.mount(mounts.workVolume(), WORKSPACE_TARGET);
     }
@@ -261,11 +296,35 @@ enum SlotPolicy {
           switch (cache) {
             case M2 -> mounts.m2();
             case PNPM -> mounts.pnpm();
-            default -> throw new IllegalStateException(cache + " is CI's");
+            case CI_GIT -> mounts.ciGit();
+            case CI_M2 -> mounts.ciM2();
+            case CI_PNPM -> mounts.ciPnpm();
           },
           cache.target);
     }
     return b.build();
+  }
+
+  /**
+   * Whether a lease of this type mounts the credential volume or an agent cache — the node volumes
+   * an operator may name externally. CI mounts none of them.
+   */
+  boolean agentVolumes() {
+    return credentialHome || caches.contains(Cache.M2) || caches.contains(Cache.PNPM);
+  }
+
+  /**
+   * The networks a lease of this type is on: {@code bridge} — the spec's, at {@code docker run} —
+   * and for CI the build network after it.
+   */
+  List<String> networks(Build build) {
+    if (!buildNetwork) {
+      return List.of(NETWORK);
+    }
+    if (build == null || build.network() == null) {
+      throw new IllegalStateException("a " + type + " lease needs its build plane");
+    }
+    return List.of(NETWORK, build.network());
   }
 
   /** {@code 0}, {@code root}, or either with a group: the one user no lease may be. */
