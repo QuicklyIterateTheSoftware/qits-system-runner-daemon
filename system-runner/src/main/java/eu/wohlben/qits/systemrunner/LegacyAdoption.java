@@ -14,7 +14,8 @@ import java.util.regex.Pattern;
  *
  * <ul>
  *   <li>WORKSPACE: qits-workspaces-runner-daemon's {@code
- *       qits-workspaces-runner-ws-<36>-<id8>}, container and volume alike;
+ *       qits-workspaces-runner-ws-<rowId>-<id8>}, keyed on the workspace ROW id (a plain decimal
+ *       long, never a uuid), container and volume alike;
  *   <li>DESK: qits-projects-desk-runner-daemon's {@code qits-projects-desk-runner-desk-<36>-<id8>}.
  * </ul>
  *
@@ -27,7 +28,7 @@ final class LegacyAdoption {
 
   /** qits-workspaces-runner-daemon's workspace container and volume. */
   static final Pattern WORKSPACE =
-      Pattern.compile("^qits-workspaces-runner-ws-[0-9a-f-]{36}-[0-9a-f]{8}$");
+      Pattern.compile("^qits-workspaces-runner-ws-[0-9]+-[0-9a-f]{8}$");
 
   /** qits-projects-desk-runner-daemon's desk container and volume. */
   static final Pattern DESK =

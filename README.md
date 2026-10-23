@@ -95,7 +95,8 @@ A lease may carry `adopt{container, volume}`: the retired runner's container and
 takes over. Only names matching the retired runners' own patterns are accepted
 (`LegacyAdoption`):
 
-- WORKSPACE: `^qits-workspaces-runner-ws-[0-9a-f-]{36}-[0-9a-f]{8}$`
+- WORKSPACE: `^qits-workspaces-runner-ws-[0-9]+-[0-9a-f]{8}$` (the workspace row id, a plain
+  decimal `long`, never a uuid)
 - DESK: `^qits-projects-desk-runner-desk-[0-9a-f-]{36}-[0-9a-f]{8}$`
 
 Before the lease starts, the runner stops and removes that container (if present) and mounts that

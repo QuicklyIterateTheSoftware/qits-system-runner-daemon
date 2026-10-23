@@ -18,17 +18,21 @@ import org.junit.jupiter.api.Test;
  * The two patterns exactly, and what they let a lease take over: a retired workspaces runner's
  * workspace for a WORKSPACE lease, a retired desk runner's desk for a DESK lease, and nothing else
  * — not the other kind's, not this runner's own, not a person's container, not a CI lease's.
+ *
+ * <p>The workspace row id is a plain decimal {@code long} (qits-workspaces-runner-daemon's {@code
+ * WorkspaceNames}), never a uuid — a uuid in that slot is refused, unlike the desk slot, which is
+ * keyed on the project id and stays a uuid (qits-projects-desk-runner-daemon's {@code DeskNames}).
  */
 class LegacyAdoptionTest {
 
   private static final String UUID = "dc112edc-4360-4a3b-858b-e75d372e708f";
-  private static final String OLD_WS = "qits-workspaces-runner-ws-" + UUID + "-1a2b3c4d";
+  private static final String OLD_WS = "qits-workspaces-runner-ws-17-8d45fd1d";
   private static final String OLD_DESK = "qits-projects-desk-runner-desk-" + UUID + "-1a2b3c4d";
 
   @Test
   void thePatternsAreTheDossiersExactly() {
     assertEquals(
-        "^qits-workspaces-runner-ws-[0-9a-f-]{36}-[0-9a-f]{8}$", LegacyAdoption.WORKSPACE.pattern());
+        "^qits-workspaces-runner-ws-[0-9]+-[0-9a-f]{8}$", LegacyAdoption.WORKSPACE.pattern());
     assertEquals(
         "^qits-projects-desk-runner-desk-[0-9a-f-]{36}-[0-9a-f]{8}$", LegacyAdoption.DESK.pattern());
   }
@@ -62,10 +66,11 @@ class LegacyAdoptionTest {
             "qits-system-runner-work-ws-42-1a2b3c4d",
             "qits-workspaces-runner-dot-claude-1a2b3c4d",
             "qits-workspaces-runner-state-1a2b3c4d",
-            "qits-workspaces-runner-ws-42-1a2b3c4d",
-            "qits-workspaces-runner-ws-" + UUID + "-1a2b3c4d-x",
-            "qits-workspaces-runner-ws-" + UUID + "-1A2B3C4D",
-            "x-qits-workspaces-runner-ws-" + UUID + "-1a2b3c4d",
+            "qits-workspaces-runner-ws-" + UUID + "-1a2b3c4d",
+            "qits-workspaces-runner-ws-17-8d45fd1d-x",
+            "qits-workspaces-runner-ws-17-8D45FD1D",
+            "qits-workspaces-runner-ws--8d45fd1d",
+            "x-qits-workspaces-runner-ws-17-8d45fd1d",
             "qits-projects-desk-runner-dot-claude-1a2b3c4d",
             "qits-projects-desk-runner-desk-" + UUID.toUpperCase() + "-1a2b3c4d",
             "postgres",
