@@ -131,7 +131,7 @@ class SystemRunnerCodecTest {
   void theHelloCapabilitiesAndTheAckExtensionsRoundTripThroughTheBaseCodec() {
     SystemRunnerCapabilities caps =
         new SystemRunnerCapabilities(
-            true, "amd64", "linux", 4, 65536L, "ENGINE:ID", "node-1", "qits_shared_dot_claude", false);
+            true, "amd64", "linux", 4, "ENGINE:ID", "node-1", "qits_shared_dot_claude", false);
     Hello hello =
         new Hello(
             SystemRunnerBinary.VERSION,
@@ -153,7 +153,6 @@ class SystemRunnerCodecTest {
             "os",
             "labels",
             "slots",
-            "idRange",
             "engineId",
             "hostname",
             "credentialVolume",

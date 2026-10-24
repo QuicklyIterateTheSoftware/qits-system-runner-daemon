@@ -40,7 +40,6 @@ import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCapabilities;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCodec;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerMessage;
 import io.vertx.core.Vertx;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -120,7 +119,6 @@ class EstateReconcileTest {
 
   @TempDir Path state;
   @TempDir Path dockerDir;
-  @TempDir Path procSelf;
 
   @BeforeEach
   void setUp() throws Exception {
@@ -129,8 +127,6 @@ class EstateReconcileTest {
     docker.answerFor("run", "status", 0, "{\"loggedIn\": true}\n", "");
     docker.answerFor("run", LoginProbe.KIMI_CHECK, 0, "", "");
     docker.answer("info", 0, "ENGINE-ID-1|node-1\n", "");
-    Files.writeString(procSelf.resolve("uid_map"), "0 100000 65536\n");
-    Files.writeString(procSelf.resolve("gid_map"), "0 100000 65536\n");
   }
 
   @AfterEach
@@ -159,7 +155,7 @@ class EstateReconcileTest {
     assertEquals(1, hello.capabilityVersion());
     assertEquals(
         new SystemRunnerCapabilities(
-            true, "amd64", "linux", 2, 65536L, "ENGINE-ID-1", "node-1", DOT_CLAUDE, true),
+            true, "amd64", "linux", 2, "ENGINE-ID-1", "node-1", DOT_CLAUDE, true),
         SystemRunnerCapabilities.of(hello.capabilities()));
     assertFalse(CODEC.encode(hello).containsKey("heldLeases"), "absent on a first connection");
   }
@@ -572,10 +568,41 @@ class EstateReconcileTest {
     HealthChecked checked = host.await(HealthChecked.class);
     assertEquals("req-1", checked.requestId());
     assertEquals(
-        List.of("docker", "nodeInventory", "login", "session", "buildkit", "network", "idRange"),
+        List.of("docker", "nodeInventory", "login", "session", "buildkit", "network"),
         checked.checks().stream().map(c -> c.name()).toList());
     assertTrue(checked.checks().get(2).ok(), "login reports, never fails");
     assertEquals(DOT_CLAUDE, checked.checks().get(2).data().get("volume"));
+  }
+
+  /**
+   * qits-1576: a host whose user namespace maps fewer uids/gids than the full 32-bit space is
+   * healthy. There is no {@code idRange} check to fail it, and the hello carries no {@code idRange}
+   * capability to feed one.
+   */
+  @Test
+  void aNarrowUserNamespaceNeverFailsTheHealthCheckBecauseThereIsNoIdRangeCheck() throws Exception {
+    estateThenAck();
+    start();
+
+    Hello hello = host.await(Hello.class);
+    @SuppressWarnings("unchecked")
+    Map<String, Object> capabilities =
+        (Map<String, Object>) CODEC.encode(hello).get("capabilities");
+    assertFalse(capabilities.containsKey("idRange"), capabilities.toString());
+
+    host.send(new HealthCheck("req-1576"));
+    HealthChecked checked = host.await(HealthChecked.class);
+    assertEquals("req-1576", checked.requestId());
+    assertTrue(
+        checked.checks().stream().noneMatch(c -> c.name().equals("idRange")),
+        checked.checks().toString());
+    // docker and nodeInventory are the toolkit's and read a docker the fake does not script; every
+    // check this runner registers itself is ok, so nothing the domain adds can fail a narrow host.
+    assertTrue(
+        checked.checks().stream()
+            .filter(c -> List.of("login", "session", "buildkit", "network").contains(c.name()))
+            .allMatch(c -> c.ok()),
+        checked.checks().toString());
   }
 
   @Test
@@ -615,8 +642,7 @@ class EstateReconcileTest {
             ExternalVolumes.parse(IDENTITY, env::get),
             new SystemRunnerDomain.Timing(
                 Duration.ofMillis(200), Duration.ofSeconds(60), Duration.ofSeconds(60)),
-            Clock.systemUTC(),
-            procSelf);
+            Clock.systemUTC());
     runner =
         new RunnerRuntime<>(
             vertx,

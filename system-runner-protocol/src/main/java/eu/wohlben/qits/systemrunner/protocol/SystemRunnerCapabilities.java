@@ -9,14 +9,13 @@ import java.util.Map;
 /**
  * What a target says about itself in its {@code Hello}'s {@code capabilities} (and its
  * registration): the base's {@code docker}, {@code arch} and {@code os}, and this runner's
- * extension keys {@code slots}, {@code idRange}, {@code engineId}, {@code hostname}, {@code
- * credentialVolume} and {@code buildkit}, in that order after the base's.
+ * extension keys {@code slots}, {@code engineId}, {@code hostname}, {@code credentialVolume} and
+ * {@code buildkit}, in that order after the base's.
  *
  * @param docker whether the docker socket is here
  * @param arch {@code amd64}, {@code arm64}, …
  * @param os {@code linux}
  * @param slots {@code QITS_SYSTEM_RUNNER_SLOTS}: <b>the server takes it as the target's total</b>
- * @param idRange how many uids/gids this process's user namespace maps, or null when unreadable
  * @param engineId {@code docker info --format '{{.ID}}'}, or null when docker did not say: what
  *     legacy adoption matches an old runner's node by
  * @param hostname the docker engine's host name ({@code docker info --format '{{.Name}}'}), or
@@ -29,7 +28,6 @@ public record SystemRunnerCapabilities(
     String arch,
     String os,
     int slots,
-    Long idRange,
     String engineId,
     String hostname,
     String credentialVolume,
@@ -39,7 +37,6 @@ public record SystemRunnerCapabilities(
   public RunnerCapabilities toWire() {
     Map<String, Object> ext = new LinkedHashMap<>();
     ext.put(Field.SLOTS, slots);
-    ext.put(Field.ID_RANGE, idRange);
     ext.put(Field.ENGINE_ID, engineId);
     ext.put(Field.HOSTNAME, hostname);
     ext.put(Field.CREDENTIAL_VOLUME, credentialVolume);
@@ -50,13 +47,11 @@ public record SystemRunnerCapabilities(
   /** The values out of a decoded {@code capabilities}; an absent extension is null, 0 or false. */
   public static SystemRunnerCapabilities of(RunnerCapabilities capabilities) {
     Map<String, Object> ext = capabilities.extensions();
-    Number idRange = WireMaps.number(ext, Field.ID_RANGE);
     return new SystemRunnerCapabilities(
         capabilities.docker(),
         capabilities.arch(),
         capabilities.os(),
         WireMaps.intVal(ext, Field.SLOTS),
-        idRange == null ? null : idRange.longValue(),
         WireMaps.str(ext, Field.ENGINE_ID),
         WireMaps.str(ext, Field.HOSTNAME),
         WireMaps.str(ext, Field.CREDENTIAL_VOLUME),

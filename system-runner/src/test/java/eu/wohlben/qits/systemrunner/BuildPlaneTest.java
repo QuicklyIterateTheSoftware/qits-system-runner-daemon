@@ -26,7 +26,7 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * The build plane against {@link FakeDocker}: started lazily with its network and state volume,
  * left alone when it is somebody else's, replaced when its stamp moved; the toml and the mirrors'
- * merge; the {@code buildkit}, {@code network} and {@code idRange} checks; and its settings.
+ * merge; the {@code buildkit} and {@code network} checks; and its settings.
  */
 @EnabledOnOs(OS.LINUX)
 class BuildPlaneTest {
@@ -212,16 +212,6 @@ class BuildPlaneTest {
     assertFalse(TargetHealthChecks.network(plane).ok());
     docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
     assertTrue(TargetHealthChecks.network(plane).ok());
-  }
-
-  @Test
-  void aNarrowIdRangeFailsAndAnUnknownOneIsOk() {
-    RunnerHealthCheck.Result narrow = TargetHealthChecks.idRange(65536L);
-    assertFalse(narrow.ok());
-    assertTrue(narrow.detail().contains("/etc/subuid"), narrow.detail());
-    assertEquals(true, narrow.data().get("narrow"));
-    assertTrue(TargetHealthChecks.idRange(TargetHealthChecks.FULL_ID_RANGE).ok());
-    assertTrue(TargetHealthChecks.idRange(null).ok());
   }
 
   // --- settings ----------------------------------------------------------------------------------

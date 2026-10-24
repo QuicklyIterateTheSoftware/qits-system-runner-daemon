@@ -35,19 +35,12 @@ import java.util.function.Supplier;
  *   <li>{@code network} — the build network exists; {@code data: {network, presence, driver,
  *       builder}}. Missing is ok while no builder was ever created, and fails once one exists: a
  *       builder whose network went is one no CI lease can reach.
- *   <li>{@code idRange} — this process's user namespace maps the full uid/gid space, so buildkit can
- *       unpack any image layer (qits-556); {@code data: {idRange, fullIdRange, narrow}}. Unknown is
- *       ok.
  * </ol>
  *
- * <p>The last three are qits-ci-runner-daemon's {@code BuildkitCheck}, {@code NetworkCheck} and
- * {@code IdRangeCheck}, as closures over what they read rather than beans looked up in the context:
- * nothing here is CDI.
+ * <p>The last two are qits-ci-runner-daemon's {@code BuildkitCheck} and {@code NetworkCheck}, as
+ * closures over what they read rather than beans looked up in the context: nothing here is CDI.
  */
 final class TargetHealthChecks {
-
-  /** How many uids and gids a host outside a user namespace maps: the whole 32-bit space. */
-  static final long FULL_ID_RANGE = 4294967295L;
 
   private TargetHealthChecks() {}
 
@@ -56,8 +49,7 @@ final class TargetHealthChecks {
       RunnerIdentity identity,
       String targetId,
       Supplier<LoginState> lastLogin,
-      Supplier<BuildPlane> buildPlane,
-      Supplier<Long> idRange) {
+      Supplier<BuildPlane> buildPlane) {
     checks
         .register(DefaultHealthChecks.docker())
         .register(
@@ -65,8 +57,7 @@ final class TargetHealthChecks {
         .register(RunnerHealthCheck.named("login", null, ctx -> login(lastLogin.get())))
         .register(DefaultHealthChecks.session())
         .register(RunnerHealthCheck.named("buildkit", null, ctx -> buildkit(buildPlane.get())))
-        .register(RunnerHealthCheck.named("network", null, ctx -> network(buildPlane.get())))
-        .register(RunnerHealthCheck.named("idRange", null, ctx -> idRange(idRange.get())));
+        .register(RunnerHealthCheck.named("network", null, ctx -> network(buildPlane.get())));
   }
 
   static RunnerHealthCheck.Result buildkit(BuildPlane plane) {
@@ -146,34 +137,6 @@ final class TargetHealthChecks {
                 data);
       }
     };
-  }
-
-  static RunnerHealthCheck.Result idRange(Long range) {
-    boolean narrow = range != null && range < FULL_ID_RANGE;
-    Map<String, Object> data = new LinkedHashMap<>();
-    data.put("idRange", range);
-    data.put("fullIdRange", FULL_ID_RANGE);
-    data.put("narrow", narrow);
-    if (range == null) {
-      return RunnerHealthCheck.Result.ok(
-          "unknown: this process's uid/gid maps could not be read", data);
-    }
-    if (narrow) {
-      return RunnerHealthCheck.Result.failed(narrowWarning(range), data);
-    }
-    return RunnerHealthCheck.Result.ok("maps " + range + " uids/gids", data);
-  }
-
-  /** qits-ci-runner-daemon's {@code IdRange.narrowWarning}, with this runner's name and its CI. */
-  static String narrowWarning(long range) {
-    return "system-runner's user namespace maps only "
-        + range
-        + " uids/gids (a full host maps "
-        + FULL_ID_RANGE
-        + "), so buildkit cannot unpack an image layer that owns a file above that id. Widen the"
-        + " range on this host: for rootless docker, the rootless user's entries in /etc/subuid and"
-        + " /etc/subgid (then restart its dockerd); for an unprivileged LXC, the container's"
-        + " lxc.idmap on the LXC host.";
   }
 
   static RunnerHealthCheck.Result login(LoginState last) {
