@@ -57,8 +57,7 @@ It reports an `inventory` at the greeting, around every convergence and whenever
 sees a change; probes the agent logins on the credential volume (`loginState`) after every
 connection, on request, then every 5 minutes while either is not PRESENT and hourly otherwise; and
 answers a `healthCheck` with the toolkit's `docker`, `nodeInventory` and `session` checks plus
-`login` (reports only — the server decides), `buildkit`, `network` and `idRange` (see "The build
-plane"). It never asks for work: there is no `reserve`, the
+`login` (reports only — the server decides), `buildkit` and `network` (see "The build plane"). It never asks for work: there is no `reserve`, the
 server allocates.
 
 ### Slot policies
@@ -195,8 +194,8 @@ domain's teardown items, removed in that order after the lease containers.
 
 Health: `buildkit` fails on a stale stamp, a stopped builder or a foreign container under its name,
 and is ok while no CI lease ever needed one; `network` is ok while missing only when no builder
-exists; `idRange` fails when this process's user namespace maps fewer than 4294967295 uids/gids
-(buildkit could not unpack every layer), ok when unknown. All three are read-only.
+exists. Both are read-only. There is no uid/gid range check: a host whose user namespace maps
+fewer than the full 32-bit id space is not unhealthy for it (qits-1576).
 
 ### Environment
 
@@ -236,7 +235,7 @@ The lifecycle frames are qits-runner-protocol's, byte-identical to every runner'
 frames are this repository's (`SystemRunnerCodec`).
 
     runner → hello{runnerVersion, capabilityVersion, slots, capabilities{docker, arch, os, labels,
-             slots, idRange, engineId, hostname, credentialVolume, buildkit}, heldLeases}
+             slots, engineId, hostname, credentialVolume, buildkit}, heldLeases}
     ack{capabilityVersion, slots, slotImages{ci, workspace, desk}, probeImage, registryMirrors, adoptedLeases}
     estate{leases:[{leaseId, slotType, desired, spec, specHash, workVolume, adopt{container, volume}}], purges:[name]}
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail}], volumes:[name]}

@@ -31,7 +31,6 @@ import eu.wohlben.qits.systemrunner.protocol.SystemRunnerAck;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCapabilities;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCodec;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerMessage;
-import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -116,7 +115,6 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   private final HealthChecks healthChecks;
   private final Timing timing;
   private final Clock clock;
-  private final Path procSelf;
 
   /** The look tick and the login schedule; daemon threads, so they never hold the process. */
   private final ScheduledExecutorService timer;
@@ -179,25 +177,17 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this(settings, external, BuildkitSettings.DEFAULTS);
   }
 
-  /** The same, with the external node volumes and the build plane's settings {@link Main} parsed. */
-  SystemRunnerDomain(
-      RunnerSettings settings, ExternalVolumes external, BuildkitSettings buildkit) {
-    this(settings, external, buildkit, Timing.defaults(), Clock.systemUTC(), Path.of("/proc/self"));
+  /**
+   * The same, with the external node volumes and the build plane's settings {@link Main} parsed.
+   */
+  SystemRunnerDomain(RunnerSettings settings, ExternalVolumes external, BuildkitSettings buildkit) {
+    this(settings, external, buildkit, Timing.defaults(), Clock.systemUTC());
   }
 
   /** The same domain with external node volumes and the node's clocks a suite shrinks. */
   SystemRunnerDomain(
       RunnerSettings settings, ExternalVolumes external, Timing timing, Clock clock) {
-    this(settings, external, timing, clock, Path.of("/proc/self"));
-  }
-
-  SystemRunnerDomain(
-      RunnerSettings settings,
-      ExternalVolumes external,
-      Timing timing,
-      Clock clock,
-      Path procSelf) {
-    this(settings, external, BuildkitSettings.DEFAULTS, timing, clock, procSelf);
+    this(settings, external, BuildkitSettings.DEFAULTS, timing, clock);
   }
 
   SystemRunnerDomain(
@@ -205,8 +195,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       ExternalVolumes external,
       BuildkitSettings buildkit,
       Timing timing,
-      Clock clock,
-      Path procSelf) {
+      Clock clock) {
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
     this.slots = settings.slots();
@@ -226,15 +215,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             clock);
     this.healthChecks = new HealthChecks(docker.deadline().multipliedBy(3));
     TargetHealthChecks.registerDefaults(
-        healthChecks,
-        identity,
-        targetId,
-        () -> lastLogin,
-        () -> buildPlane,
-        () -> IdRange.read(procSelf));
+        healthChecks, identity, targetId, () -> lastLogin, () -> buildPlane);
     this.timing = timing;
     this.clock = clock;
-    this.procSelf = procSelf;
     ScheduledThreadPoolExecutor pool =
         new ScheduledThreadPoolExecutor(
             2,
@@ -254,9 +237,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * The base's three facts and this target's own: {@code slots} (the server's total), {@code
-   * idRange}, {@code engineId} and {@code hostname} from {@code docker info} (asked until docker
-   * answers once), the credential volume every agent lease mounts, and {@code buildkit: true}: every
-   * CI lease gets the target's own builder ({@link BuildPlane}).
+   * engineId} and {@code hostname} from {@code docker info} (asked until docker answers once), the
+   * credential volume every agent lease mounts, and {@code buildkit: true}: every CI lease gets the
+   * target's own builder ({@link BuildPlane}).
    */
   @Override
   public RunnerCapabilities capabilities(HostFacts host) {
@@ -268,15 +251,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   SystemRunnerCapabilities capabilities(boolean dockerHere, String arch, String os) {
     return new SystemRunnerCapabilities(
-        dockerHere,
-        arch,
-        os,
-        slots,
-        IdRange.read(procSelf),
-        engineId,
-        engineHost,
-        volumes.credential(),
-        true);
+        dockerHere, arch, os, slots, engineId, engineHost, volumes.credential(), true);
   }
 
   private void readEngine() {

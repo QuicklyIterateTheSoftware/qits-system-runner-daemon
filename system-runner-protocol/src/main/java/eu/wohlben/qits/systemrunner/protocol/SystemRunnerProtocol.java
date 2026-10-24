@@ -16,7 +16,7 @@ import java.util.Set;
  * SystemRunnerCodec}:
  *
  * <pre>
- *   Hello{heldLeases, capabilities{…, slots, idRange, engineId, hostname, credentialVolume, buildkit}}
+ *   Hello{heldLeases, capabilities{…, slots, engineId, hostname, credentialVolume, buildkit}}
  *     → Ack{slots, adoptedLeases, slotImages{ci, workspace, desk}, probeImage, registryMirrors}
  *   Estate{leases[{leaseId, slotType, desired, spec, specHash, workVolume, adopt}], purges[]}
  *     ← Inventory{leases[{leaseId, state, specHash, exitCode, detail}], volumes[]}
@@ -151,7 +151,6 @@ public final class SystemRunnerProtocol {
     public static final String REQUEST_ID = "requestId";
     // the Hello capabilities extension
     public static final String SLOTS = "slots";
-    public static final String ID_RANGE = "idRange";
     public static final String ENGINE_ID = "engineId";
     public static final String HOSTNAME = "hostname";
     public static final String CREDENTIAL_VOLUME = "credentialVolume";
