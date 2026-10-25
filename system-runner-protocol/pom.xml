@@ -15,8 +15,8 @@
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-system-runner-protocol</artifactId>
 
-    <!-- The target runner's own control-socket frames (estate/probeLogin/healthCheck and
-         inventory/loginState/healthChecked), the Hello and Ack extension keys, their DomainCodec,
+    <!-- The target runner's own control-socket frames (estate/probeLogin/healthCheck/signIn/
+         signInCode/signInCancel and inventory/loginState/healthChecked/signInProgress), the Hello and Ack extension keys, their DomainCodec,
          and the identity roots both peers derive every name from. The lifecycle frames
          (hello/ack/heartbeat/backlog/reserve/nothing/upgrade/retire/quarantined/reinstated) are
          qits-runner-protocol's and are NOT declared again here: RunnerCodec encodes those itself and

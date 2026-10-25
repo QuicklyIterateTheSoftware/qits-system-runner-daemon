@@ -39,6 +39,12 @@ class SystemRunnerCodecTest {
   private static final String L2 = "5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397";
   private static final String OLD_WS = "qits-workspaces-runner-ws-42-1a2b3c4d";
 
+  private static final String S1 = "0b9c7a3e-5d1f-4e2a-9b8c-7d6e5f4a3b2c";
+  private static final String CLAUDE_URL =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=y";
+  private static final String KIMI_URL =
+      "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234";
+
   private static LeaseSpec fullSpec() {
     Map<String, String> env = new LinkedHashMap<>();
     env.put("QITS_TOKEN", "qits_tok_X");
@@ -99,7 +105,14 @@ class SystemRunnerCodecTest {
             "every check passed",
             "req-1",
             List.of(new CheckResult("docker", true, "29.0.0", Map.of("serverVersion", "29.0.0")))),
-        new HealthChecked(false, "it never ran", null, List.of()));
+        new HealthChecked(false, "it never ran", null, List.of()),
+        new SignIn(S1, "claude"),
+        new SignInCode(S1, "abc#def"),
+        new SignInCancel(S1),
+        new SignInProgress(S1, "claude", SignInState.AWAITING_CODE, CLAUDE_URL, null, null),
+        new SignInProgress(
+            S1, "kimi", SignInState.AWAITING_BROWSER, KIMI_URL, "ABCD-1234", null),
+        new SignInProgress(S1, null, SignInState.FAILED, null, null, "Login failed"));
   }
 
   @Test
@@ -248,6 +261,51 @@ class SystemRunnerCodecTest {
             + "\"checks\":[{\"name\":\"login\",\"ok\":true,\"detail\":\"x\",\"data\":{}}]}",
         new HealthChecked(
             true, "fine", "req-1", List.of(new CheckResult("login", true, "x", Map.of()))));
+  }
+
+  @Test
+  void theSignInFramesAreSpelledExactlyAsTheContractSaysKeyOrderIncluded() {
+    assertJson(
+        "{\"type\":\"signIn\",\"signInId\":\"" + S1 + "\",\"harness\":\"kimi\"}",
+        new SignIn(S1, "kimi"));
+    assertJson(
+        "{\"type\":\"signInCode\",\"signInId\":\"" + S1 + "\",\"code\":\"abc#def\"}",
+        new SignInCode(S1, "abc#def"));
+    assertJson(
+        "{\"type\":\"signInCancel\",\"signInId\":\"" + S1 + "\"}", new SignInCancel(S1));
+    assertJson(
+        "{\"type\":\"signInProgress\",\"signInId\":\""
+            + S1
+            + "\",\"harness\":\"kimi\",\"state\":\"AWAITING_BROWSER\",\"url\":\""
+            + KIMI_URL
+            + "\",\"userCode\":\"ABCD-1234\",\"detail\":null}",
+        new SignInProgress(
+            S1, "kimi", SignInState.AWAITING_BROWSER, KIMI_URL, "ABCD-1234", null));
+  }
+
+  @Test
+  void aSignInFrameWithoutItsIdHarnessCodeOrAKnownStateIsMalformed() {
+    assertMalformed(Map.of("type", "signIn", "harness", "claude"));
+    assertMalformed(Map.of("type", "signIn", "signInId", S1));
+    assertMalformed(Map.of("type", "signInCode", "signInId", S1));
+    assertMalformed(Map.of("type", "signInCode", "code", "abc"));
+    assertMalformed(Map.of("type", "signInCancel"));
+    assertMalformed(Map.of("type", "signInProgress", "signInId", S1));
+    assertMalformed(Map.of("type", "signInProgress", "signInId", S1, "state", "WAITING"));
+    assertMalformed(Map.of("type", "signInProgress", "state", "STARTING"));
+  }
+
+  @Test
+  void aSignInCodeNeverPrintsItsCodeAndTheTerminalStatesAreTheFourEnds() {
+    assertEquals(
+        "SignInCode[signInId=" + S1 + ", code=<redacted>]",
+        new SignInCode(S1, "secret-code").toString());
+    assertEquals(
+        Set.of(
+            SignInState.SUCCEEDED, SignInState.FAILED, SignInState.EXPIRED, SignInState.CANCELLED),
+        Arrays.stream(SignInState.values())
+            .filter(SignInState::terminal)
+            .collect(Collectors.toSet()));
   }
 
   private static void assertJson(String expected, SystemRunnerMessage frame) {

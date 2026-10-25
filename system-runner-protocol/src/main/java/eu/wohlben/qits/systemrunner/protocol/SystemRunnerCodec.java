@@ -26,7 +26,9 @@ import java.util.Set;
  * ({@code RunnerCodec} reports it as MALFORMED and the receiver drops the frame), and so is an enum
  * value this version does not know, and a missing {@code leases} on an {@link Estate} or an {@link
  * Inventory}: those lists are desired and observed state, and an absence read as "empty" would end
- * every lease on a node. A login presence is the one tolerant enum: unknown reads as UNKNOWN.
+ * every lease on a node. A login presence is the one tolerant enum: unknown reads as UNKNOWN. A
+ * sign-in frame without its {@code signInId} (and a {@code signIn} without its harness, a {@code
+ * signInCode} without its code, a {@code signInProgress} without a known state) is refused too.
  *
  * <p>Every frame writes {@code type} first and its fields in record order; a nullable field is
  * written as {@code null} rather than left out. {@code healthCheck} and {@code healthChecked} are
@@ -59,6 +61,20 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
       }
       case ProbeLogin _ -> map.put(Field.TYPE, Type.PROBE_LOGIN);
       case HealthCheck m -> map.putAll(HealthWire.encodeCheck(m.requestId()));
+      case SignIn m -> {
+        map.put(Field.TYPE, Type.SIGN_IN);
+        map.put(Field.SIGN_IN_ID, m.signInId());
+        map.put(Field.HARNESS, m.harness());
+      }
+      case SignInCode m -> {
+        map.put(Field.TYPE, Type.SIGN_IN_CODE);
+        map.put(Field.SIGN_IN_ID, m.signInId());
+        map.put(Field.CODE, m.code());
+      }
+      case SignInCancel m -> {
+        map.put(Field.TYPE, Type.SIGN_IN_CANCEL);
+        map.put(Field.SIGN_IN_ID, m.signInId());
+      }
       case Inventory m -> {
         map.put(Field.TYPE, Type.INVENTORY);
         List<Object> leases = new ArrayList<>();
@@ -82,6 +98,15 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
         map.put(Field.VOLUME, m.volume());
       }
       case HealthChecked m -> map.putAll(HealthWire.encodeChecked(m.report()));
+      case SignInProgress m -> {
+        map.put(Field.TYPE, Type.SIGN_IN_PROGRESS);
+        map.put(Field.SIGN_IN_ID, m.signInId());
+        map.put(Field.HARNESS, m.harness());
+        map.put(Field.STATE, m.state().name());
+        map.put(Field.URL, m.url());
+        map.put(Field.USER_CODE, m.userCode());
+        map.put(Field.DETAIL, m.detail());
+      }
     }
     return map;
   }
@@ -92,6 +117,11 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
       case Type.ESTATE -> new Estate(entries(map), WireMaps.stringList(map, Field.PURGES));
       case Type.PROBE_LOGIN -> new ProbeLogin();
       case Type.HEALTH_CHECK -> new HealthCheck(HealthWire.decodeCheck(map));
+      case Type.SIGN_IN ->
+          new SignIn(required(map, Field.SIGN_IN_ID), required(map, Field.HARNESS));
+      case Type.SIGN_IN_CODE ->
+          new SignInCode(required(map, Field.SIGN_IN_ID), required(map, Field.CODE));
+      case Type.SIGN_IN_CANCEL -> new SignInCancel(required(map, Field.SIGN_IN_ID));
       case Type.INVENTORY -> new Inventory(reports(map), requiredStrings(map, Field.VOLUMES));
       case Type.LOGIN_STATE ->
           new LoginState(
@@ -100,6 +130,14 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
               WireMaps.str(map, Field.CHECKED_AT),
               WireMaps.str(map, Field.VOLUME));
       case Type.HEALTH_CHECKED -> HealthChecked.of(HealthWire.decodeChecked(map));
+      case Type.SIGN_IN_PROGRESS ->
+          new SignInProgress(
+              required(map, Field.SIGN_IN_ID),
+              WireMaps.str(map, Field.HARNESS),
+              constant(SignInState.class, WireMaps.str(map, Field.STATE), Field.STATE),
+              WireMaps.str(map, Field.URL),
+              WireMaps.str(map, Field.USER_CODE),
+              WireMaps.str(map, Field.DETAIL));
       default -> throw new IllegalArgumentException("not a target runner frame: " + type);
     };
   }

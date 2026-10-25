@@ -241,10 +241,13 @@ frames are this repository's (`SystemRunnerCodec`).
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail}], volumes:[name]}
     probeLogin → loginState{claude, kimi, checkedAt, volume}                (PRESENT|ABSENT|UNKNOWN)
     healthCheck{requestId} → healthChecked{ok, detail, requestId, checks:[{name, ok, detail, data}]}
+    signIn{signInId, harness} → signInProgress{signInId, harness, state, url, userCode, detail} …
+    signInCode{signInId, code}   signInCancel{signInId}          (loginState after SUCCEEDED)
     upgrade{…} … retire{…} … quarantined{…} … reinstated{…}
 
 `slotType` is `CI|WORKSPACE|DESK`, `desired` `RUNNING|ENDED`, `state`
-`STARTING|RUNNING|EXITED|FAILED|ENDED`. `spec` is `{image, env{}, user, limits{memory, memorySwap,
+`STARTING|RUNNING|EXITED|FAILED|ENDED`, a sign-in's `state`
+`STARTING|AWAITING_CODE|AWAITING_BROWSER|SUCCEEDED|FAILED|EXPIRED|CANCELLED`. `spec` is `{image, env{}, user, limits{memory, memorySwap,
 pidsLimit, cpus, oomScoreAdj}}`; `workVolume` is the lease's **work key** (`ws-<rowId>`,
 `desk-<deskId>`, null for CI), from which the runner derives the volume's name.
 

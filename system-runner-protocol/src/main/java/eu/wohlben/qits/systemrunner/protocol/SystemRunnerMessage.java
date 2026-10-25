@@ -12,4 +12,13 @@ import eu.wohlben.qits.runner.protocol.RunnerMessage;
  * this runner, because qits-system allocates — the {@link Estate} is the whole desired state.
  */
 public sealed interface SystemRunnerMessage extends RunnerMessage
-    permits Estate, ProbeLogin, HealthCheck, Inventory, LoginState, HealthChecked {}
+    permits Estate,
+        ProbeLogin,
+        HealthCheck,
+        SignIn,
+        SignInCode,
+        SignInCancel,
+        Inventory,
+        LoginState,
+        HealthChecked,
+        SignInProgress {}

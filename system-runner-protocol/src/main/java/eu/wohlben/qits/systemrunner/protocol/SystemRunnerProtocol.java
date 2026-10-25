@@ -22,6 +22,8 @@ import java.util.Set;
  *     ← Inventory{leases[{leaseId, state, specHash, exitCode, detail}], volumes[]}
  *   ProbeLogin → LoginState{claude, kimi, checkedAt, volume}
  *   HealthCheck{requestId} → HealthChecked{ok, detail, requestId, checks}
+ *   SignIn{signInId, harness}, SignInCode{signInId, code}, SignInCancel{signInId}
+ *     → SignInProgress{signInId, harness, state, url, userCode, detail} … (LoginState after SUCCEEDED)
  * </pre>
  *
  * <p><b>Identity is not on the wire.</b> The runner presents a bearer minted from the idp client it
@@ -99,14 +101,28 @@ public final class SystemRunnerProtocol {
     public static final String ESTATE = "estate";
     public static final String PROBE_LOGIN = "probeLogin";
     public static final String HEALTH_CHECK = "healthCheck";
+    public static final String SIGN_IN = "signIn";
+    public static final String SIGN_IN_CODE = "signInCode";
+    public static final String SIGN_IN_CANCEL = "signInCancel";
     // runner -> qits-system
     public static final String INVENTORY = "inventory";
     public static final String LOGIN_STATE = "loginState";
     public static final String HEALTH_CHECKED = "healthChecked";
+    public static final String SIGN_IN_PROGRESS = "signInProgress";
 
     /** Every target type — what {@link SystemRunnerCodec#types()} answers. */
     public static final Set<String> ALL =
-        Set.of(ESTATE, PROBE_LOGIN, HEALTH_CHECK, INVENTORY, LOGIN_STATE, HEALTH_CHECKED);
+        Set.of(
+            ESTATE,
+            PROBE_LOGIN,
+            HEALTH_CHECK,
+            SIGN_IN,
+            SIGN_IN_CODE,
+            SIGN_IN_CANCEL,
+            INVENTORY,
+            LOGIN_STATE,
+            HEALTH_CHECKED,
+            SIGN_IN_PROGRESS);
 
     private Type() {}
   }
@@ -149,6 +165,12 @@ public final class SystemRunnerProtocol {
     public static final String CHECKED_AT = "checkedAt";
     // healthCheck — healthChecked is HealthWire's
     public static final String REQUEST_ID = "requestId";
+    // signIn, signInCode, signInCancel and signInProgress (STATE and DETAIL above)
+    public static final String SIGN_IN_ID = "signInId";
+    public static final String HARNESS = "harness";
+    public static final String CODE = "code";
+    public static final String URL = "url";
+    public static final String USER_CODE = "userCode";
     // the Hello capabilities extension
     public static final String SLOTS = "slots";
     public static final String ENGINE_ID = "engineId";
