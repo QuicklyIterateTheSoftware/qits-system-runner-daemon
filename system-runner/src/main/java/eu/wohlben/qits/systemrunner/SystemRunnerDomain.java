@@ -387,12 +387,14 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * The build plane's builder, network and state volume, in that order — named, because none of
-   * them carries the owner label the helper removes by. The CI caches do carry it, and go with the
-   * labelled volumes.
+   * them carries the owner label the helper removes by — then the first-run keys' container, which
+   * carries none either. The CI caches do carry it, and go with the labelled volumes.
    */
   @Override
   public List<TeardownItem> teardown() {
-    return basePlane.names().teardown();
+    List<TeardownItem> items = new ArrayList<>(basePlane.names().teardown());
+    items.add(new TeardownItem(TeardownItem.Type.CONTAINER, names.firstRun()));
+    return List.copyOf(items);
   }
 
   /** The build plane now: the environment's settings with the latest {@code Ack}'s mirrors. */

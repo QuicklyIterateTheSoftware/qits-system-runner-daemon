@@ -39,6 +39,7 @@ class LoginProbeTest {
   private static final Instant NOW = Instant.parse("2026-10-23T07:38:19Z");
   private static final String DOT_CLAUDE = "qits-system-runner-dot-claude-r1";
   private static final String PROBE = "qits-system-runner-login-probe-r1";
+  private static final String FIRST_RUN = "qits-system-runner-first-run-r1";
 
   @TempDir Path dir;
   private FakeDocker docker;
@@ -82,6 +83,11 @@ class LoginProbeTest {
                 "--entrypoint", "claude", "-v", DOT_CLAUDE + ":/claude-home", "-e",
                 "HOME=/claude-home", "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude", IMAGE, "auth",
                 "status"),
+            List.of(
+                "run", "--rm", "--name", FIRST_RUN, "--user", "1000", "--entrypoint", "bash", "-v",
+                DOT_CLAUDE + ":/claude-home", "-e", "HOME=/claude-home", "-e",
+                "CLAUDE_CONFIG_DIR=/claude-home/.claude", IMAGE, "-c", ClaudeFirstRun.SCRIPT,
+                "qits-first-run", "check"),
             List.of(
                 "run", "--rm", "--name", PROBE, "--label", "qits.system.runner=r1", "--user", "1000",
                 "--entrypoint", "bash", "-v", DOT_CLAUDE + ":/claude-home", "-e",
@@ -136,7 +142,7 @@ class LoginProbeTest {
         new LoginState(LoginPresence.PRESENT, LoginPresence.ABSENT, NOW.toString(), DOT_CLAUDE),
         probe.probe(runnerDocker.driver(), IMAGE, pull));
     assertEquals(List.of(IMAGE), pulled);
-    assertEquals(2, docker.calls("run").size());
+    assertEquals(3, docker.calls("run").size(), "claude, its first-run keys, kimi");
   }
 
   @Test
@@ -175,6 +181,46 @@ class LoginProbeTest {
             LoginPresence.UNKNOWN, LoginPresence.UNKNOWN, NOW.toString(), "qits_shared_dot_claude"),
         missing,
         "a missing external volume is not read as an empty login");
+  }
+
+  @Test
+  void aLoginWithoutItsFirstRunKeysHasThemMergedInAndIsPresentOnceTheyAre() throws Exception {
+    claudeSays(0, "{\"loggedIn\": true}");
+    kimiExits(0);
+    docker.answerFor("run", "check", 1, "", "");
+    docker.answerFor("run", "apply", 0, "", "");
+
+    assertEquals(
+        new LoginState(LoginPresence.PRESENT, LoginPresence.PRESENT, NOW.toString(), DOT_CLAUDE),
+        probe.probe(runnerDocker.driver(), IMAGE, pull));
+    assertEquals(
+        List.of("status", "check", "apply", LoginProbe.KIMI_CHECK),
+        docker.calls("run").stream().map(List::getLast).toList());
+  }
+
+  @Test
+  void aLoginWhoseKeysCannotBeWrittenIsAbsentAndADockerFaultThereIsUnknown() throws Exception {
+    claudeSays(0, "{\"loggedIn\": true}");
+    kimiExits(0);
+    docker.answerFor("run", "check", 1, "", "");
+    docker.answerFor("run", "apply", 1, "", "qits-first-run: the first-run keys are still missing");
+
+    assertEquals(LoginPresence.ABSENT, probe.probe(runnerDocker.driver(), IMAGE, pull).claude());
+
+    docker.answerFor("run", "apply", 125, "", "docker: Error response from daemon: no space left");
+    assertEquals(LoginPresence.UNKNOWN, probe.probe(runnerDocker.driver(), IMAGE, pull).claude());
+  }
+
+  @Test
+  void aSignedOutCliNeverHasItsKeysWritten() throws Exception {
+    claudeSays(1, "{\"loggedIn\": false}");
+    kimiExits(1);
+
+    probe.probe(runnerDocker.driver(), IMAGE, pull);
+
+    assertEquals(
+        List.of("status", LoginProbe.KIMI_CHECK),
+        docker.calls("run").stream().map(List::getLast).toList());
   }
 
   @Test

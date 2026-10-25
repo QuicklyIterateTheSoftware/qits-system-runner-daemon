@@ -22,7 +22,10 @@ import org.jboss.logging.Logger;
  *
  * <ul>
  *   <li>Claude Code: {@code claude auth status} with {@code HOME=/claude-home} and {@code
- *       CLAUDE_CONFIG_DIR=/claude-home/.claude}, read by {@code loggedIn} in the JSON it prints;
+ *       CLAUDE_CONFIG_DIR=/claude-home/.claude}, read by {@code loggedIn} in the JSON it prints —
+ *       and PRESENT only once {@link ClaudeFirstRun}'s keys are there too: a logged-in CLI still
+ *       stops a lease at its onboarding screen, so a login without them has them merged in here
+ *       and is ABSENT when that fails (UNKNOWN when docker could not run the merge);
  *   <li>Kimi Code: the credential file's presence under {@code /claude-home/.kimi-code} — the flat
  *       {@code credentials} file or {@code credentials/kimi-code.json}.
  * </ul>
@@ -42,6 +45,9 @@ import org.jboss.logging.Logger;
 final class LoginProbe {
 
   private static final Logger LOG = Logger.getLogger(LoginProbe.class);
+
+  /** Why a probe or a sign-in cannot run when {@code Ack.probeImage} is not set. */
+  static final String NO_IMAGE = "the host named no probe image";
 
   /** Each probe's: a {@code claude auth status} that has not answered by then is not answering. */
   static final Duration DEADLINE = Duration.ofSeconds(30);
@@ -65,6 +71,7 @@ final class LoginProbe {
   private final RunnerDocker docker;
   private final TargetVolumes volumes;
   private final TargetNames names;
+  private final ClaudeFirstRun firstRun;
   private final Clock clock;
 
   /**
@@ -81,7 +88,13 @@ final class LoginProbe {
     this.docker = docker;
     this.volumes = volumes;
     this.names = new TargetNames(identity, targetId);
+    this.firstRun = new ClaudeFirstRun(docker, volumes, names.firstRun());
     this.clock = clock;
+  }
+
+  /** The first-run keys, against the same volume under the same deadline. */
+  ClaudeFirstRun firstRun() {
+    return firstRun;
   }
 
   /**
@@ -95,34 +108,19 @@ final class LoginProbe {
     String checkedAt = clock.instant().toString();
     String volume = volumes.credential();
     try {
-      if (image == null || image.isBlank()) {
-        LOG.infof("system-runner's login probe cannot run: the host named no probe image");
+      Optional<String> cannot = prepare(driver, image, pull);
+      if (cannot.isPresent()) {
+        if (NO_IMAGE.equals(cannot.get())) {
+          LOG.infof("system-runner's login probe cannot run: %s", cannot.get());
+        } else {
+          LOG.warnf("system-runner's login probe cannot run: %s", cannot.get());
+        }
         return unknown(checkedAt, volume);
       }
-      Optional<String> notHere = NodeImages.ensure(docker, pull, image);
-      if (notHere.isPresent()) {
-        LOG.warnf(
-            "system-runner's login probe cannot run: could not pull %s: %s",
-            image, LeaseLauncher.brief(notHere.get()));
-        return unknown(checkedAt, volume);
+      LoginPresence claude = claudeLogin(driver, image);
+      if (claude == LoginPresence.PRESENT) {
+        claude = firstRunKeys(driver, image);
       }
-      if (volumes.credentialExternal()) {
-        // The operator's credential volume: asked after, never made, so a missing one stays
-        // missing rather than reading ABSENT out of an empty volume docker would create.
-        Optional<String> missing = volumes.credentialMissing(docker);
-        if (missing.isPresent()) {
-          LOG.warnf("system-runner's login probe cannot run: %s", missing.get());
-          return unknown(checkedAt, volume);
-        }
-      } else {
-        ContainersDriver.OpResult home = volumes.ensureNode(driver, volume, docker.deadline());
-        if (!home.ok()) {
-          LOG.warnf("system-runner's login probe cannot run: no credential volume");
-          return unknown(checkedAt, volume);
-        }
-      }
-      driver.remove(names.loginProbe(), docker.deadline());
-      LoginPresence claude = claude(docker.run(claudeArgv(image)));
       driver.remove(names.loginProbe(), docker.deadline());
       LoginPresence kimi = kimi(docker.run(kimiArgv(image)));
       LOG.infof("system-runner's login probe on %s: claude %s, kimi %s", volume, claude, kimi);
@@ -131,6 +129,53 @@ final class LoginProbe {
       LOG.warnf("system-runner's login probe could not run: %s", e.getMessage());
       return unknown(checkedAt, volume);
     }
+  }
+
+  /**
+   * Why nothing can run against the credential volume with {@code image}: no image named, a pull
+   * that failed, a missing external volume, an own volume docker would not make. Empty when the
+   * image is here and the volume is there — what both the probe and a sign-in need first.
+   */
+  Optional<String> prepare(
+      ContainersDriver driver, String image, Function<String, Optional<String>> pull) {
+    if (image == null || image.isBlank()) {
+      return Optional.of(NO_IMAGE);
+    }
+    Optional<String> notHere = NodeImages.ensure(docker, pull, image);
+    if (notHere.isPresent()) {
+      return Optional.of("could not pull " + image + ": " + LeaseLauncher.brief(notHere.get()));
+    }
+    if (volumes.credentialExternal()) {
+      // The operator's credential volume: asked after, never made, so a missing one stays
+      // missing rather than reading ABSENT out of an empty volume docker would create.
+      return volumes.credentialMissing(docker);
+    }
+    ContainersDriver.OpResult home =
+        volumes.ensureNode(driver, volumes.credential(), docker.deadline());
+    return home.ok() ? Optional.empty() : Optional.of("no credential volume: " + home.detail());
+  }
+
+  /** {@code claude auth status} alone, read as {@link #claude}: what a sign-in asks first. */
+  synchronized LoginPresence claudeLogin(ContainersDriver driver, String image) {
+    driver.remove(names.loginProbe(), docker.deadline());
+    return claude(docker.run(claudeArgv(image)));
+  }
+
+  /**
+   * A logged-in Claude Code's first-run keys: PRESENT when they are there or merged in now, ABSENT
+   * when the merge ran and they are still missing, UNKNOWN when docker could not run it.
+   */
+  private LoginPresence firstRunKeys(ContainersDriver driver, String image) {
+    RunnerDocker.Result keys = firstRun.ensure(driver, image);
+    if (keys.ok()) {
+      return LoginPresence.PRESENT;
+    }
+    LoginPresence presence = byExit(keys);
+    LOG.warnf(
+        "system-runner's login probe: claude is logged in but its first-run keys are missing and"
+            + " could not be written (exit %d), so it reads %s: %s",
+        keys.exitCode(), presence, LeaseLauncher.brief(keys.detail()));
+    return presence;
   }
 
   /**

@@ -1,0 +1,214 @@
+package eu.wohlben.qits.systemrunner;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import eu.wohlben.qits.runner.toolkit.RunnerDocker;
+import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
+import eu.wohlben.qits.runner.toolkit.testing.FakeDocker;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+
+/**
+ * {@link ClaudeFirstRun}: the argv and the generated jq programs exactly, the check-then-merge
+ * order — and the script itself, run by {@code bash} with {@code jq} against a temp directory
+ * standing in for {@code /claude-home}: missing keys are written, every existing value survives,
+ * and the files it creates are mode 600 / 644.
+ */
+@EnabledOnOs(OS.LINUX)
+class ClaudeFirstRunTest {
+
+  private static final RunnerIdentity IDENTITY = SystemRunnerIdentity.IDENTITY;
+  private static final String IMAGE = "registry.qits.example.eu/qits/workspace:2026.1023.1";
+  private static final String NAME = "qits-system-runner-first-run-r1";
+
+  @TempDir Path dir;
+
+  @Test
+  void theCheckProgramAsksForEveryKeyOfItsFile() {
+    assertEquals(
+        "[getpath([\"hasCompletedOnboarding\"]), getpath([\"lastOnboardingVersion\"]),"
+            + " getpath([\"remoteDialogSeen\"]), getpath([\"fullscreenUpsellSeenCount\"]),"
+            + " getpath([\"passesUpsellSeenCount\"]), getpath([\"hasSeenAutoModeEntryWarning\"]),"
+            + " getpath([\"hasSeenTasksHint\"]),"
+            + " getpath([\"projects\",\"/workspace\",\"hasTrustDialogAccepted\"])]"
+            + " | all(. != null)",
+        ClaudeFirstRun.checkProgram(ClaudeFirstRun.CONFIG));
+    assertEquals(
+        "reduce ([[\"skipDangerousModePermissionPrompt\"], true], [[\"tui\"], \"fullscreen\"],"
+            + " [[\"theme\"], \"dark\"]) as [$p, $x]"
+            + " (.; if getpath($p) == null then setpath($p; $x) else . end)",
+        ClaudeFirstRun.mergeProgram(ClaudeFirstRun.SETTINGS));
+    assertTrue(
+        ClaudeFirstRun.mergeProgram(ClaudeFirstRun.CONFIG)
+            .contains("[[\"lastOnboardingVersion\"], $v]"),
+        "the version is the CLI's, read in the container");
+    assertEquals("/claude-home/.claude/.claude.json", ClaudeFirstRun.CONFIG);
+    assertEquals("/claude-home/.claude/settings.json", ClaudeFirstRun.SETTINGS);
+  }
+
+  @Test
+  void itRunsTheProbeImageAsUid1000WithoutTheOwnerLabelAndChecksBeforeItMerges()
+      throws Exception {
+    FakeDocker docker = new FakeDocker(dir.resolve("docker"));
+    RunnerDocker runner = new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10));
+    ClaudeFirstRun firstRun =
+        new ClaudeFirstRun(runner, new TargetVolumes(IDENTITY, "r1", ExternalVolumes.NONE), NAME);
+
+    assertEquals(
+        List.of(
+            runner.binary(), "run", "--rm", "--name", NAME, "--user", "1000", "--entrypoint",
+            "bash", "-v", "qits-system-runner-dot-claude-r1:/claude-home", "-e",
+            "HOME=/claude-home", "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude", IMAGE, "-c",
+            ClaudeFirstRun.SCRIPT, "qits-first-run", "apply"),
+        firstRun.argv(IMAGE, ClaudeFirstRun.APPLY));
+
+    assertTrue(firstRun.ensure(runner.driver(), IMAGE).ok(), "present: nothing to merge");
+    assertEquals(List.of("check"), docker.calls("run").stream().map(List::getLast).toList());
+
+    docker.answerFor("run", "check", 1, "", "");
+    docker.answerFor("run", "apply", 0, "", "");
+    assertTrue(firstRun.ensure(runner.driver(), IMAGE).ok());
+    assertEquals(
+        List.of("check", "check", "apply"),
+        docker.calls("run").stream().map(List::getLast).toList());
+    assertTrue(
+        docker.calls("rm").stream().allMatch(c -> c.contains(NAME)),
+        "its name is removed before every run");
+    assertFalse(
+        docker.calls("run").stream().anyMatch(c -> c.contains("--label")),
+        "the reconcile removes owner-labelled containers");
+  }
+
+  // --- the script, run --------------------------------------------------------------------------
+
+  @Test
+  void theScriptWritesOnlyMissingKeysAndKeepsEveryExistingValue() throws Exception {
+    assumeTrue(onPath("jq") && onPath("bash"), "needs bash and jq");
+    Path home = dir.resolve("claude-home");
+    Path config = home.resolve(".claude").resolve(".claude.json");
+    Files.createDirectories(config.getParent());
+    Files.writeString(
+        config,
+        "{\"hasCompletedOnboarding\": false, \"theme\": \"keep\", \"oauthAccount\": {\"a\": 1},"
+            + " \"projects\": {\"/workspace\": {\"allowedTools\": [\"x\"]}, \"/other\": {}},"
+            + " \"fullscreenUpsellSeenCount\": null}");
+    Path bin = fakeClaude("2.1.300 (Claude Code)");
+
+    assertEquals(1, script(home, bin, "check").exit(), "keys are missing");
+    Run applied = script(home, bin, "apply");
+    assertEquals(0, applied.exit(), applied.output());
+    assertEquals(0, script(home, bin, "check").exit());
+
+    assertEquals("false", jq(config, ".hasCompletedOnboarding"), "an existing value is kept");
+    assertEquals("\"keep\"", jq(config, ".theme"), "a key of the other file is not touched");
+    assertEquals("{\"a\":1}", jq(config, ".oauthAccount"));
+    assertEquals("[\"x\"]", jq(config, ".projects[\"/workspace\"].allowedTools"));
+    assertEquals("true", jq(config, ".projects[\"/workspace\"].hasTrustDialogAccepted"));
+    assertEquals("{}", jq(config, ".projects[\"/other\"]"));
+    assertEquals("\"2.1.300\"", jq(config, ".lastOnboardingVersion"));
+    assertEquals("3", jq(config, ".fullscreenUpsellSeenCount"), "null counts as absent");
+    assertEquals("3", jq(config, ".passesUpsellSeenCount"));
+    for (String key :
+        List.of("remoteDialogSeen", "hasSeenAutoModeEntryWarning", "hasSeenTasksHint")) {
+      assertEquals("true", jq(config, "." + key), key);
+    }
+    Path settings = home.resolve(".claude").resolve("settings.json");
+    assertEquals("true", jq(settings, ".skipDangerousModePermissionPrompt"));
+    assertEquals("\"fullscreen\"", jq(settings, ".tui"));
+    assertEquals("\"dark\"", jq(settings, ".theme"));
+    assertEquals(
+        "rw-r--r--",
+        PosixFilePermissions.toString(Files.getPosixFilePermissions(settings)),
+        "created");
+
+    String before = Files.readString(config);
+    assertEquals(0, script(home, bin, "apply").exit());
+    assertEquals(before, Files.readString(config), "a second merge changes nothing");
+  }
+
+  @Test
+  void theScriptCreatesTheFilesWhenMissingAndFallsBackToTheKnownVersion() throws Exception {
+    assumeTrue(onPath("jq") && onPath("bash"), "needs bash and jq");
+    Path home = dir.resolve("claude-home");
+    Files.createDirectories(home);
+    Path bin = fakeClaude(null);
+
+    Run applied = script(home, bin, "apply");
+    assertEquals(0, applied.exit(), applied.output());
+    Path config = home.resolve(".claude").resolve(".claude.json");
+    assertEquals(
+        "rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(config)));
+    assertEquals(
+        "\"" + ClaudeFirstRun.FALLBACK_VERSION + "\"", jq(config, ".lastOnboardingVersion"));
+    assertEquals("true", jq(config, ".hasCompletedOnboarding"));
+  }
+
+  @Test
+  void aFileJqCannotReadIsLeftAsItIsAndTheMergeFails() throws Exception {
+    assumeTrue(onPath("jq") && onPath("bash"), "needs bash and jq");
+    Path home = dir.resolve("claude-home");
+    Path config = home.resolve(".claude").resolve(".claude.json");
+    Files.createDirectories(config.getParent());
+    Files.writeString(config, "{not json");
+
+    Run applied = script(home, fakeClaude("2.1.283 (Claude Code)"), "apply");
+    assertEquals(1, applied.exit());
+    assertTrue(applied.output().contains("is not JSON jq can read"), applied.output());
+    assertEquals("{not json", Files.readString(config));
+  }
+
+  private record Run(int exit, String output) {}
+
+  /** The script with {@code /claude-home} pointed at {@code home}, as {@code bash -c} runs it. */
+  private Run script(Path home, Path bin, String mode) throws Exception {
+    String script = ClaudeFirstRun.SCRIPT.replace(LoginProbe.CLAUDE_HOME, home.toString());
+    List<String> argv = new ArrayList<>(List.of("bash", "-c", script, "qits-first-run", mode));
+    ProcessBuilder pb = new ProcessBuilder(argv).redirectErrorStream(true);
+    pb.environment().put("PATH", bin + ":" + System.getenv("PATH"));
+    Process p = pb.start();
+    String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    assertTrue(p.waitFor(30, TimeUnit.SECONDS));
+    return new Run(p.exitValue(), out);
+  }
+
+  /** A {@code claude} on PATH printing {@code version}, or failing when null. */
+  private Path fakeClaude(String version) throws IOException {
+    Path bin = dir.resolve("bin");
+    Files.createDirectories(bin);
+    Path claude = bin.resolve("claude");
+    Files.writeString(
+        claude,
+        version == null ? "#!/bin/sh\nexit 127\n" : "#!/bin/sh\necho '" + version + "'\n");
+    Files.setPosixFilePermissions(claude, PosixFilePermissions.fromString("rwxr-xr-x"));
+    return bin;
+  }
+
+  private static String jq(Path file, String filter) throws Exception {
+    Process p = new ProcessBuilder("jq", "-c", filter, file.toString()).start();
+    String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+    assertEquals(0, p.waitFor(), "jq " + filter);
+    return out;
+  }
+
+  private static boolean onPath(String tool) {
+    try {
+      return new ProcessBuilder("sh", "-c", "command -v " + tool).start().waitFor() == 0;
+    } catch (IOException | InterruptedException e) {
+      return false;
+    }
+  }
+}

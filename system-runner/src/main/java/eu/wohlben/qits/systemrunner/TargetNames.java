@@ -12,7 +12,9 @@ import java.util.regex.Pattern;
  *   <li>a lease's container: {@code qits-system-runner-lease-<leaseId>-<id8>};
  *   <li>a work volume: {@code qits-system-runner-work-<workKey>-<id8>}, {@code workKey} being
  *       {@code ws-<rowId>} or {@code desk-<deskId>};
- *   <li>the login probe's container: {@code qits-system-runner-login-probe-<id8>}.
+ *   <li>the login probe's container: {@code qits-system-runner-login-probe-<id8>};
+ *   <li>the first-run keys' container: {@code qits-system-runner-first-run-<id8>};
+ *   <li>a sign-in's container: {@code qits-system-runner-sign-in-<harness>-<id8>}.
  * </ul>
  *
  * <p><b>Spelled here, not through {@code RunnerIdentity.nodeName}</b>, which caps its purpose at
@@ -29,6 +31,8 @@ final class TargetNames {
   static final String LEASE = "lease";
   static final String WORK = "work";
   static final String LOGIN_PROBE = "login-probe";
+  static final String FIRST_RUN = "first-run";
+  static final String SIGN_IN = "sign-in-";
 
   private final RunnerIdentity identity;
   private final String targetId;
@@ -59,6 +63,20 @@ final class TargetNames {
   /** {@code qits-system-runner-login-probe-<id8>}. */
   String loginProbe() {
     return identity.nodeName(targetId, LOGIN_PROBE);
+  }
+
+  /** {@code qits-system-runner-first-run-<id8>}: {@link ClaudeFirstRun}'s container. */
+  String firstRun() {
+    return identity.nodeName(targetId, FIRST_RUN);
+  }
+
+  /**
+   * {@code qits-system-runner-sign-in-<harness>-<id8>}: the one sign-in a harness may have running.
+   *
+   * @throws IllegalArgumentException when the harness cannot be part of a name
+   */
+  String signIn(String harness) {
+    return identity.nodeName(targetId, SIGN_IN + require("harness", harness));
   }
 
   /** Whether {@code name} is one of this runner's work volumes, by its spelling. */
