@@ -140,8 +140,21 @@ transcript archive already use. Every other target gets its own derived volumes.
 
 ### Signing in
 
-`loginState.volume` names the credential volume; the targets page renders the login command from
-it, so it can never name another volume:
+`qits targets sign-in` needs no shell on the node (qits-1593): the server sends `signIn`, and the
+runner runs the harness's own login in the probe image against the credential volume —
+`docker run --rm -i --name qits-system-runner-sign-in-<harness>-<id8> --user 1000 --entrypoint
+claude … auth login` (kimi: `--entrypoint kimi … login`) — relaying the url (and kimi's user code)
+as `signInProgress` and writing the code a `signInCode` carries to claude's stdin. An already
+logged-in claude succeeds at once. One sign-in per harness at a time; ten minutes, then EXPIRED.
+After SUCCEEDED the login probe runs and sends `loginState`.
+
+Claude reads PRESENT only when it is logged in **and** its first-run keys (onboarding, the
+`/workspace` trust dialog, the upsells, `theme`/`tui`) are in `.claude/.claude.json` and
+`.claude/settings.json`; the probe and a successful sign-in merge in the ones that are absent and
+never overwrite one that is set (`ClaudeFirstRun`).
+
+By hand, `loginState.volume` names the credential volume; the targets page renders the login
+command from it, so it can never name another volume:
 
     docker run --rm -it --user 1000 --entrypoint claude -v <volume>:/claude-home -e HOME=/claude-home -e CLAUDE_CONFIG_DIR=/claude-home/.claude <probeImage>
 
@@ -167,6 +180,8 @@ the running leases by their label.
 | the credential volume | `QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME` (external: must exist, never created or removed), else `qits-system-runner-dot-claude-<id8>`, created at the `Ack` | `qits.system.runner=<id>` (external: none) |
 | the agent caches | `…_M2_VOLUME` / `…_PNPM_VOLUME`, else `qits-system-runner-m2-<id8>` / `qits-system-runner-pnpm-<id8>` | as the credential volume |
 | the login probe | container `qits-system-runner-login-probe-<id8>` (`--rm`) | `qits.system.runner=<id>` |
+| the first-run keys | container `qits-system-runner-first-run-<id8>` (`--rm`) | none — the reconcile removes owner-labelled containers; a teardown item |
+| a sign-in | container `qits-system-runner-sign-in-<harness>-<id8>` (`--rm -i`) | none, likewise |
 
 | the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
 | the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |

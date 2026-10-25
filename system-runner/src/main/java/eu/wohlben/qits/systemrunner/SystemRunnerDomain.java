@@ -27,6 +27,11 @@ import eu.wohlben.qits.systemrunner.protocol.LeaseState;
 import eu.wohlben.qits.systemrunner.protocol.LoginPresence;
 import eu.wohlben.qits.systemrunner.protocol.LoginState;
 import eu.wohlben.qits.systemrunner.protocol.ProbeLogin;
+import eu.wohlben.qits.systemrunner.protocol.SignIn;
+import eu.wohlben.qits.systemrunner.protocol.SignInCancel;
+import eu.wohlben.qits.systemrunner.protocol.SignInCode;
+import eu.wohlben.qits.systemrunner.protocol.SignInProgress;
+import eu.wohlben.qits.systemrunner.protocol.SignInState;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerAck;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCapabilities;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCodec;
@@ -44,6 +49,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -105,6 +112,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   private final LeaseContainers containers;
   private final LeaseLauncher launcher;
   private final LoginProbe loginProbe;
+  private final SignIns signIns;
+
+  /** The sign-ins' slow steps: a thread each while one runs, so none waits on a probe or a tick. */
+  private final ExecutorService signInWork;
 
   /** The build plane under the environment's settings alone: what every {@code Ack} merges over. */
   private final BuildPlane basePlane;
@@ -196,6 +207,17 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       BuildkitSettings buildkit,
       Timing timing,
       Clock clock) {
+    this(settings, external, buildkit, timing, clock, SignInProcesses.FORKED);
+  }
+
+  /** The same, with the sign-ins' process seam a suite replaces. */
+  SystemRunnerDomain(
+      RunnerSettings settings,
+      ExternalVolumes external,
+      BuildkitSettings buildkit,
+      Timing timing,
+      Clock clock,
+      SignInProcesses processes) {
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
     this.slots = settings.slots();
@@ -228,6 +250,25 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             });
     pool.setRemoveOnCancelPolicy(true);
     this.timer = pool;
+    this.signInWork =
+        Executors.newCachedThreadPool(
+            r -> {
+              Thread t = new Thread(r, "system-runner-sign-in");
+              t.setDaemon(true);
+              return t;
+            });
+    this.signIns =
+        new SignIns(
+            loginProbe,
+            names,
+            volumes,
+            new RunnerDocker(identity, settings.dockerBinary(), LoginProbe.DEADLINE),
+            processes,
+            signInWork,
+            timer,
+            SignIns.DEADLINE,
+            this::sendSignIn,
+            () -> scheduleProbe(Duration.ZERO));
   }
 
   @Override
@@ -342,9 +383,12 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       case Estate e -> onEstate(e, session);
       case ProbeLogin _ -> scheduleProbe(Duration.ZERO);
       case HealthCheck check -> onHealthCheck(check, session);
+      case SignIn signIn -> onSignIn(signIn, session);
+      case SignInCode code -> signIns.code(code);
+      case SignInCancel cancel -> signIns.cancel(cancel);
       default ->
-          // inventory, loginState and healthChecked are runner → server; a host echoing one is
-          // not a conversation this has.
+          // inventory, loginState, healthChecked and signInProgress are runner → server; a host
+          // echoing one is not a conversation this has.
           LOG.debugf("system-runner ignored a %s from its host", message.getClass().getSimpleName());
     }
   }
@@ -366,6 +410,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   public void onDecommission(RunnerSession session) {
     decommissioning = true;
     live = false;
+    signIns.stopAll("the target is being decommissioned");
     timer.shutdownNow();
     List<LeaseContainers.Seen> seen;
     try {
@@ -387,13 +432,17 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * The build plane's builder, network and state volume, in that order — named, because none of
-   * them carries the owner label the helper removes by — then the first-run keys' container, which
-   * carries none either. The CI caches do carry it, and go with the labelled volumes.
+   * them carries the owner label the helper removes by — then the first-run keys' container and
+   * each harness's sign-in container, which carry none either. The CI caches do carry it, and go
+   * with the labelled volumes.
    */
   @Override
   public List<TeardownItem> teardown() {
     List<TeardownItem> items = new ArrayList<>(basePlane.names().teardown());
     items.add(new TeardownItem(TeardownItem.Type.CONTAINER, names.firstRun()));
+    for (String harness : SignIns.HARNESSES) {
+      items.add(new TeardownItem(TeardownItem.Type.CONTAINER, names.signIn(harness)));
+    }
     return List.copyOf(items);
   }
 
@@ -428,7 +477,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /** Stop the node's timers; the process ending does the same. For a suite's teardown. */
   void close() {
+    signIns.stopAll("the runner stops");
     timer.shutdownNow();
+    signInWork.shutdown();
     healthChecks.close();
   }
 
@@ -569,6 +620,43 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     HealthContext ctx =
         HealthContext.of(session, docker, () -> new SessionFacts(live, connectedSince, ackSlots));
     session.send(HealthChecked.of(HealthChecks.answer(check.requestId(), healthChecks.run(ctx))));
+  }
+
+  /**
+   * A {@code signIn}, against the probe image and the session's driver and pull; refused while the
+   * target is being decommissioned. Everything slow runs on the sign-ins' own threads.
+   */
+  private void onSignIn(SignIn signIn, RunnerSession session) {
+    if (decommissioning) {
+      sendSignIn(
+          new SignInProgress(
+              signIn.signInId(),
+              signIn.harness(),
+              SignInState.FAILED,
+              null,
+              null,
+              "the target is being decommissioned"));
+      return;
+    }
+    signIns.start(signIn, ack.probeImage(), session.driver(), session.registry()::pull);
+  }
+
+  /** A sign-in's progress, to the current session; dropped while there is none. */
+  private void sendSignIn(SignInProgress progress) {
+    RunnerSession s = session;
+    if (s == null) {
+      return;
+    }
+    try {
+      s.send(progress);
+    } catch (RuntimeException e) {
+      LOG.debugf("system-runner could not send sign-in progress: %s", e.getMessage());
+    }
+  }
+
+  /** The sign-ins, for a suite. */
+  SignIns signIns() {
+    return signIns;
   }
 
   /** The probe {@code after} from now, off the frame's thread: a pull can take minutes. */

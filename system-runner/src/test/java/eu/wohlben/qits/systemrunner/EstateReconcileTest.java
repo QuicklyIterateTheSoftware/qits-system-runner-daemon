@@ -32,6 +32,9 @@ import eu.wohlben.qits.systemrunner.protocol.LeaseState;
 import eu.wohlben.qits.systemrunner.protocol.Limits;
 import eu.wohlben.qits.systemrunner.protocol.LoginPresence;
 import eu.wohlben.qits.systemrunner.protocol.LoginState;
+import eu.wohlben.qits.systemrunner.protocol.SignIn;
+import eu.wohlben.qits.systemrunner.protocol.SignInProgress;
+import eu.wohlben.qits.systemrunner.protocol.SignInState;
 import eu.wohlben.qits.systemrunner.protocol.SlotImages;
 import eu.wohlben.qits.systemrunner.protocol.SlotType;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerAck;
@@ -573,6 +576,43 @@ class EstateReconcileTest {
         checked.checks().stream().map(c -> c.name()).toList());
     assertTrue(checked.checks().get(2).ok(), "login reports, never fails");
     assertEquals(DOT_CLAUDE, checked.checks().get(2).data().get("volume"));
+  }
+
+  /**
+   * qits-1593 end to end: a {@code signIn} forks the login through the real process seam — the
+   * fake docker prints kimi's measured transcript and exits 0 — and the host reads its progress,
+   * then a fresh {@code loginState}.
+   */
+  @Test
+  void aSignInRunsTheLoginOnTheTargetAndRelaysItsProgressThenTheLoginState() throws Exception {
+    docker.answerFor(
+        "run",
+        "login",
+        0,
+        "Opening browser for Kimi device login:"
+            + " https://www.kimi.com/code/authorize_device?user_code=ABCD-1234\n"
+            + "If the browser did not open, paste the URL above and enter code: ABCD-1234\n"
+            + "Code expires in 1800s.\nWaiting for authorization to complete...\n",
+        "");
+    estateThenAck();
+    start();
+    host.await(LoginState.class);
+
+    host.send(new SignIn("s-1", "kimi"));
+
+    SignInProgress done = host.await(SignInProgress.class, 3);
+    assertEquals(
+        List.of(SignInState.STARTING, SignInState.AWAITING_BROWSER, SignInState.SUCCEEDED),
+        host.all(SignInProgress.class).stream().map(SignInProgress::state).toList());
+    SignInProgress awaiting = host.all(SignInProgress.class).get(1);
+    assertEquals(
+        "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234", awaiting.url());
+    assertEquals("ABCD-1234", awaiting.userCode());
+    assertEquals("s-1", done.signInId());
+    host.await(LoginState.class, 2);
+    List<String> login = runOf("qits-system-runner-sign-in-kimi-r1");
+    assertEquals(List.of("run", "--rm", "-i", "--name"), login.subList(0, 4));
+    assertFalse(login.contains("--label"), "the reconcile must never take a sign-in");
   }
 
   /**
