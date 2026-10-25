@@ -168,13 +168,13 @@ class SlotPolicyTest {
     assertFalse(ws.injectsBuildkitHost);
     assertFalse(ws.capDropAll);
     assertFalse(ws.noNewPrivileges);
-    assertFalse(ws.init, "today's workspace spec: no --init");
+    assertTrue(ws.init, "--init: the daemon must not be PID 1 (qits-1598)");
     assertFalse(ws.restartUnlessStopped);
     assertFalse(ws.lifecycle().restartsUnlessStopped(), "restart: no");
     assertEquals("ws-", ws.workKeyPrefix);
 
     ContainerSpec c = ws.containerSpec(NAME, spec(WS_IMAGE, env(), "1000"), MOUNTS);
-    assertContainer(c, WS_IMAGE, "1000", false);
+    assertContainer(c, WS_IMAGE, "1000", true);
   }
 
   @Test

@@ -29,7 +29,7 @@ import java.util.Set;
  *   networks          bridge + the build network      bridge                   bridge
  *   BUILDKIT_HOST     injected                        never                    never
  *   cap-drop / nnp    yes / yes                       no / no                  no / no
- *   --init            yes                             no                       yes
+ *   --init            yes                             yes                      yes
  *   restart           no                              no                       unless-stopped
  *   on ENDED          container removed               container removed, work volume kept
  * </pre>
@@ -38,6 +38,12 @@ import java.util.Set;
  * CLAUDE_CONFIG_DIR} is the policy's ({@code /claude-home/.claude} for every type that mounts the
  * credential volume), {@code BUILDKIT_HOST} is CI's build plane, and {@code HOME} is the image's —
  * a spec that moved it would move where every tool looks for its configuration.
+ *
+ * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
+ * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent
+ * becomes its own controlling terminal, and the agent's {@code setsid --ctty} is refused with
+ * EPERM. Every agent harness then exits 1 at launch (qits-1598). Tini also reaps the daemon's
+ * zombie children.
  */
 enum SlotPolicy {
   CI(
@@ -63,7 +69,7 @@ enum SlotPolicy {
       false,
       false,
       false,
-      false,
+      true,
       false,
       "ws-"),
   DESK(
