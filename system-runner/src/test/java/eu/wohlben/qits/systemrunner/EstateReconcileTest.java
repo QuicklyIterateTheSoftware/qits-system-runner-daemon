@@ -175,6 +175,7 @@ class EstateReconcileTest {
         List.of(
             "run",
             "-d",
+            "--init",
             "--name",
             lease(L1),
             "--network",
@@ -217,7 +218,7 @@ class EstateReconcileTest {
             "TZ=UTC",
             WS_IMAGE),
         run,
-        "the bridge, no extra host, no docker socket, no --init, no restart, no sandbox flags");
+        "the bridge, no extra host, no docker socket, --init (qits-1598), no restart, no sandbox flags");
     List<List<String>> calls = docker.calls();
     List<String> pull =
         calls.stream()
