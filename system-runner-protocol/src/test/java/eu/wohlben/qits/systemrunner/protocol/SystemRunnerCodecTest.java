@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
@@ -44,6 +45,9 @@ class SystemRunnerCodecTest {
       "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=y";
   private static final String KIMI_URL =
       "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234";
+
+  private static final UUID R1 = UUID.fromString("6f1e2d3c-4b5a-4968-8776-655443322110");
+  private static final String LEASE_CONTAINER = "qits-system-runner-lease-" + L1 + "-1a2b3c4d";
 
   private static LeaseSpec fullSpec() {
     Map<String, String> env = new LinkedHashMap<>();
@@ -112,7 +116,13 @@ class SystemRunnerCodecTest {
         new SignInProgress(S1, "claude", SignInState.AWAITING_CODE, CLAUDE_URL, null, null),
         new SignInProgress(
             S1, "kimi", SignInState.AWAITING_BROWSER, KIMI_URL, "ABCD-1234", null),
-        new SignInProgress(S1, null, SignInState.FAILED, null, null, "Login failed"));
+        new SignInProgress(S1, null, SignInState.FAILED, null, null, "Login failed"),
+        new Docker(R1, DockerOp.LIST_CONTAINERS, null, null, null, null, null),
+        new Docker(R1, DockerOp.LOGS, LEASE_CONTAINER, 500, "10m", null, null),
+        new Docker(R1, DockerOp.EXEC, LEASE_CONTAINER, null, null, List.of("ls", "-la", "/"), 60),
+        new DockerResult(R1, DockerStatus.OK, "[]", false, null, null),
+        new DockerResult(R1, DockerStatus.OK, "total 0\n", true, 2, "ls: oops"),
+        DockerResult.of(R1, DockerStatus.NOT_FOUND, "no container x of this target"));
   }
 
   @Test
@@ -281,6 +291,67 @@ class SystemRunnerCodecTest {
             + "\",\"userCode\":\"ABCD-1234\",\"detail\":null}",
         new SignInProgress(
             S1, "kimi", SignInState.AWAITING_BROWSER, KIMI_URL, "ABCD-1234", null));
+  }
+
+  @Test
+  void theDockerFramesAreSpelledExactlyAsTheDossierSaysKeyOrderIncluded() {
+    assertJson(
+        "{\"type\":\"docker\",\"requestId\":\""
+            + R1
+            + "\",\"op\":\"EXEC\",\"name\":\""
+            + LEASE_CONTAINER
+            + "\",\"tail\":null,\"since\":null,\"argv\":[\"cat\",\"/etc/os-release\"],"
+            + "\"timeoutSeconds\":30}",
+        new Docker(
+            R1, DockerOp.EXEC, LEASE_CONTAINER, null, null, List.of("cat", "/etc/os-release"), 30));
+    assertJson(
+        "{\"type\":\"docker\",\"requestId\":\""
+            + R1
+            + "\",\"op\":\"LIST_VOLUMES\",\"name\":null,\"tail\":null,\"since\":null,"
+            + "\"argv\":null,\"timeoutSeconds\":null}",
+        new Docker(R1, DockerOp.LIST_VOLUMES, null, null, null, null, null));
+    assertJson(
+        "{\"type\":\"docker-result\",\"requestId\":\""
+            + R1
+            + "\",\"status\":\"OK\",\"body\":\"hi\\n\",\"truncated\":false,\"exitCode\":0,"
+            + "\"stderr\":\"\"}",
+        new DockerResult(R1, DockerStatus.OK, "hi\n", false, 0, ""));
+    assertJson(
+        "{\"type\":\"docker-result\",\"requestId\":\""
+            + R1
+            + "\",\"status\":\"REFUSED\",\"body\":\"\",\"truncated\":false,\"exitCode\":null,"
+            + "\"stderr\":null}",
+        new DockerResult(R1, DockerStatus.REFUSED, null, false, null, null));
+  }
+
+  @Test
+  void aDockerFrameWithoutAUuidRequestIdOrWithAnUnknownOpOrStatusIsMalformed() {
+    assertMalformed(Map.of("type", "docker", "op", "LIST_CONTAINERS"));
+    assertMalformed(Map.of("type", "docker", "requestId", "req-1", "op", "LIST_CONTAINERS"));
+    assertMalformed(Map.of("type", "docker", "requestId", R1.toString()));
+    assertMalformed(Map.of("type", "docker", "requestId", R1.toString(), "op", "PRUNE"));
+    assertMalformed(
+        Map.of("type", "docker", "requestId", R1.toString(), "op", "LOGS", "tail", "x"));
+    assertMalformed(Map.of("type", "docker-result", "status", "OK", "body", ""));
+    assertMalformed(Map.of("type", "docker-result", "requestId", R1.toString()));
+    assertMalformed(
+        Map.of("type", "docker-result", "requestId", R1.toString(), "status", "MAYBE"));
+  }
+
+  @Test
+  void aDockerResultReadsAnAbsentBodyAsEmptyAndEitherBoxForItsNumbers() {
+    assertEquals(
+        new DockerResult(R1, DockerStatus.OK, "", false, 3, null),
+        CODEC.decode(
+            Map.of(
+                "type", "docker-result", "requestId", R1.toString(), "status", "OK", "exitCode",
+                3L)));
+    assertEquals(
+        new Docker(R1, DockerOp.LOGS, LEASE_CONTAINER, 5000, null, null, null),
+        CODEC.decode(
+            Map.of(
+                "type", "docker", "requestId", R1.toString(), "op", "LOGS", "name", LEASE_CONTAINER,
+                "tail", 5000.0)));
   }
 
   @Test

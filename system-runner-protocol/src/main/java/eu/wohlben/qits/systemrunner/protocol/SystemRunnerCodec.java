@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * The target frames over {@code Map<String,Object>}: the {@link DomainCodec} qits-runner-protocol's
@@ -28,7 +29,9 @@ import java.util.Set;
  * Inventory}: those lists are desired and observed state, and an absence read as "empty" would end
  * every lease on a node. A login presence is the one tolerant enum: unknown reads as UNKNOWN. A
  * sign-in frame without its {@code signInId} (and a {@code signIn} without its harness, a {@code
- * signInCode} without its code, a {@code signInProgress} without a known state) is refused too.
+ * signInCode} without its code, a {@code signInProgress} without a known state) is refused too,
+ * and so is a {@code docker} or {@code docker-result} without a uuid {@code requestId} or with an
+ * {@code op} or {@code status} this version does not know.
  *
  * <p>Every frame writes {@code type} first and its fields in record order; a nullable field is
  * written as {@code null} rather than left out. {@code healthCheck} and {@code healthChecked} are
@@ -75,6 +78,16 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
         map.put(Field.TYPE, Type.SIGN_IN_CANCEL);
         map.put(Field.SIGN_IN_ID, m.signInId());
       }
+      case Docker m -> {
+        map.put(Field.TYPE, Type.DOCKER);
+        map.put(Field.REQUEST_ID, m.requestId().toString());
+        map.put(Field.OP, m.op().name());
+        map.put(Field.NAME, m.name());
+        map.put(Field.TAIL, m.tail());
+        map.put(Field.SINCE, m.since());
+        map.put(Field.ARGV, m.argv() == null ? null : new ArrayList<>(m.argv()));
+        map.put(Field.TIMEOUT_SECONDS, m.timeoutSeconds());
+      }
       case Inventory m -> {
         map.put(Field.TYPE, Type.INVENTORY);
         List<Object> leases = new ArrayList<>();
@@ -107,6 +120,15 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
         map.put(Field.USER_CODE, m.userCode());
         map.put(Field.DETAIL, m.detail());
       }
+      case DockerResult m -> {
+        map.put(Field.TYPE, Type.DOCKER_RESULT);
+        map.put(Field.REQUEST_ID, m.requestId().toString());
+        map.put(Field.STATUS, m.status().name());
+        map.put(Field.BODY, m.body());
+        map.put(Field.TRUNCATED, m.truncated());
+        map.put(Field.EXIT_CODE, m.exitCode());
+        map.put(Field.STDERR, m.stderr());
+      }
     }
     return map;
   }
@@ -122,6 +144,15 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
       case Type.SIGN_IN_CODE ->
           new SignInCode(required(map, Field.SIGN_IN_ID), required(map, Field.CODE));
       case Type.SIGN_IN_CANCEL -> new SignInCancel(required(map, Field.SIGN_IN_ID));
+      case Type.DOCKER ->
+          new Docker(
+              uuid(map, Field.REQUEST_ID),
+              constant(DockerOp.class, WireMaps.str(map, Field.OP), Field.OP),
+              WireMaps.str(map, Field.NAME),
+              integer(map, Field.TAIL),
+              WireMaps.str(map, Field.SINCE),
+              map.get(Field.ARGV) == null ? null : WireMaps.stringList(map, Field.ARGV),
+              integer(map, Field.TIMEOUT_SECONDS));
       case Type.INVENTORY -> new Inventory(reports(map), requiredStrings(map, Field.VOLUMES));
       case Type.LOGIN_STATE ->
           new LoginState(
@@ -138,6 +169,14 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
               WireMaps.str(map, Field.URL),
               WireMaps.str(map, Field.USER_CODE),
               WireMaps.str(map, Field.DETAIL));
+      case Type.DOCKER_RESULT ->
+          new DockerResult(
+              uuid(map, Field.REQUEST_ID),
+              constant(DockerStatus.class, WireMaps.str(map, Field.STATUS), Field.STATUS),
+              WireMaps.str(map, Field.BODY),
+              WireMaps.boolVal(map, Field.TRUNCATED),
+              integer(map, Field.EXIT_CODE),
+              WireMaps.str(map, Field.STDERR));
       default -> throw new IllegalArgumentException("not a target runner frame: " + type);
     };
   }
@@ -259,6 +298,22 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
       throw new IllegalArgumentException(key + " is missing");
     }
     return value;
+  }
+
+  /** A required UUID: absent or not one is a refusal. */
+  private static UUID uuid(Map<String, Object> map, String key) {
+    String value = required(map, key);
+    try {
+      return UUID.fromString(value);
+    } catch (IllegalArgumentException notOne) {
+      throw new IllegalArgumentException(key + " is not a uuid: " + value);
+    }
+  }
+
+  /** An optional integer: absent is null, either box for a number is fine. */
+  private static Integer integer(Map<String, Object> map, String key) {
+    Number value = WireMaps.number(map, key);
+    return value == null ? null : value.intValue();
   }
 
   /** An enum spelled as its constant's name; absent or unknown is a refusal, never a guess. */

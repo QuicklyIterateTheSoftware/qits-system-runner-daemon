@@ -18,7 +18,9 @@ public sealed interface SystemRunnerMessage extends RunnerMessage
         SignIn,
         SignInCode,
         SignInCancel,
+        Docker,
         Inventory,
         LoginState,
         HealthChecked,
-        SignInProgress {}
+        SignInProgress,
+        DockerResult {}

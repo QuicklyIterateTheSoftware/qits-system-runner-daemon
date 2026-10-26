@@ -24,6 +24,8 @@ import java.util.Set;
  *   HealthCheck{requestId} → HealthChecked{ok, detail, requestId, checks}
  *   SignIn{signInId, harness}, SignInCode{signInId, code}, SignInCancel{signInId}
  *     → SignInProgress{signInId, harness, state, url, userCode, detail} … (LoginState after SUCCEEDED)
+ *   Docker{requestId, op, name, tail, since, argv, timeoutSeconds}
+ *     → DockerResult{requestId, status, body, truncated, exitCode, stderr}
  * </pre>
  *
  * <p><b>Identity is not on the wire.</b> The runner presents a bearer minted from the idp client it
@@ -104,11 +106,13 @@ public final class SystemRunnerProtocol {
     public static final String SIGN_IN = "signIn";
     public static final String SIGN_IN_CODE = "signInCode";
     public static final String SIGN_IN_CANCEL = "signInCancel";
+    public static final String DOCKER = "docker";
     // runner -> qits-system
     public static final String INVENTORY = "inventory";
     public static final String LOGIN_STATE = "loginState";
     public static final String HEALTH_CHECKED = "healthChecked";
     public static final String SIGN_IN_PROGRESS = "signInProgress";
+    public static final String DOCKER_RESULT = "docker-result";
 
     /** Every target type — what {@link SystemRunnerCodec#types()} answers. */
     public static final Set<String> ALL =
@@ -119,10 +123,12 @@ public final class SystemRunnerProtocol {
             SIGN_IN,
             SIGN_IN_CODE,
             SIGN_IN_CANCEL,
+            DOCKER,
             INVENTORY,
             LOGIN_STATE,
             HEALTH_CHECKED,
-            SIGN_IN_PROGRESS);
+            SIGN_IN_PROGRESS,
+            DOCKER_RESULT);
 
     private Type() {}
   }
@@ -171,6 +177,18 @@ public final class SystemRunnerProtocol {
     public static final String CODE = "code";
     public static final String URL = "url";
     public static final String USER_CODE = "userCode";
+    // docker (REQUEST_ID above)
+    public static final String OP = "op";
+    public static final String NAME = "name";
+    public static final String TAIL = "tail";
+    public static final String SINCE = "since";
+    public static final String ARGV = "argv";
+    public static final String TIMEOUT_SECONDS = "timeoutSeconds";
+    // docker-result (REQUEST_ID and EXIT_CODE above)
+    public static final String STATUS = "status";
+    public static final String BODY = "body";
+    public static final String TRUNCATED = "truncated";
+    public static final String STDERR = "stderr";
     // the Hello capabilities extension
     public static final String SLOTS = "slots";
     public static final String ENGINE_ID = "engineId";
