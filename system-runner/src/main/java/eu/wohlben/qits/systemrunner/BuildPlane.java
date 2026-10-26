@@ -372,13 +372,12 @@ final class BuildPlane {
         // made below
       }
     }
-    if (!docker
-        .run(List.of(docker.binary(), "image", "inspect", "--format", "{{.Id}}", image()))
-        .ok()) {
-      RunnerDocker.Result pulled =
-          docker.run(List.of(docker.binary(), "pull", image()), docker.pullDeadline());
-      if (!pulled.ok()) {
-        return Optional.of("could not pull the builder image " + image() + ": " + pulled.detail());
+    // The pull is the domain's to start off the converge lock (imagePresent, pullImage); this one
+    // is the belt for an image removed since, and is not reached on a cold node.
+    if (!imagePresent()) {
+      Optional<String> pulled = pullImage();
+      if (pulled.isPresent()) {
+        return pulled;
       }
     }
     RunnerDocker.Result started = docker.run(runArgv(stamp));
@@ -386,6 +385,26 @@ final class BuildPlane {
       return Optional.of("could not run the builder: " + started.detail());
     }
     LOG.infof("system-runner's builder %s is up on %s", names.builder(), image());
+    return Optional.empty();
+  }
+
+  /** Whether the builder image is on this node: one {@code docker image inspect}. */
+  boolean imagePresent() {
+    return docker
+        .run(List.of(docker.binary(), "image", "inspect", "--format", "{{.Id}}", image()))
+        .ok();
+  }
+
+  /**
+   * Pull the builder image under the host's docker config and {@link RunnerDocker#pullDeadline()}:
+   * empty on success, else why not. Slow on a cold node, so never under the converge lock.
+   */
+  Optional<String> pullImage() {
+    RunnerDocker.Result pulled =
+        docker.run(List.of(docker.binary(), "pull", image()), docker.pullDeadline());
+    if (!pulled.ok()) {
+      return Optional.of("could not pull the builder image " + image() + ": " + pulled.detail());
+    }
     return Optional.empty();
   }
 

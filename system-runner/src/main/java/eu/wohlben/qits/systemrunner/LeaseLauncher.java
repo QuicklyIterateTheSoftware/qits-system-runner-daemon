@@ -26,8 +26,11 @@ import org.jboss.logging.Logger;
  * <ul>
  *   <li><b>RUNNING</b>, refused by its policy or its {@code adopt} ({@link SlotPolicy#refusal},
  *       {@link LegacyAdoption#refusal}) → {@code FAILED}, the node untouched;
- *   <li><b>RUNNING</b>, no container → the image pulled when absent (under the runner's own login),
- *       every external node volume asked after, the adopted container stopped and removed and the
+ *   <li><b>RUNNING</b>, no container, its image (or a CI lease's builder image) not on the node →
+ *       {@code STARTING}: the pull is started on {@link ImagePulls}, off the converge lock, and the
+ *       convergence returns at once; the pull's end converges the estate again. A failed pull is
+ *       {@code FAILED} with docker's words;
+ *   <li><b>RUNNING</b>, no container, the images here → every external node volume asked after, the adopted container stopped and removed and the
  *       adopted volume asked after — or the work volume and the runner's own node volumes made
  *       labelled — then {@code run};
  *   <li><b>RUNNING</b>, a container whose {@code spec-hash} and {@code mounts} labels are the
@@ -87,6 +90,7 @@ final class LeaseLauncher {
   private final TargetVolumes volumes;
   private final LeaseContainers containers;
   private final Supplier<BuildPlane> buildPlane;
+  private final ImagePulls pulls;
 
   LeaseLauncher(
       RunnerIdentity identity,
@@ -94,13 +98,15 @@ final class LeaseLauncher {
       TargetNames names,
       TargetVolumes volumes,
       LeaseContainers containers,
-      Supplier<BuildPlane> buildPlane) {
+      Supplier<BuildPlane> buildPlane,
+      ImagePulls pulls) {
     this.identity = identity;
     this.docker = docker;
     this.names = names;
     this.volumes = volumes;
     this.containers = containers;
     this.buildPlane = buildPlane;
+    this.pulls = pulls;
   }
 
   /**
@@ -182,6 +188,52 @@ final class LeaseLauncher {
     return create(entry, policy, name, workVolume, mounts, session);
   }
 
+  /**
+   * Empty when the lease's image — and a CI lease's builder image — are on the node; else {@code
+   * STARTING} while a pull runs, or {@code FAILED} with docker's words. Never waits on a pull: both
+   * are started together, on {@link ImagePulls}, and the convergence moves on.
+   */
+  private Optional<Outcome> awaitingImages(
+      String leaseId, String image, BuildPlane plane, RunnerSession session) {
+    ImagePulls.Status lease =
+        NodeImages.present(docker, image)
+            ? ImagePulls.Status.READY
+            : pulls.status(image, () -> session.registry().pull(image));
+    ImagePulls.Status builder =
+        plane == null || plane.imagePresent()
+            ? ImagePulls.Status.READY
+            : pulls.status(plane.image(), plane::pullImage);
+    if (lease.failed()) {
+      return Optional.of(failed(leaseId, "could not pull " + image + ": " + brief(lease.detail())));
+    }
+    if (builder.failed()) {
+      return Optional.of(failed(leaseId, "the build plane is not up: " + brief(builder.detail())));
+    }
+    if (lease.pulling() || builder.pulling()) {
+      LOG.debugf("system-runner's lease %s is STARTING: its image is being pulled", leaseId);
+      return Optional.of(Outcome.of(LeaseState.STARTING));
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * Start pulling a lease's image ahead of its convergence, when it is not on the node: the
+   * pre-pull at the {@code Ack}. Never waits.
+   */
+  void prefetch(String image, RunnerSession session) {
+    if (image != null && !image.isBlank() && !NodeImages.present(docker, image)) {
+      pulls.prefetch(image, () -> session.registry().pull(image));
+    }
+  }
+
+  /** Start pulling the builder image when it is not on the node: the pre-pull at the {@code Ack}. */
+  void prefetchBuilder() {
+    BuildPlane plane = buildPlane.get();
+    if (!plane.imagePresent()) {
+      pulls.prefetch(plane.image(), plane::pullImage);
+    }
+  }
+
   /** Stop and remove the lease's container, if there is one: the lease is over. */
   Outcome end(String leaseId, RunnerSession session) {
     String name;
@@ -249,10 +301,9 @@ final class LeaseLauncher {
     } catch (IllegalArgumentException | IllegalStateException refused) {
       return failed(leaseId, "the lease spec was refused: " + refused.getMessage());
     }
-    String image = entry.spec().image();
-    Optional<String> notHere = NodeImages.ensure(docker, session.registry()::pull, image);
-    if (notHere.isPresent()) {
-      return failed(leaseId, "could not pull " + image + ": " + brief(notHere.get()));
+    Optional<Outcome> notYet = awaitingImages(leaseId, entry.spec().image(), plane, session);
+    if (notYet.isPresent()) {
+      return notYet.get();
     }
     if (policy.workVolume && entry.adopt() == null) {
       ContainersDriver.OpResult work = volumes.ensureWork(driver, entry.workVolume(), deadline);

@@ -85,6 +85,7 @@ class EstateReconcileTest {
 
   private static final String REGISTRY = "registry.example:5000/qits/";
   private static final String WS_IMAGE = REGISTRY + "workspace:2026.1023.1";
+  private static final String WS_NEXT = REGISTRY + "workspace:2026.1024.1";
   private static final String DESK_IMAGE = REGISTRY + "project-agent:2026.1023.1";
   private static final SystemRunnerAck ACK =
       new SystemRunnerAck(
@@ -494,6 +495,92 @@ class EstateReconcileTest {
     assertTrue(runsOf(lease(L1)).isEmpty());
   }
 
+  // ---- pulls off the converge lock (qits-1543) ---------------------------------------------------
+
+  @Test
+  void aLeaseWhoseImageIsMissingIsStartingWhileItPullsAndAnEndBesideItIsProcessedAtOnce()
+      throws Exception {
+    missing(WS_NEXT);
+    docker.answerFor("pull", WS_NEXT, 0, "", "");
+    docker.hang("pull+" + safe(WS_NEXT), 6);
+    seen(L2, "running", 0, "CI", H1, ciMounts());
+    LeaseEntry ended = new LeaseEntry(L2, SlotType.CI, DesiredState.ENDED, null, H1, null, null);
+    estateThenAck(workspace(L1, H1, "ws-42", WS_NEXT), ended);
+    start();
+
+    // The end comes after the pulling lease in the estate, and is done while the pull still hangs.
+    awaitCall(calls -> has(calls, List.of("rm", "-f", lease(L2))));
+    Inventory inventory =
+        awaitInventory(
+            i -> stateOf(i, L1) == LeaseState.STARTING && stateOf(i, L2) == LeaseState.ENDED);
+    assertEquals(new LeaseReport(L1, LeaseState.STARTING, null, null, null), report(inventory, L1));
+    awaitTrue(() -> docker.calls("pull").stream().anyMatch(c -> c.contains(WS_NEXT)));
+    assertTrue(runsOf(lease(L1)).isEmpty(), "the convergence did not wait for the pull");
+
+    // The pull lands: its end converges the estate again, with no new estate from the host.
+    docker.answerFor("image-inspect", WS_NEXT, 0, "sha256:next\n", "");
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    assertEquals(WS_NEXT, runOf(lease(L1)).getLast());
+  }
+
+  @Test
+  void twoLeasesOfOneMissingImageShareOnePullAndBothStartWhenItLands() throws Exception {
+    missing(WS_NEXT);
+    docker.answerFor("pull", WS_NEXT, 0, "", "");
+    docker.hang("pull+" + safe(WS_NEXT), 2);
+    estateThenAck(workspace(L1, H1, "ws-42", WS_NEXT), workspace(L2, H1, "ws-43", WS_NEXT));
+    start();
+
+    awaitTrue(() -> docker.calls("pull").stream().anyMatch(c -> c.contains(WS_NEXT)));
+    awaitInventory(
+        i -> stateOf(i, L1) == LeaseState.STARTING && stateOf(i, L2) == LeaseState.STARTING);
+    assertTrue(runsOf(lease(L1)).isEmpty() && runsOf(lease(L2)).isEmpty(), "both wait");
+    docker.answerFor("image-inspect", WS_NEXT, 0, "sha256:next\n", "");
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty() && !runsOf(lease(L2)).isEmpty());
+    assertEquals(
+        1,
+        docker.calls("pull").stream().filter(c -> c.contains(WS_NEXT)).count(),
+        docker.calls()::toString);
+  }
+
+  @Test
+  void aFailedPullFailsTheLeaseWithDockersWords() throws Exception {
+    missing(WS_NEXT);
+    docker.answerFor("pull", WS_NEXT, 1, "", "Error response from daemon: manifest unknown");
+    estateThenAck(workspace(L1, H1, "ws-42", WS_NEXT));
+    start();
+
+    Inventory inventory = awaitInventory(i -> stateOf(i, L1) == LeaseState.FAILED);
+    String detail = report(inventory, L1).detail();
+    assertTrue(detail.startsWith("could not pull " + WS_NEXT + ": "), detail);
+    assertTrue(detail.contains("manifest unknown"), detail);
+    assertTrue(runsOf(lease(L1)).isEmpty());
+  }
+
+  @Test
+  void aCiLeaseIsStartingWhileTheBuilderImagePullsThenRunsOnceItLands() throws Exception {
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    missing(BuildkitSettings.DEFAULT_IMAGE);
+    docker.answerFor("pull", BuildkitSettings.DEFAULT_IMAGE, 0, "", "");
+    docker.hang("pull+" + safe(BuildkitSettings.DEFAULT_IMAGE), 3);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitInventory(i -> stateOf(i, L1) == LeaseState.STARTING);
+    awaitCall(calls -> has(calls, List.of("pull", BuildkitSettings.DEFAULT_IMAGE)));
+    assertTrue(runsOf(lease(L1)).isEmpty(), "no CI lease runs before its builder");
+    assertTrue(runsOf(BUILDER).isEmpty(), "the builder waits for its image");
+
+    docker.answerFor("image-inspect", BuildkitSettings.DEFAULT_IMAGE, 0, "sha256:bk\n", "");
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    assertFalse(runsOf(BUILDER).isEmpty());
+    assertEquals(
+        1,
+        docker.calls("pull").stream().filter(c -> c.contains(BuildkitSettings.DEFAULT_IMAGE)).count(),
+        "the Ack's pre-pull and the lease share one pull: " + docker.calls());
+  }
+
   @Test
   void anEndedCiLeaseIsRemovedAndTheBuilderStays() throws Exception {
     seen(L1, "running", 0, "CI", H1, ciMounts());
@@ -728,6 +815,11 @@ class EstateReconcileTest {
         leaseId, SlotType.WORKSPACE, DesiredState.RUNNING, spec(WS_IMAGE, env()), hash, "ws-42", null);
   }
 
+  private static LeaseEntry workspace(String leaseId, String hash, String workKey, String image) {
+    return new LeaseEntry(
+        leaseId, SlotType.WORKSPACE, DesiredState.RUNNING, spec(image, env()), hash, workKey, null);
+  }
+
   private static LeaseEntry desk(String leaseId, String hash) {
     return new LeaseEntry(
         leaseId,
@@ -791,6 +883,24 @@ class EstateReconcileTest {
     awaitTrue(() -> host.all(Inventory.class).stream().anyMatch(condition));
     List<Inventory> all = new ArrayList<>(host.all(Inventory.class));
     return all.stream().filter(condition).reduce((a, b) -> b).orElseThrow();
+  }
+
+  private static LeaseState stateOf(Inventory inventory, String leaseId) {
+    return inventory.leases().stream()
+        .filter(r -> r.leaseId().equals(leaseId))
+        .map(LeaseReport::state)
+        .findFirst()
+        .orElse(null);
+  }
+
+  /** {@code image} is not on the node: docker's inspect of it says so. */
+  private void missing(String image) throws Exception {
+    docker.answerFor("image-inspect", image, 1, "", "Error: No such image: " + image);
+  }
+
+  /** FakeDocker's spelling of an object in an answer key. */
+  private static String safe(String object) {
+    return object.replaceAll("[^A-Za-z0-9._-]", "_");
   }
 
   private static LeaseReport report(Inventory inventory, String leaseId) {

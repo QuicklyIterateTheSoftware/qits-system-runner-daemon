@@ -39,9 +39,13 @@ Every name the runner uses is derived from these roots (`SystemRunnerProtocol`, 
 The server's `estate` is the whole desired state of this target, and the runner converges every
 lease in it (`SystemRunnerDomain`, `LeaseLauncher`):
 
-- **RUNNING, no container** — the image is pulled when absent (under the runner's own registry
-  login, never your docker config), the work volume and the node's credential and cache volumes
-  are created labelled, and the lease is `docker run` under its `SlotPolicy`.
+- **RUNNING, no container, its image not here** — reported `STARTING` while the image (and, for a
+  CI lease, the builder's image) is pulled in the background (`ImagePulls`: at most two pulls at
+  once, one per image), under the runner's own registry login, never your docker config. The pull
+  never holds the convergence: ends, other leases and the inventory go on at once, and the pull's
+  end converges the estate again. A failed pull is `FAILED` with docker's words.
+- **RUNNING, no container, its image here** — the work volume and the node's credential and cache
+  volumes are created labelled, and the lease is `docker run` under its `SlotPolicy`.
 - **RUNNING, same spec hash** — left alone; reported `RUNNING`, or `EXITED` with its exit code. An
   exited lease is **never restarted** by the runner: its owner ends it.
 - **RUNNING, another spec hash** — stopped, the container removed (never its work volume), run
@@ -195,7 +199,8 @@ its volume, on the same docker on the platform host. No build-plane name is conf
 
 `BuildPlane`, ported from qits-ci-runner-daemon. Started on the **first CI lease**, not at boot,
 and re-checked on every later one: the network and the state volume made, the builder run (its
-image pulled when absent) or started, or replaced when its **stamp** — a hash of the image, the
+image pulled in the background when absent, the CI lease `STARTING` meanwhile; pre-pulled at the
+`Ack` on a target with slots) or started, or replaced when its **stamp** — a hash of the image, the
 rendered `buildkitd.toml`, the bootstrap and the state volume — moved; the state volume rides
 across. A container under the builder's name without the stamp label is somebody else's: the CI
 lease fails and the container is left alone. The toml bounds the worker (`max-parallelism`, GC at

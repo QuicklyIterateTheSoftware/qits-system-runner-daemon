@@ -54,7 +54,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import org.jboss.logging.Logger;
@@ -77,6 +81,12 @@ import org.jboss.logging.Logger;
  * <p><b>A slot is a running lease</b>, counted by the toolkit's slot ledger and fed from docker, so
  * the {@code Hello}'s {@code heldLeases} names what a reconnecting runner still runs. Nothing here
  * decides placement: the server takes {@code capabilities.slots} as the target's total.
+ *
+ * <p><b>No pull runs under the converge lock</b> (qits-1543): a lease whose image, or whose
+ * builder's image, is not on the node is reported {@code STARTING} while {@link ImagePulls} pulls it
+ * on its own threads, and the convergence goes on to the next entry — so an end, a lease whose image
+ * is here and the {@code inventory} never wait behind a multi-gigabyte cold pull. The pull's end
+ * converges the latest {@code estate} again.
  *
  * <p><b>Rollover never drains.</b> {@link #quiescent()} is "no convergence in flight", never "holds
  * nothing": a lease container is node state that outlives the runner process, and its successor
@@ -113,6 +123,20 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   private final LeaseLauncher launcher;
   private final LoginProbe loginProbe;
   private final SignIns signIns;
+
+  /** At most this many image pulls run at once; one per image reference ({@link ImagePulls}). */
+  static final int PULL_THREADS = 2;
+
+  /** The image pulls' threads: bounded, off the converge lock. */
+  private final ThreadPoolExecutor pullWork;
+
+  /** The one thread a settled pull converges the latest estate again on. */
+  private final ThreadPoolExecutor reconvergeWork;
+
+  /** A re-convergence is queued: settled pulls coalesce into one. */
+  private final AtomicBoolean reconvergeQueued = new AtomicBoolean();
+
+  private final ImagePulls pulls;
 
   /** The sign-ins' slow steps: a thread each while one runs, so none waits on a probe or a tick. */
   private final ExecutorService signInWork;
@@ -226,8 +250,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.containers = new LeaseContainers(identity, settings.runnerId(), docker);
     this.basePlane = new BuildPlane(identity, settings.runnerId(), docker, buildkit);
     this.buildPlane = basePlane;
+    this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
+    this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
+    this.pulls = new ImagePulls(pullWork, this::reconvergeSoon);
     this.launcher =
-        new LeaseLauncher(identity, docker, names, volumes, containers, () -> buildPlane);
+        new LeaseLauncher(identity, docker, names, volumes, containers, () -> buildPlane, pulls);
     this.loginProbe =
         new LoginProbe(
             identity,
@@ -269,6 +296,23 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             SignIns.DEADLINE,
             this::sendSignIn,
             () -> scheduleProbe(Duration.ZERO));
+  }
+
+  private static ThreadPoolExecutor daemonPool(String name, int threads) {
+    ThreadPoolExecutor pool =
+        new ThreadPoolExecutor(
+            threads,
+            threads,
+            60,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(),
+            r -> {
+              Thread t = new Thread(r, name);
+              t.setDaemon(true);
+              return t;
+            });
+    pool.allowCoreThreadTimeOut(true);
+    return pool;
   }
 
   @Override
@@ -358,6 +402,32 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     sendInventory(session, true);
     startTick();
     scheduleProbe(Duration.ZERO);
+    prePull(session);
+  }
+
+  /**
+   * The images a CI lease will need, pulled in the background before one is placed: the builder's
+   * when this target has slots and the host names a CI slot image, and the spec image of every
+   * RUNNING lease of the estate kept from the last connection. The {@code Ack} carries the CI slot
+   * image's repository prefix only ({@link SlotImages#ci()}), never a pinned reference, so the CI
+   * image itself is pulled once a lease names it — off the converge lock, like this.
+   */
+  private void prePull(RunnerSession session) {
+    try {
+      if (ackSlots != null && ackSlots > 0 && ack.slotImages().ci() != null) {
+        launcher.prefetchBuilder();
+      }
+      Estate kept = estate;
+      if (kept != null) {
+        for (LeaseEntry entry : kept.leases()) {
+          if (entry.desired() == DesiredState.RUNNING && entry.spec() != null) {
+            launcher.prefetch(entry.spec().image(), session);
+          }
+        }
+      }
+    } catch (RuntimeException e) {
+      LOG.warnf("system-runner could not start its pre-pulls: %s", e.getMessage());
+    }
   }
 
   /**
@@ -412,6 +482,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     live = false;
     signIns.stopAll("the target is being decommissioned");
     timer.shutdownNow();
+    pullWork.shutdownNow();
+    reconvergeWork.shutdownNow();
     List<LeaseContainers.Seen> seen;
     try {
       seen = containers.list();
@@ -479,6 +551,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   void close() {
     signIns.stopAll("the runner stops");
     timer.shutdownNow();
+    pullWork.shutdownNow();
+    reconvergeWork.shutdownNow();
     signInWork.shutdown();
     healthChecks.close();
   }
@@ -495,13 +569,57 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     if (decommissioning) {
       return;
     }
+    // A failed pull already reported is tried again from the server's next estate, never from a
+    // re-convergence of the runner's own: that would pull in a loop.
+    pulls.retryReported();
+    convergeEstate(e, session, false);
+  }
+
+  /**
+   * A pull settled: converge the latest {@code estate} again, on the re-convergence thread, so the
+   * lease whose image arrived is created. Coalesced: one queued at a time.
+   */
+  private void reconvergeSoon() {
+    if (!reconvergeQueued.compareAndSet(false, true)) {
+      return;
+    }
+    try {
+      reconvergeWork.execute(
+          () -> {
+            reconvergeQueued.set(false);
+            RunnerSession s = session;
+            if (s != null) {
+              convergeEstate(null, s, true);
+            }
+          });
+    } catch (RejectedExecutionException stopping) {
+      reconvergeQueued.set(false);
+    }
+  }
+
+  /**
+   * One convergence of an estate under {@link #converging}: {@code given}, or — for a re-convergence —
+   * the latest one, and then only while this connection has had one (nothing is removed before an
+   * {@code estate} arrived on the current connection).
+   */
+  private void convergeEstate(Estate given, RunnerSession session, boolean again) {
+    if (decommissioning) {
+      return;
+    }
+    boolean converged = false;
     inFlight.incrementAndGet();
     converging.lock();
     try {
+      Estate e = given != null ? given : estate;
+      if (e == null || decommissioning || (again && (!live || !estateThisSession))) {
+        return;
+      }
       Set<String> listed = new LinkedHashSet<>();
       e.leases().forEach(entry -> listed.add(entry.leaseId()));
       estateThisSession = true;
-      LOG.infof("system-runner's estate: %d lease(s), %d purge(s)", listed.size(), e.purges().size());
+      LOG.infof(
+          "system-runner's estate%s: %d lease(s), %d purge(s)",
+          again ? " again, after a pull" : "", listed.size(), e.purges().size());
       failures.keySet().retainAll(listed);
       sendInventory(session, false);
       if (stopOutside(listed, session)) {
@@ -511,11 +629,14 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
         converge(entry, session);
       }
       purge(e, session);
+      converged = true;
     } finally {
       converging.unlock();
       inFlight.decrementAndGet();
     }
-    look(session, true);
+    if (converged) {
+      look(session, true);
+    }
   }
 
   /**
