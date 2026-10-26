@@ -17,6 +17,9 @@ import eu.wohlben.qits.runner.toolkit.health.HealthChecks;
 import eu.wohlben.qits.runner.toolkit.health.HealthContext;
 import eu.wohlben.qits.runner.toolkit.health.SessionFacts;
 import eu.wohlben.qits.systemrunner.protocol.DesiredState;
+import eu.wohlben.qits.systemrunner.protocol.Docker;
+import eu.wohlben.qits.systemrunner.protocol.DockerResult;
+import eu.wohlben.qits.systemrunner.protocol.DockerStatus;
 import eu.wohlben.qits.systemrunner.protocol.Estate;
 import eu.wohlben.qits.systemrunner.protocol.HealthCheck;
 import eu.wohlben.qits.systemrunner.protocol.HealthChecked;
@@ -141,6 +144,14 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The sign-ins' slow steps: a thread each while one runs, so none waits on a probe or a tick. */
   private final ExecutorService signInWork;
 
+  /** At most this many {@code docker} frames run at once; the rest wait their turn. */
+  static final int DOCKER_THREADS = 4;
+
+  /** The {@code docker} frames' threads: an exec may take minutes, so never the socket's. */
+  private final ThreadPoolExecutor dockerWork;
+
+  private final DockerOperations dockerOps;
+
   /** The build plane under the environment's settings alone: what every {@code Ack} merges over. */
   private final BuildPlane basePlane;
 
@@ -253,6 +264,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
     this.pulls = new ImagePulls(pullWork, this::reconvergeSoon);
+    this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
+    this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
     this.launcher =
         new LeaseLauncher(identity, docker, names, volumes, containers, () -> buildPlane, pulls);
     this.loginProbe =
@@ -456,8 +469,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       case SignIn signIn -> onSignIn(signIn, session);
       case SignInCode code -> signIns.code(code);
       case SignInCancel cancel -> signIns.cancel(cancel);
+      case Docker request -> onDocker(request, session);
       default ->
-          // inventory, loginState, healthChecked and signInProgress are runner → server; a host
+          // inventory, loginState, healthChecked, signInProgress and docker-result are runner →
+          // server; a host
           // echoing one is not a conversation this has.
           LOG.debugf("system-runner ignored a %s from its host", message.getClass().getSimpleName());
     }
@@ -484,6 +499,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     timer.shutdownNow();
     pullWork.shutdownNow();
     reconvergeWork.shutdownNow();
+    dockerWork.shutdownNow();
     List<LeaseContainers.Seen> seen;
     try {
       seen = containers.list();
@@ -553,6 +569,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     timer.shutdownNow();
     pullWork.shutdownNow();
     reconvergeWork.shutdownNow();
+    dockerWork.shutdownNow();
     signInWork.shutdown();
     healthChecks.close();
   }
@@ -772,6 +789,37 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       s.send(progress);
     } catch (RuntimeException e) {
       LOG.debugf("system-runner could not send sign-in progress: %s", e.getMessage());
+    }
+  }
+
+  /**
+   * A {@code docker} request, run on the docker frames' own threads ({@link DockerOperations}) and
+   * answered with exactly one {@code docker-result} on the session it came on: refused while the
+   * target is being decommissioned, failed when the runner is stopping.
+   */
+  private void onDocker(Docker request, RunnerSession session) {
+    if (decommissioning) {
+      sendDocker(
+          session,
+          DockerResult.of(
+              request.requestId(), DockerStatus.REFUSED, "the target is being decommissioned"));
+      return;
+    }
+    try {
+      dockerWork.execute(() -> sendDocker(session, dockerOps.answer(request)));
+    } catch (RejectedExecutionException stopping) {
+      sendDocker(
+          session,
+          DockerResult.of(request.requestId(), DockerStatus.FAILED, "the runner is stopping"));
+    }
+  }
+
+  /** A {@code docker-result}; dropped when the socket it answers went away. */
+  private static void sendDocker(RunnerSession session, DockerResult result) {
+    try {
+      session.send(result);
+    } catch (RuntimeException e) {
+      LOG.debugf("system-runner could not send a docker result: %s", e.getMessage());
     }
   }
 

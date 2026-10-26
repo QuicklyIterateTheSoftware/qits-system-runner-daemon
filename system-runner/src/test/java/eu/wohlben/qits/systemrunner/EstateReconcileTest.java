@@ -22,6 +22,10 @@ import eu.wohlben.qits.runner.toolkit.testing.FakeRunnerHost;
 import eu.wohlben.qits.systemrunner.protocol.Adopt;
 import eu.wohlben.qits.systemrunner.protocol.DesiredState;
 import eu.wohlben.qits.systemrunner.protocol.Estate;
+import eu.wohlben.qits.systemrunner.protocol.Docker;
+import eu.wohlben.qits.systemrunner.protocol.DockerOp;
+import eu.wohlben.qits.systemrunner.protocol.DockerResult;
+import eu.wohlben.qits.systemrunner.protocol.DockerStatus;
 import eu.wohlben.qits.systemrunner.protocol.HealthCheck;
 import eu.wohlben.qits.systemrunner.protocol.HealthChecked;
 import eu.wohlben.qits.systemrunner.protocol.Inventory;
@@ -52,6 +56,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -663,6 +668,22 @@ class EstateReconcileTest {
         checked.checks().stream().map(c -> c.name()).toList());
     assertTrue(checked.checks().get(2).ok(), "login reports, never fails");
     assertEquals(DOT_CLAUDE, checked.checks().get(2).data().get("volume"));
+  }
+
+  @Test
+  void aDockerFrameIsAnsweredWithExactlyOneDockerResultOffTheSocketsThread() throws Exception {
+    estateThenAck();
+    start();
+    host.await(LoginState.class);
+
+    UUID id = UUID.randomUUID();
+    host.send(new Docker(id, DockerOp.INSPECT_CONTAINER, "postgres", null, null, null, null));
+    DockerResult result = host.await(DockerResult.class);
+    assertEquals(
+        DockerResult.of(id, DockerStatus.NOT_FOUND, "no container postgres of this target"),
+        result);
+    assertTrue(
+        docker.calls().stream().noneMatch(c -> c.contains("postgres")), "never asked docker");
   }
 
   /**
