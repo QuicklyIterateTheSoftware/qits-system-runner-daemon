@@ -173,21 +173,34 @@ final class ClaudeFirstRun {
         "");
   }
 
-  /** {@code [getpath(p1), …] | all(. != null)}: true exactly when every key of the file is set. */
+  /**
+   * {@code [getpath(p1) <set>, …] | all}: true exactly when every key of the file is set. A flag
+   * whose value is {@code true} is set only when it reads {@code true}: {@code false} is the very
+   * question it answers left open, so {@code hasCompletedOnboarding: false} still opens the theme
+   * picker on every launch (measured on CLI 2.1.283, qits-1593's verification).
+   */
   static String checkProgram(String file) {
     return keysOf(file).stream()
-            .map(k -> "getpath(" + path(k) + ")")
+            .map(k -> "(getpath(" + path(k) + ") " + (isFlag(k) ? "== true" : "!= null") + ")")
             .collect(Collectors.joining(", ", "[", "]"))
-        + " | all(. != null)";
+        + " | all";
   }
 
-  /** Each key of {@code file} set where it is absent or null, and nothing else touched. */
+  /**
+   * Each key of {@code file} set where it is absent or null, and each flag where it reads {@code
+   * false} too; every other value — a theme, a counter, a key outside the set — is left as it is.
+   */
   static String mergeProgram(String file) {
     return "reduce "
         + keysOf(file).stream()
             .map(k -> "[" + path(k) + ", " + literal(k.value()) + "]")
             .collect(Collectors.joining(", ", "(", ")"))
-        + " as [$p, $x] (.; if getpath($p) == null then setpath($p; $x) else . end)";
+        + " as [$p, $x] (.; if getpath($p) == null or ($x == true and getpath($p) == false)"
+        + " then setpath($p; $x) else . end)";
+  }
+
+  private static boolean isFlag(Key key) {
+    return Boolean.TRUE.equals(key.value());
   }
 
   private static List<Key> keysOf(String file) {

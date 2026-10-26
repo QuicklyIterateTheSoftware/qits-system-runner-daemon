@@ -40,17 +40,21 @@ class ClaudeFirstRunTest {
   @Test
   void theCheckProgramAsksForEveryKeyOfItsFile() {
     assertEquals(
-        "[getpath([\"hasCompletedOnboarding\"]), getpath([\"lastOnboardingVersion\"]),"
-            + " getpath([\"remoteDialogSeen\"]), getpath([\"fullscreenUpsellSeenCount\"]),"
-            + " getpath([\"passesUpsellSeenCount\"]), getpath([\"hasSeenAutoModeEntryWarning\"]),"
-            + " getpath([\"hasSeenTasksHint\"]),"
-            + " getpath([\"projects\",\"/workspace\",\"hasTrustDialogAccepted\"])]"
-            + " | all(. != null)",
+        "[(getpath([\"hasCompletedOnboarding\"]) == true),"
+            + " (getpath([\"lastOnboardingVersion\"]) != null),"
+            + " (getpath([\"remoteDialogSeen\"]) == true),"
+            + " (getpath([\"fullscreenUpsellSeenCount\"]) != null),"
+            + " (getpath([\"passesUpsellSeenCount\"]) != null),"
+            + " (getpath([\"hasSeenAutoModeEntryWarning\"]) == true),"
+            + " (getpath([\"hasSeenTasksHint\"]) == true),"
+            + " (getpath([\"projects\",\"/workspace\",\"hasTrustDialogAccepted\"]) == true)]"
+            + " | all",
         ClaudeFirstRun.checkProgram(ClaudeFirstRun.CONFIG));
     assertEquals(
         "reduce ([[\"skipDangerousModePermissionPrompt\"], true], [[\"tui\"], \"fullscreen\"],"
             + " [[\"theme\"], \"dark\"]) as [$p, $x]"
-            + " (.; if getpath($p) == null then setpath($p; $x) else . end)",
+            + " (.; if getpath($p) == null or ($x == true and getpath($p) == false)"
+            + " then setpath($p; $x) else . end)",
         ClaudeFirstRun.mergeProgram(ClaudeFirstRun.SETTINGS));
     assertTrue(
         ClaudeFirstRun.mergeProgram(ClaudeFirstRun.CONFIG)
@@ -96,7 +100,7 @@ class ClaudeFirstRunTest {
   // --- the script, run --------------------------------------------------------------------------
 
   @Test
-  void theScriptWritesOnlyMissingKeysAndKeepsEveryExistingValue() throws Exception {
+  void theScriptWritesOnlyMissingKeysAndOpenFlagsAndKeepsEveryOtherValue() throws Exception {
     assumeTrue(onPath("jq") && onPath("bash"), "needs bash and jq");
     Path home = dir.resolve("claude-home");
     Path config = home.resolve(".claude").resolve(".claude.json");
@@ -113,7 +117,10 @@ class ClaudeFirstRunTest {
     assertEquals(0, applied.exit(), applied.output());
     assertEquals(0, script(home, bin, "check").exit());
 
-    assertEquals("false", jq(config, ".hasCompletedOnboarding"), "an existing value is kept");
+    assertEquals(
+        "true",
+        jq(config, ".hasCompletedOnboarding"),
+        "a flag left false is an open question: the launch still asks it");
     assertEquals("\"keep\"", jq(config, ".theme"), "a key of the other file is not touched");
     assertEquals("{\"a\":1}", jq(config, ".oauthAccount"));
     assertEquals("[\"x\"]", jq(config, ".projects[\"/workspace\"].allowedTools"));
