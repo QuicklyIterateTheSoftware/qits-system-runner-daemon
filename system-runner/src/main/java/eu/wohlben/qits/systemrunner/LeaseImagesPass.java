@@ -11,10 +11,10 @@ import java.util.function.Supplier;
 
 /**
  * Lease images this node no longer needs: every tag of a current image's repository other than
- * the current images themselves — the latest {@code estate}'s spec images and the {@code Ack}'s
- * {@code probeImage} — that no container, running or stopped, this runner's or anybody's, was
- * created from. Every workspace and project-agent release leaves one behind on every node, and
- * nothing else removes it. qits-projects-desk-runner-daemon's {@code DeskImagesPass}, keeping a
+ * the current images themselves — the latest {@code estate}'s spec images and {@code warmImages},
+ * and the {@code Ack}'s {@code probeImage} — that no container, running or stopped, this runner's
+ * or anybody's, was created from. Every workspace and project-agent release leaves one behind on
+ * every node, and nothing else removes it. qits-projects-desk-runner-daemon's {@code DeskImagesPass}, keeping a
  * set rather than one image.
  *
  * <p>The three belts of the toolkit's {@code RunnerImages}, for the same reasons: a current image is

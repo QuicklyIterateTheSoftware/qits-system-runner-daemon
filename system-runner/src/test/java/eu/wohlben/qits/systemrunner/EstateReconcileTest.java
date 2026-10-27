@@ -11,6 +11,8 @@ import eu.wohlben.qits.runner.protocol.RunnerCodec;
 import eu.wohlben.qits.runner.toolkit.Decommission;
 import eu.wohlben.qits.runner.toolkit.HostFacts;
 import eu.wohlben.qits.runner.toolkit.Housekeeping;
+import eu.wohlben.qits.runner.toolkit.HousekeepingContext;
+import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerExit;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.RunnerRuntime;
@@ -66,6 +68,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -92,6 +95,7 @@ class EstateReconcileTest {
   private static final String WS_IMAGE = REGISTRY + "workspace:2026.1023.1";
   private static final String WS_NEXT = REGISTRY + "workspace:2026.1024.1";
   private static final String DESK_IMAGE = REGISTRY + "project-agent:2026.1023.1";
+  private static final String WARM = REGISTRY + "workspace:2026.1027.1";
   private static final SystemRunnerAck ACK =
       new SystemRunnerAck(
           new SlotImages(REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent"),
@@ -562,6 +566,95 @@ class EstateReconcileTest {
     assertTrue(runsOf(lease(L1)).isEmpty());
   }
 
+  // ---- warm images (qits-1692) ------------------------------------------------------------------
+
+  @Test
+  void aMissingWarmImageStartsExactlyOnePullAndTheNextEstateIsConvergedWhileItRuns()
+      throws Exception {
+    missing(WARM);
+    docker.answerFor("pull", WARM, 0, "", "");
+    docker.hang("pull+" + safe(WARM), 6);
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    seen(L2, "running", 0, "WORKSPACE", H1, mounts(work("ws-43")));
+    estateThenAck(List.of(WARM), workspace(L1, H1), workspace(L2, H1, "ws-43", WS_IMAGE));
+    start();
+
+    awaitTrue(() -> pullsOf(WARM) == 1);
+    awaitInventory(i -> stateOf(i, L1) == LeaseState.RUNNING);
+    // The estate's convergence returned at once: the next one ends a lease while the pull hangs.
+    LeaseEntry ended =
+        new LeaseEntry(L2, SlotType.WORKSPACE, DesiredState.ENDED, null, H1, "ws-43", null);
+    host.send(new Estate(List.of(workspace(L1, H1), ended), List.of(), List.of(WARM)));
+    awaitCall(calls -> has(calls, List.of("rm", "-f", lease(L2))));
+    Thread.sleep(300);
+    assertEquals(1, pullsOf(WARM), "one pull per reference: " + docker.calls());
+    assertTrue(runsOf(lease(L1)).isEmpty(), "a running lease is left alone");
+  }
+
+  @Test
+  void aWarmImageAlreadyOnTheNodeStartsNoPull() throws Exception {
+    docker.answerFor("image-inspect", WARM, 0, "sha256:warm\n", "");
+    estateThenAck(List.of(WARM));
+    start();
+
+    awaitTrue(() -> docker.calls("image").stream().anyMatch(c -> c.contains(WARM)));
+    Thread.sleep(300);
+    assertEquals(0, pullsOf(WARM), docker.calls()::toString);
+  }
+
+  @Test
+  void aFailedWarmPullFailsNoLeaseAndIsTriedAgainOnlyFromTheNextEstate() throws Exception {
+    missing(WARM);
+    docker.answerFor("pull", WARM, 1, "", "Error response from daemon: manifest unknown");
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(List.of(WARM), workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> pullsOf(WARM) == 1);
+    Thread.sleep(500);
+    assertEquals(1, pullsOf(WARM), "no retry loop without an estate");
+    host.send(new Estate(List.of(workspace(L1, H1)), List.of(), List.of(WARM)));
+    awaitTrue(() -> pullsOf(WARM) == 2);
+    awaitInventory(i -> stateOf(i, L1) == LeaseState.RUNNING);
+    assertTrue(
+        host.all(Inventory.class).stream()
+            .flatMap(i -> i.leases().stream())
+            .noneMatch(r -> r.state() == LeaseState.FAILED),
+        "a warm pull fails no lease");
+  }
+
+  @Test
+  void theOldLeaseImagesPassKeepsTheEstatesWarmImages() throws Exception {
+    String old = REGISTRY + "workspace:2026.1001.1";
+    docker.answerFor("image-inspect", WS_IMAGE, 0, "sha256:aaaa\n", "");
+    docker.answerFor("image-inspect", WARM, 0, "sha256:bbbb\n", "");
+    docker.answer(
+        "image-ls",
+        0,
+        WS_IMAGE + "|sha256:aaaa\n" + WARM + "|sha256:bbbb\n" + old + "|sha256:cccc\n",
+        "");
+    estateThenAck(List.of(WARM));
+    start();
+
+    awaitTrue(() -> domain.currentImages().contains(WARM));
+    new LeaseImagesPass(
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            domain::currentImages)
+        .run(
+            new HousekeepingContext(
+                IDENTITY,
+                TARGET,
+                null,
+                null,
+                Duration.ofSeconds(10),
+                state,
+                Clock.systemUTC(),
+                Logger.getLogger(EstateReconcileTest.class)));
+    List<List<String>> removed =
+        docker.calls("image").stream().filter(c -> c.get(1).equals("rm")).toList();
+    assertEquals(List.of(List.of("image", "rm", old)), removed, docker.calls()::toString);
+  }
+
   @Test
   void aCiLeaseIsStartingWhileTheBuilderImagePullsThenRunsOnceItLands() throws Exception {
     docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
@@ -818,6 +911,21 @@ class EstateReconcileTest {
             h.send(new Estate(List.of(leases), List.of()));
           }
         };
+  }
+
+  /** {@link #estateThenAck(LeaseEntry...)}, the estate naming these images to keep warm. */
+  private void estateThenAck(List<String> warm, LeaseEntry... leases) {
+    host.script =
+        (h, message) -> {
+          if (message instanceof Hello) {
+            h.send(new Ack(IDENTITY.capabilityVersion(), 2, null, ACK.extensions()));
+            h.send(new Estate(List.of(leases), List.of(), warm));
+          }
+        };
+  }
+
+  private long pullsOf(String image) {
+    return docker.calls("pull").stream().filter(c -> c.contains(image)).count();
   }
 
   private static Map<String, String> env() {

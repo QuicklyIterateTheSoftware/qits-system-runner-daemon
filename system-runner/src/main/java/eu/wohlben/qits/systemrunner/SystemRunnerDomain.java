@@ -545,7 +545,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     return List.of(new LeaseImagesPass(docker, this::currentImages));
   }
 
-  /** The images in use now: every spec image of the latest {@code estate}, and the probe image. */
+  /**
+   * The images in use now: every spec image of the latest {@code estate}, its warm images, and the
+   * probe image.
+   */
   Set<String> currentImages() {
     Set<String> images = new LinkedHashSet<>();
     Estate e = estate;
@@ -555,6 +558,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
           images.add(entry.spec().image());
         }
       }
+      images.addAll(warmImages(e));
     }
     String probe = ack.probeImage();
     if (probe != null && !probe.isBlank()) {
@@ -590,6 +594,36 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     // re-convergence of the runner's own: that would pull in a loop.
     pulls.retryReported();
     convergeEstate(e, session, false);
+    warm(e, session);
+  }
+
+  /**
+   * The estate's {@code warmImages} not on the node, pulled in the background after the convergence
+   * — so a lease's own pull is queued first — and never waited on (qits-1692). A failed one is
+   * logged and tried again from the next estate that names it.
+   */
+  private void warm(Estate e, RunnerSession session) {
+    if (decommissioning) {
+      return;
+    }
+    for (String image : warmImages(e)) {
+      try {
+        launcher.warm(image, session);
+      } catch (RuntimeException ex) {
+        LOG.warnf("system-runner could not warm %s: %s", image, ex.getMessage());
+      }
+    }
+  }
+
+  /** An estate's warm images, blanks dropped: a reference that names nothing is never pulled. */
+  private static Set<String> warmImages(Estate e) {
+    Set<String> images = new LinkedHashSet<>();
+    for (String image : e.warmImages()) {
+      if (image != null && !image.isBlank()) {
+        images.add(image.strip());
+      }
+    }
+    return images;
   }
 
   /**

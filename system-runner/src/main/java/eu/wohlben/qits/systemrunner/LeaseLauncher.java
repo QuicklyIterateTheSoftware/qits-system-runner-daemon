@@ -226,6 +226,16 @@ final class LeaseLauncher {
     }
   }
 
+  /**
+   * Keep {@code image} warm: pull it in the background when it is not on the node, nobody waiting
+   * on it ({@link ImagePulls#warm}). Never waits and never fails a lease.
+   */
+  void warm(String image, RunnerSession session) {
+    if (!NodeImages.present(docker, image)) {
+      pulls.warm(image, () -> session.registry().pull(image));
+    }
+  }
+
   /** Start pulling the builder image when it is not on the node: the pre-pull at the {@code Ack}. */
   void prefetchBuilder() {
     BuildPlane plane = buildPlane.get();
