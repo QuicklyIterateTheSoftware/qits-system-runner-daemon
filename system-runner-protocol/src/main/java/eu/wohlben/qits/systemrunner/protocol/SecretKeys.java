@@ -14,10 +14,11 @@ import java.util.Set;
  *
  * <ul>
  *   <li>any segment is {@code TOKEN}, {@code SECRET}, {@code PASSWORD}, {@code PASSWD}, {@code
- *       CREDENTIAL}, {@code CREDENTIALS} or {@code APIKEY} ({@code QITS_TOKEN_SUBJECT}, {@code
- *       DB_PASSWORD});
+ *       CREDENTIAL}, {@code CREDENTIALS}, {@code APIKEY} or {@code AUTHORIZATION} ({@code
+ *       QITS_TOKEN_SUBJECT}, {@code DB_PASSWORD}, {@code HTTP_AUTHORIZATION});
  *   <li>two consecutive segments are {@code API, KEY} or {@code PRIVATE, KEY} ({@code X_API_KEY},
  *       {@code SSH_PRIVATE_KEY});
+ *   <li>a segment {@code AUTH} is followed by {@code HEADER} ({@code qits.auth.header});
  *   <li>or the last segment is {@code AUTH} ({@code BASIC_AUTH}, but not {@code
  *       QITS_GIT_AUTH_HOST}).
  * </ul>
@@ -25,7 +26,15 @@ import java.util.Set;
 public final class SecretKeys {
 
   private static final Set<String> SECRET_SEGMENTS =
-      Set.of("TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "APIKEY");
+      Set.of(
+          "TOKEN",
+          "SECRET",
+          "PASSWORD",
+          "PASSWD",
+          "CREDENTIAL",
+          "CREDENTIALS",
+          "APIKEY",
+          "AUTHORIZATION");
 
   private static final Set<String> KEY_QUALIFIERS = Set.of("API", "PRIVATE");
 
@@ -49,6 +58,9 @@ public final class SecretKeys {
         return true;
       }
       if (i > 0 && segment.equals("KEY") && KEY_QUALIFIERS.contains(segments.get(i - 1))) {
+        return true;
+      }
+      if (segment.equals("AUTH") && i + 1 < segments.size() && segments.get(i + 1).equals("HEADER")) {
         return true;
       }
     }
