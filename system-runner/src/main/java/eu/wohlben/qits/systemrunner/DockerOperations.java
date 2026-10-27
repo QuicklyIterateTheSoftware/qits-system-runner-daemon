@@ -9,13 +9,16 @@ import eu.wohlben.qits.systemrunner.protocol.Docker;
 import eu.wohlben.qits.systemrunner.protocol.DockerOp;
 import eu.wohlben.qits.systemrunner.protocol.DockerResult;
 import eu.wohlben.qits.systemrunner.protocol.DockerStatus;
+import eu.wohlben.qits.systemrunner.protocol.SecretKeys;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -32,8 +35,18 @@ import org.jboss.logging.Logger;
  * qits.system.runner=<targetId>} — or, for a container, is this runner's own process container
  * ({@code qits.system.runner.process=<targetId>}), which may be inspected and read but never exec'd
  * into, stopped or removed ({@code REFUSED}). "Not there" and "not this target's" read the same, so
- * a frame cannot probe another runner's resources by name. The two listings select by the owner
- * label alone, as every listing of the runner does.
+ * a frame cannot probe another runner's resources by name. The container listing selects by the
+ * owner label alone, as every listing of the runner does.
+ *
+ * <p><b>A volume is also owned by being mounted.</b> A lease adopted from the retired
+ * qits-workspaces-runner mounts volumes under that runner's names ({@code
+ * qits-workspaces-runner-ws-5053-8d45fd1d}) and without the owner label. Such a volume counts as
+ * this target's when a container carrying the owner label mounts it ({@code Mounts[]} of type
+ * {@code volume}, read from {@code docker inspect} of the owned containers): {@code LIST_VOLUMES}
+ * answers the labelled volumes and these, each row saying why in {@code ownedBy} ({@code label}
+ * or {@code mount}), and {@code INSPECT_VOLUME} admits either. Any other volume stays {@code
+ * NOT_FOUND}, and one outside the runner's prefix is not handed to docker by name until an owned
+ * container is seen mounting it. Nothing else widens: there is no op that removes a volume.
  *
  * <p><b>Limits are the runner's.</b> {@code logs --tail} is {@value #DEFAULT_TAIL} lines unless
  * asked, never more than {@value #MAX_TAIL}; an exec runs {@value #DEFAULT_EXEC_SECONDS}s unless
@@ -45,7 +58,7 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Secrets in output.</b> A log or an exec prints whatever the container's process prints, and
  * a lease's environment carries its token. Before either is answered, every value of the
- * container's own environment (as its inspect reads it) whose key matches {@link #SECRET_KEY} and
+ * container's own environment (as its inspect reads it) whose key {@link SecretKeys#isSecret} and
  * which is at least {@value #MIN_SECRET} characters long is replaced with {@code ***}. The inspect
  * itself is answered whole: qits-system-service redacts it before a person sees it.
  *
@@ -64,10 +77,6 @@ final class DockerOperations {
 
   /** Every text answer's cap, in UTF-8 bytes: the log, an exec's stdout and its stderr each. */
   static final int OUTPUT_CAP = 1024 * 1024;
-
-  /** An environment key whose value is a secret. */
-  static final Pattern SECRET_KEY =
-      Pattern.compile("(?i)(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_KEY|AUTH)");
 
   /** A secret shorter than this is not replaced: {@code true} or {@code 1} would blank the log. */
   static final int MIN_SECRET = 6;
@@ -114,11 +123,61 @@ final class DockerOperations {
         List.of(docker.binary(), "ps", "-a", "--filter", ownerFilter(), "--format", "{{json .}}"));
   }
 
+  /**
+   * The labelled volumes, then those an owned container mounts that carry no label of this target,
+   * each row with {@code ownedBy}. The mounted ones' rows come from an unfiltered {@code docker
+   * volume ls}, so every row has docker's own shape; any other volume in it is left out.
+   */
   private DockerResult listVolumes(UUID requestId) {
-    return listing(
-        requestId,
-        List.of(
-            docker.binary(), "volume", "ls", "--filter", ownerFilter(), "--format", "{{json .}}"));
+    DockerResult labelled =
+        listing(
+            requestId,
+            List.of(
+                docker.binary(),
+                "volume",
+                "ls",
+                "--filter",
+                ownerFilter(),
+                "--format",
+                "{{json .}}"));
+    if (labelled.status() != DockerStatus.OK) {
+      return labelled;
+    }
+    Mounted mounted = mountedVolumes();
+    if (mounted.failure != null) {
+      return failed(requestId, mounted.failure);
+    }
+    JsonArray rows = new JsonArray(labelled.body());
+    Set<String> listed = new LinkedHashSet<>();
+    for (int i = 0; i < rows.size(); i++) {
+      JsonObject row = rows.getJsonObject(i);
+      row.put("ownedBy", "label");
+      listed.add(row.getString("Name"));
+    }
+    Set<String> unlisted = new LinkedHashSet<>(mounted.names);
+    unlisted.removeAll(listed);
+    boolean truncated = labelled.truncated();
+    if (!unlisted.isEmpty()) {
+      DockerResult all =
+          listing(requestId, List.of(docker.binary(), "volume", "ls", "--format", "{{json .}}"));
+      if (all.status() != DockerStatus.OK) {
+        return all;
+      }
+      Map<String, JsonObject> byName = new LinkedHashMap<>();
+      JsonArray every = new JsonArray(all.body());
+      for (int i = 0; i < every.size(); i++) {
+        JsonObject row = every.getJsonObject(i);
+        byName.put(row.getString("Name"), row);
+      }
+      for (String name : unlisted) {
+        JsonObject row = byName.get(name);
+        if (row != null) {
+          rows.add(row.put("ownedBy", "mount"));
+        }
+      }
+      truncated = truncated || all.truncated();
+    }
+    return new DockerResult(requestId, DockerStatus.OK, rows.encode(), truncated, null, null);
   }
 
   private String ownerFilter() {
@@ -314,15 +373,27 @@ final class DockerOperations {
   // --- one volume --------------------------------------------------------------------------------
 
   /**
-   * {@code docker volume inspect}, owned like a container, with the volume's {@code Size} from
-   * {@code docker system df -v} added when docker answers that; a df that fails or names no size
-   * leaves it out rather than failing the inspect — df walks every volume on the node.
+   * {@code docker volume inspect} alone, answered as docker says it: owned by the runner's name and
+   * the owner label, or mounted by a container that carries it. A name outside the runner's prefix
+   * is inspected only once an owned container is found mounting it. No size: {@code docker system
+   * df -v} walks every volume on the node and outlasted the service's wait on a node with large
+   * caches (qits-1621).
    */
   private DockerResult inspectVolume(Docker request) {
     UUID id = request.requestId();
     String name = request.name();
-    if (!ownedName(name)) {
+    if (!safeName(name)) {
       return notFound(id, "volume", name);
+    }
+    Mounted mounted = null;
+    if (!identity.ownsName(name)) {
+      mounted = mountedVolumes();
+      if (mounted.failure != null) {
+        return failed(id, mounted.failure);
+      }
+      if (!mounted.names.contains(name)) {
+        return notFound(id, "volume", name);
+      }
     }
     RunnerDocker.Result inspected = docker.run(List.of(docker.binary(), "volume", "inspect", name));
     if (!inspected.ok()) {
@@ -334,47 +405,83 @@ final class DockerOperations {
     }
     JsonObject volume = all.getJsonObject(0);
     JsonObject labels = object(volume, "Labels");
-    if (!targetId.equals(labels.getString(identity.ownerLabel()))) {
-      return notFound(id, "volume", name);
+    if (targetId.equals(labels.getString(identity.ownerLabel()))) {
+      return ok(id, volume.encode());
     }
-    String size = volumeSize(name);
-    if (size != null) {
-      volume.put("Size", size);
+    if (mounted == null) {
+      mounted = mountedVolumes();
+      if (mounted.failure != null) {
+        return failed(id, mounted.failure);
+      }
     }
-    return ok(id, volume.encode());
+    return mounted.names.contains(name) ? ok(id, volume.encode()) : notFound(id, "volume", name);
   }
 
-  /** The volume's size as {@code docker system df -v} spells it, or null when it said none. */
-  private String volumeSize(String name) {
-    try {
-      RunnerDocker.Result df =
-          docker.run(
-              List.of(docker.binary(), "system", "df", "-v", "--format", "{{json .Volumes}}"));
-      if (!df.ok()) {
-        LOG.debugf("system-runner's df answered no size for %s: %s", name, df.detail());
-        return null;
+  /** The volume names the owned containers mount, or why docker could not say. */
+  private record Mounted(Set<String> names, String failure) {}
+
+  /**
+   * Every named volume a container carrying the owner label mounts, from {@code docker inspect} of
+   * those containers — the runner's own process container is not among them. A name docker could
+   * read as an option is left out.
+   */
+  private Mounted mountedVolumes() {
+    RunnerDocker.Result ids =
+        docker.run(
+            List.of(docker.binary(), "ps", "-a", "-q", "--no-trunc", "--filter", ownerFilter()));
+    if (!ids.ok()) {
+      return new Mounted(Set.of(), ids.detail());
+    }
+    List<String> argv = new ArrayList<>(List.of(docker.binary(), "inspect", "--type", "container"));
+    for (String line : ids.stdout().split("\n")) {
+      String containerId = line.strip();
+      if (!containerId.isEmpty() && safeName(containerId)) {
+        argv.add(containerId);
       }
-      JsonArray volumes = new JsonArray(df.stdout().strip());
-      for (int i = 0; i < volumes.size(); i++) {
-        JsonObject v = volumes.getJsonObject(i);
-        if (v != null && name.equals(v.getString("Name"))) {
-          Object size = v.getValue("Size");
-          return size == null ? null : size.toString();
+    }
+    Set<String> names = new LinkedHashSet<>();
+    if (argv.size() == 4) {
+      return new Mounted(names, null);
+    }
+    RunnerDocker.Result inspected = docker.run(argv);
+    if (!inspected.ok() && inspected.stdout().isBlank()) {
+      // A container removed between the two calls fails the inspect but docker still prints the
+      // others; only when nothing is printed is it every one of them, or docker not answering.
+      return TargetVolumes.absent(inspected.detail()) && !inspected.timedOut()
+          ? new Mounted(names, null)
+          : new Mounted(Set.of(), inspected.detail());
+    }
+    JsonArray containers = new JsonArray(inspected.stdout().strip());
+    for (int i = 0; i < containers.size(); i++) {
+      JsonObject container = containers.getJsonObject(i);
+      JsonObject labels = object(object(container, "Config"), "Labels");
+      if (!targetId.equals(labels.getString(identity.ownerLabel()))) {
+        continue;
+      }
+      JsonArray mounts = container.getJsonArray("Mounts");
+      if (mounts == null) {
+        continue;
+      }
+      for (int m = 0; m < mounts.size(); m++) {
+        JsonObject mount = mounts.getJsonObject(m);
+        String volume = mount == null ? null : mount.getString("Name");
+        if (mount != null && "volume".equals(mount.getString("Type")) && safeName(volume)) {
+          names.add(volume);
         }
       }
-    } catch (RuntimeException unreadable) {
-      LOG.debugf("system-runner could not read df's size of %s: %s", name, unreadable);
     }
-    return null;
+    return new Mounted(names, null);
   }
 
   // --- the pieces --------------------------------------------------------------------------------
 
   /** A name this runner may name: its own prefix, and nothing docker could read as an option. */
   private boolean ownedName(String name) {
-    if (name == null || !identity.ownsName(name)) {
-      return false;
-    }
+    return name != null && identity.ownsName(name) && safeName(name);
+  }
+
+  /** A docker name, and nothing docker could read as an option. */
+  private static boolean safeName(String name) {
     try {
       LifecycleArgv.requireWorkId(name);
       return true;
@@ -405,7 +512,7 @@ final class DockerOperations {
 
   /**
    * The values to redact from a container's {@code Config.Env}: each {@code KEY=VALUE} whose key
-   * matches {@link #SECRET_KEY} and whose value is at least {@link #MIN_SECRET} long, longest
+   * {@link SecretKeys#isSecret} and whose value is at least {@link #MIN_SECRET} long, longest
    * first, so a secret containing another is replaced whole.
    */
   static List<String> secrets(JsonArray env) {
@@ -420,7 +527,7 @@ final class DockerOperations {
           continue;
         }
         String value = variable.substring(eq + 1);
-        if (SECRET_KEY.matcher(variable.substring(0, eq)).find() && value.length() >= MIN_SECRET) {
+        if (SecretKeys.isSecret(variable.substring(0, eq)) && value.length() >= MIN_SECRET) {
           values.add(value);
         }
       }

@@ -38,6 +38,8 @@ class DockerOperationsTest {
   private static final String VOLUME = "qits-system-runner-work-ws-42-r1";
   private static final String TOKEN = "qits_tok_SECRET123";
   private static final String PASSWORD = "hunter22";
+  private static final String LEGACY = "qits-workspaces-runner-ws-5053-8d45fd1d";
+  private static final String LEGACY_ID = "a".repeat(64);
 
   /** What the fake answers per argv key, and every argv it was asked, with its deadline. */
   private final Map<String, RunnerDocker.Result> answers = new LinkedHashMap<>();
@@ -98,6 +100,57 @@ class DockerOperationsTest {
             "PATH=/usr/bin"));
   }
 
+  /** {@code docker volume inspect} of {@code name}, with these labels. */
+  private void volume(String name, Map<String, String> labels) {
+    answer(
+        "docker volume inspect " + name,
+        new JsonArray()
+            .add(
+                new JsonObject()
+                    .put("Name", name)
+                    .put("Mountpoint", "/var/lib/docker/volumes/" + name + "/_data")
+                    .put("Labels", new JsonObject(new LinkedHashMap<>(labels))))
+            .encode());
+  }
+
+  /**
+   * One owned lease container, adopted from the retired qits-workspaces-runner, mounting {@link
+   * #LEGACY} and a bind; {@code docker ps -q} names it.
+   */
+  private void adoptedLease() {
+    answer("docker ps -a -q --no-trunc --filter label=qits.system.runner=r1", LEGACY_ID + "\n");
+    JsonObject container =
+        new JsonObject()
+            .put("Id", LEGACY_ID)
+            .put(
+                "Config",
+                new JsonObject().put("Labels", new JsonObject().put("qits.system.runner", TARGET)))
+            .put(
+                "Mounts",
+                new JsonArray()
+                    .add(
+                        new JsonObject()
+                            .put("Type", "volume")
+                            .put("Name", LEGACY)
+                            .put("Destination", "/workspace"))
+                    .add(
+                        new JsonObject()
+                            .put("Type", "bind")
+                            .put("Source", "/var/run/docker.sock")
+                            .put("Destination", "/var/run/docker.sock"))
+                    .add(
+                        new JsonObject()
+                            .put("Type", "volume")
+                            .put("Name", VOLUME)
+                            .put("Destination", "/caches")));
+    answer("docker inspect --type container " + LEGACY_ID, new JsonArray().add(container).encode());
+  }
+
+  /** No container of this target at all. */
+  private void noOwnedContainers() {
+    answer("docker ps -a -q", "");
+  }
+
   private DockerResult ask(DockerOp op, String name) {
     return ops.answer(new Docker(ID, op, name, null, null, null, null));
   }
@@ -131,6 +184,7 @@ class DockerOperationsTest {
 
   @Test
   void theVolumeListingSelectsByTheOwnerLabelAndAFailedListingIsFailedNeverEmpty() {
+    noOwnedContainers();
     answer("docker volume ls", "{\"Name\":\"" + VOLUME + "\"}\n");
     DockerResult result = ask(DockerOp.LIST_VOLUMES, null);
     assertEquals(
@@ -144,6 +198,8 @@ class DockerOperationsTest {
             "{{json .}}"),
         calls.getFirst());
     assertEquals(VOLUME, new JsonArray(result.body()).getJsonObject(0).getString("Name"));
+    assertEquals("label", new JsonArray(result.body()).getJsonObject(0).getString("ownedBy"));
+    assertEquals(2, calls.size(), "the labelled listing and the owned containers: " + calls);
 
     answers.clear();
     answer("docker volume ls", 1, "", "Cannot connect to the Docker daemon");
@@ -157,12 +213,7 @@ class DockerOperationsTest {
   @Test
   void aNameOutsideTheRunnersPrefixIsNotFoundWithoutAskingDocker() {
     for (DockerOp op :
-        List.of(
-            DockerOp.INSPECT_CONTAINER,
-            DockerOp.LOGS,
-            DockerOp.STOP,
-            DockerOp.REMOVE,
-            DockerOp.INSPECT_VOLUME)) {
+        List.of(DockerOp.INSPECT_CONTAINER, DockerOp.LOGS, DockerOp.STOP, DockerOp.REMOVE)) {
       for (String name : List.of("postgres", "qits-buildkitd", "qits-system-runner", "")) {
         assertEquals(DockerStatus.NOT_FOUND, ask(op, name).status(), op + " " + name);
       }
@@ -173,7 +224,24 @@ class DockerOperationsTest {
         DockerStatus.NOT_FOUND,
         ops.answer(new Docker(ID, DockerOp.EXEC, "postgres", null, null, List.of("id"), null))
             .status());
+    for (String name : List.of("", "--all", "a b")) {
+      assertEquals(DockerStatus.NOT_FOUND, ask(DockerOp.INSPECT_VOLUME, name).status(), name);
+    }
+    assertEquals(DockerStatus.NOT_FOUND, ask(DockerOp.INSPECT_VOLUME, null).status());
     assertEquals(List.of(), calls, "docker never heard of them");
+  }
+
+  @Test
+  void aVolumeOutsideThePrefixThatNoOwnedContainerMountsIsNotFoundAndNeverInspected() {
+    adoptedLease();
+    volume("postgres-data", Map.of());
+
+    for (String name : List.of("postgres-data", "qits-buildkitd", "qits-system-runner")) {
+      assertEquals(DockerStatus.NOT_FOUND, ask(DockerOp.INSPECT_VOLUME, name).status(), name);
+    }
+    assertTrue(
+        calls.stream().noneMatch(c -> c.contains("volume")),
+        "only the owned containers were read: " + calls);
   }
 
   @Test
@@ -196,10 +264,13 @@ class DockerOperationsTest {
       assertEquals(DockerStatus.NOT_FOUND, result.status(), op.name());
       assertFalse(result.body().contains(TOKEN));
     }
+    noOwnedContainers();
     assertEquals(DockerStatus.NOT_FOUND, ask(DockerOp.INSPECT_VOLUME, VOLUME).status());
     assertTrue(
-        calls.stream().allMatch(c -> c.contains("inspect") && !c.contains("df")),
+        calls.stream()
+            .allMatch(c -> c.contains("inspect") || String.join(" ", c).startsWith("docker ps")),
         "only inspected: " + calls);
+    assertTrue(calls.stream().noneMatch(c -> c.contains("stop") || c.contains("rm")));
   }
 
   @Test
@@ -391,35 +462,91 @@ class DockerOperationsTest {
   // --- one volume --------------------------------------------------------------------------------
 
   @Test
-  void aVolumeInspectAddsTheSizeDfSaysAndLeavesItOutWhenDfCannot() {
-    answer(
-        "docker volume inspect " + VOLUME,
-        new JsonArray()
-            .add(
-                new JsonObject()
-                    .put("Name", VOLUME)
-                    .put("Mountpoint", "/var/lib/docker/volumes/x/_data")
-                    .put("Labels", new JsonObject().put("qits.system.runner", TARGET)))
-            .encode());
-    answer(
-        "docker system df",
-        "[{\"Name\":\"other\",\"Size\":\"1GB\"},{\"Name\":\"" + VOLUME + "\",\"Size\":\"2.5GB\"}]");
+  void aVolumeInspectIsDockersVolumeInspectAloneWithoutAnyDf() {
+    volume(VOLUME, Map.of("qits.system.runner", TARGET));
 
     DockerResult result = ask(DockerOp.INSPECT_VOLUME, VOLUME);
 
     assertEquals(DockerStatus.OK, result.status());
     JsonObject volume = new JsonObject(result.body());
-    assertEquals("2.5GB", volume.getString("Size"));
     assertEquals(VOLUME, volume.getString("Name"));
+    assertFalse(volume.containsKey("Size"));
+    assertEquals(List.of(List.of("docker", "volume", "inspect", VOLUME)), calls);
+    assertTrue(calls.stream().noneMatch(c -> c.contains("system") || c.contains("df")));
+  }
+
+  @Test
+  void anUnlabelledVolumeAnOwnedContainerMountsIsListedAndInspectable() {
+    adoptedLease();
+    answer(
+        "docker volume ls --filter",
+        "{\"Name\":\"" + VOLUME + "\",\"Driver\":\"local\",\"Scope\":\"local\"}\n");
+    answer(
+        "docker volume ls --format",
+        "{\"Name\":\"postgres-data\",\"Driver\":\"local\",\"Scope\":\"local\"}\n"
+            + "{\"Name\":\""
+            + LEGACY
+            + "\",\"Driver\":\"local\",\"Scope\":\"local\"}\n"
+            + "{\"Name\":\""
+            + VOLUME
+            + "\",\"Driver\":\"local\",\"Scope\":\"local\"}\n");
+
+    DockerResult listed = ask(DockerOp.LIST_VOLUMES, null);
+
+    assertEquals(DockerStatus.OK, listed.status());
+    JsonArray rows = new JsonArray(listed.body());
+    assertEquals(2, rows.size(), "each volume once, no foreign one: " + rows);
+    assertEquals(VOLUME, rows.getJsonObject(0).getString("Name"));
+    assertEquals("label", rows.getJsonObject(0).getString("ownedBy"));
+    assertEquals(LEGACY, rows.getJsonObject(1).getString("Name"));
+    assertEquals("mount", rows.getJsonObject(1).getString("ownedBy"));
+    assertEquals("local", rows.getJsonObject(1).getString("Driver"));
     assertEquals(
         List.of(
-            List.of("docker", "volume", "inspect", VOLUME),
-            List.of("docker", "system", "df", "-v", "--format", "{{json .Volumes}}")),
+            List.of(
+                "docker",
+                "volume",
+                "ls",
+                "--filter",
+                "label=qits.system.runner=r1",
+                "--format",
+                "{{json .}}"),
+            List.of(
+                "docker",
+                "ps",
+                "-a",
+                "-q",
+                "--no-trunc",
+                "--filter",
+                "label=qits.system.runner=r1"),
+            List.of("docker", "inspect", "--type", "container", LEGACY_ID),
+            List.of("docker", "volume", "ls", "--format", "{{json .}}")),
         calls);
 
-    answer("docker system df", 1, "", "unknown flag: --format");
-    JsonObject without = new JsonObject(ask(DockerOp.INSPECT_VOLUME, VOLUME).body());
-    assertFalse(without.containsKey("Size"));
+    calls.clear();
+    volume(LEGACY, Map.of());
+    DockerResult inspected = ask(DockerOp.INSPECT_VOLUME, LEGACY);
+    assertEquals(DockerStatus.OK, inspected.status(), inspected.body());
+    assertEquals(LEGACY, new JsonObject(inspected.body()).getString("Name"));
+    assertEquals(List.of("docker", "volume", "inspect", LEGACY), calls.getLast());
+    assertTrue(calls.stream().noneMatch(c -> c.contains("df")));
+  }
+
+  @Test
+  void aPrefixedVolumeWithoutTheLabelIsAdmittedOnlyWhenAnOwnedContainerMountsIt() {
+    String unmounted = "qits-system-runner-work-ws-7-r1";
+    adoptedLease();
+    volume(unmounted, Map.of());
+
+    assertEquals(DockerStatus.NOT_FOUND, ask(DockerOp.INSPECT_VOLUME, unmounted).status());
+  }
+
+  @Test
+  void theOwnedContainersThatCannotBeReadFailTheVolumeOpsNeverWidenThem() {
+    answer("docker ps -a -q", 1, "", "Cannot connect to the Docker daemon");
+    answer("docker volume ls", "");
+    assertEquals(DockerStatus.FAILED, ask(DockerOp.LIST_VOLUMES, null).status());
+    assertEquals(DockerStatus.FAILED, ask(DockerOp.INSPECT_VOLUME, LEGACY).status());
   }
 
   @Test
@@ -441,9 +568,13 @@ class DockerOperationsTest {
                     "PRIVATE_KEY=-----BEGIN",
                     "MY_CREDENTIALS=credvalue",
                     "SECRET=12345",
+                    "GIT_AUTHOR_NAME=someone",
+                    "QITS_GIT_AUTH_HOST=githost.example:8080",
+                    "BASIC_AUTH=basicvalue",
                     "HOME=/home/someone",
                     "NOEQUALS")));
-    assertEquals(List.of("-----BEGIN", "credvalue", "abcdefgh", "abcdef"), secrets);
+    assertEquals(
+        List.of("-----BEGIN", "basicvalue", "credvalue", "abcdefgh", "abcdef"), secrets);
     assertEquals("x *** y", DockerOperations.redact("x abcdefgh y", secrets));
     assertEquals("/home/someone", DockerOperations.redact("/home/someone", secrets));
   }

@@ -3,7 +3,8 @@ package eu.wohlben.qits.systemrunner.protocol;
 /**
  * What one {@link Docker} frame asks of the target's docker, spelled on the wire as the constant's
  * name. Every op is about the runner's own resources only — a container or volume carrying {@code
- * qits.system.runner=<targetId>} — and one docker command each; an op this version does not know is
+ * qits.system.runner=<targetId>}, or a volume such a container mounts — and one docker command
+ * each; an op this version does not know is
  * a refused frame, never a guess.
  */
 public enum DockerOp {
@@ -19,9 +20,12 @@ public enum DockerOp {
   STOP,
   /** {@code docker rm -f} of one container. */
   REMOVE,
-  /** {@code docker volume ls}, filtered by the owner label. */
+  /**
+   * {@code docker volume ls}, filtered by the owner label, plus the volumes a container carrying it
+   * mounts; each row's {@code ownedBy} says which ({@code label} or {@code mount}).
+   */
   LIST_VOLUMES,
-  /** {@code docker volume inspect} of one volume, with its size when docker says it. */
+  /** {@code docker volume inspect} of one volume, labelled or mounted by an owned container. */
   INSPECT_VOLUME;
 
   /** Whether the op names one container or volume, so {@link Docker#name()} is required. */

@@ -6,7 +6,7 @@ import java.util.UUID;
  * Runner → qits-system: the one answer to a {@link Docker} request.
  *
  * <p>{@code body} is what the op answers: a JSON array for the two listings, the inspected JSON
- * object for the two inspects (a volume's with its {@code Size} when docker said it), the log text,
+ * object for the two inspects, the log text,
  * an exec's stdout, docker's own line for a stop or a removal — and on any status but {@code OK}, a
  * line for a person saying why. Never null.
  *
