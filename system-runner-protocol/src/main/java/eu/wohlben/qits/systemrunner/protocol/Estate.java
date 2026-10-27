@@ -13,13 +13,28 @@ import java.util.List;
  * reading the absence as "holds nothing".
  *
  * @param leases every lease placed on this target
+ * <p><b>{@code warmImages} is advice, never desired state</b> (qits-1692): full image references the
+ * runner pulls in the background when they are not on the node, so the first lease of a newly
+ * released slot image does not wait for a cold pull. A warm pull never blocks a convergence and
+ * never fails a lease, and image cleanup keeps every one of them. Absent — every server before it —
+ * reads as empty, so it is not a capability bump.
+ *
+ * @param leases every lease placed on this target
  * @param purges volume names to remove: a work volume of this runner, or an adopted legacy volume.
  *     A volume is removed only on such an entry
+ * @param warmImages image references to keep pulled on this node; empty when the server names none
  */
-public record Estate(List<LeaseEntry> leases, List<String> purges) implements SystemRunnerMessage {
+public record Estate(List<LeaseEntry> leases, List<String> purges, List<String> warmImages)
+    implements SystemRunnerMessage {
 
   public Estate {
     leases = List.copyOf(leases);
     purges = purges == null ? List.of() : List.copyOf(purges);
+    warmImages = warmImages == null ? List.of() : List.copyOf(warmImages);
+  }
+
+  /** An estate that names no image to keep warm: what every server before qits-1692 sends. */
+  public Estate(List<LeaseEntry> leases, List<String> purges) {
+    this(leases, purges, List.of());
   }
 }

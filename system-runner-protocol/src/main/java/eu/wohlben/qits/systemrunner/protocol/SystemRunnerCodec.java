@@ -27,7 +27,8 @@ import java.util.UUID;
  * ({@code RunnerCodec} reports it as MALFORMED and the receiver drops the frame), and so is an enum
  * value this version does not know, and a missing {@code leases} on an {@link Estate} or an {@link
  * Inventory}: those lists are desired and observed state, and an absence read as "empty" would end
- * every lease on a node. A login presence is the one tolerant enum: unknown reads as UNKNOWN. A
+ * every lease on a node. {@code purges} and {@code warmImages} are the opposite: absent is empty,
+ * because an empty one removes and pulls nothing. A login presence is the one tolerant enum: unknown reads as UNKNOWN. A
  * sign-in frame without its {@code signInId} (and a {@code signIn} without its harness, a {@code
  * signInCode} without its code, a {@code signInProgress} without a known state) is refused too,
  * and so is a {@code docker} or {@code docker-result} without a uuid {@code requestId} or with an
@@ -61,6 +62,7 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
         }
         map.put(Field.LEASES, leases);
         map.put(Field.PURGES, new ArrayList<>(m.purges()));
+        map.put(Field.WARM_IMAGES, new ArrayList<>(m.warmImages()));
       }
       case ProbeLogin _ -> map.put(Field.TYPE, Type.PROBE_LOGIN);
       case HealthCheck m -> map.putAll(HealthWire.encodeCheck(m.requestId()));
@@ -136,7 +138,11 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
   @Override
   public SystemRunnerMessage decode(String type, Map<String, Object> map) {
     return switch (type) {
-      case Type.ESTATE -> new Estate(entries(map), WireMaps.stringList(map, Field.PURGES));
+      case Type.ESTATE ->
+          new Estate(
+              entries(map),
+              WireMaps.stringList(map, Field.PURGES),
+              WireMaps.stringList(map, Field.WARM_IMAGES));
       case Type.PROBE_LOGIN -> new ProbeLogin();
       case Type.HEALTH_CHECK -> new HealthCheck(HealthWire.decodeCheck(map));
       case Type.SIGN_IN ->

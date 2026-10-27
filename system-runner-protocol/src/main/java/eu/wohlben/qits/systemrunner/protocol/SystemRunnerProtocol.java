@@ -18,7 +18,8 @@ import java.util.Set;
  * <pre>
  *   Hello{heldLeases, capabilities{…, slots, engineId, hostname, credentialVolume, buildkit}}
  *     → Ack{slots, adoptedLeases, slotImages{ci, workspace, desk}, probeImage, registryMirrors}
- *   Estate{leases[{leaseId, slotType, desired, spec, specHash, workVolume, adopt}], purges[]}
+ *   Estate{leases[{leaseId, slotType, desired, spec, specHash, workVolume, adopt}], purges[],
+ *       warmImages[]}
  *     ← Inventory{leases[{leaseId, state, specHash, exitCode, detail}], volumes[]}
  *   ProbeLogin → LoginState{claude, kimi, checkedAt, volume}
  *   HealthCheck{requestId} → HealthChecked{ok, detail, requestId, checks}
@@ -139,6 +140,7 @@ public final class SystemRunnerProtocol {
     // estate
     public static final String LEASES = "leases";
     public static final String PURGES = "purges";
+    public static final String WARM_IMAGES = "warmImages";
     // a lease entry
     public static final String LEASE_ID = "leaseId";
     public static final String SLOT_TYPE = "slotType";

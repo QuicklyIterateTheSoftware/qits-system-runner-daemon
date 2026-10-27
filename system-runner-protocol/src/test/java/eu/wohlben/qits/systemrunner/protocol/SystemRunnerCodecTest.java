@@ -71,6 +71,11 @@ class SystemRunnerCodecTest {
         new Adopt(OLD_WS, OLD_WS));
   }
 
+  private static final String WARM_TAG = "registry.qits.example/qits/workspace:2026.1027.193351";
+  private static final String WARM_DIGEST =
+      "registry.qits.example/qits/ci-slot@sha256:"
+          + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
   private static LeaseEntry endedDesk() {
     return new LeaseEntry(L2, SlotType.DESK, DesiredState.ENDED, null, null, "desk-7", null);
   }
@@ -84,7 +89,8 @@ class SystemRunnerCodecTest {
                 endedDesk(),
                 new LeaseEntry(
                     "l3", SlotType.CI, DesiredState.RUNNING, bareSpec(), "h", null, null)),
-            List.of("qits-system-runner-work-ws-9-1a2b3c4d")),
+            List.of("qits-system-runner-work-ws-9-1a2b3c4d"),
+            List.of(WARM_TAG, WARM_DIGEST)),
         new Estate(List.of(), List.of()),
         new ProbeLogin(),
         new HealthCheck("req-1"),
@@ -239,9 +245,19 @@ class SystemRunnerCodecTest {
             + L2
             + "\",\"slotType\":\"DESK\",\"desired\":\"ENDED\",\"spec\":null,\"specHash\":null,"
             + "\"workVolume\":\"desk-7\",\"adopt\":null}],"
-            + "\"purges\":[\"qits-system-runner-work-ws-9-1a2b3c4d\"]}",
-        new Estate(List.of(workspace(), endedDesk()), List.of("qits-system-runner-work-ws-9-1a2b3c4d")));
-    assertJson("{\"type\":\"estate\",\"leases\":[],\"purges\":[]}", new Estate(List.of(), null));
+            + "\"purges\":[\"qits-system-runner-work-ws-9-1a2b3c4d\"],"
+            + "\"warmImages\":[\""
+            + WARM_TAG
+            + "\",\""
+            + WARM_DIGEST
+            + "\"]}",
+        new Estate(
+            List.of(workspace(), endedDesk()),
+            List.of("qits-system-runner-work-ws-9-1a2b3c4d"),
+            List.of(WARM_TAG, WARM_DIGEST)));
+    assertJson(
+        "{\"type\":\"estate\",\"leases\":[],\"purges\":[],\"warmImages\":[]}",
+        new Estate(List.of(), null, null));
     assertJson("{\"type\":\"probeLogin\"}", new ProbeLogin());
     assertJson("{\"type\":\"healthCheck\",\"requestId\":\"req-1\"}", new HealthCheck("req-1"));
     assertJson(
@@ -413,6 +429,20 @@ class SystemRunnerCodecTest {
         assertThrows(
             RunnerDecodeException.class, () -> CODEC.decode(Map.of("type", "take", "leaseId", L1)));
     assertEquals(RunnerDecodeException.Reason.UNKNOWN_TYPE, e.reason());
+  }
+
+  @Test
+  void anEstateWithoutWarmImagesNamesNoneAsEveryServerBeforeItSends() {
+    Map<String, Object> old = new LinkedHashMap<>();
+    old.put("type", "estate");
+    old.put("leases", List.of());
+    old.put("purges", List.of());
+    assertEquals(List.of(), ((Estate) CODEC.decode(old)).warmImages());
+    old.put("warmImages", null);
+    assertEquals(List.of(), ((Estate) CODEC.decode(old)).warmImages());
+    old.put("warmImages", List.of(WARM_TAG));
+    assertEquals(List.of(WARM_TAG), ((Estate) CODEC.decode(old)).warmImages());
+    assertMalformed(Map.of("type", "estate", "leases", List.of(), "warmImages", "not-a-list"));
   }
 
   @Test

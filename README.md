@@ -56,6 +56,11 @@ lease in it (`SystemRunnerDomain`, `LeaseLauncher`):
 - A **work volume is removed only on an `estate.purges` entry** naming it (one of this runner's
   own, or a retired runner's adopted volume), and never while a RUNNING lease of the estate mounts
   it.
+- Every **`estate.warmImages`** reference not on the node is pulled in the background on the same
+  pool, so the first lease of a newly released slot image does not wait for a cold pull
+  (qits-1692). A warm pull never holds the convergence and never fails a lease; one that fails is
+  logged once and tried again when a later estate names the image. The housekeeping that removes
+  old lease images keeps every warm image of the latest estate.
 
 It reports an `inventory` at the greeting, around every convergence and whenever the periodic look
 sees a change; probes the agent logins on the credential volume (`loginState`) after every
@@ -257,7 +262,8 @@ frames are this repository's (`SystemRunnerCodec`).
     runner → hello{runnerVersion, capabilityVersion, slots, capabilities{docker, arch, os, labels,
              slots, engineId, hostname, credentialVolume, buildkit}, heldLeases}
     ack{capabilityVersion, slots, slotImages{ci, workspace, desk}, probeImage, registryMirrors, adoptedLeases}
-    estate{leases:[{leaseId, slotType, desired, spec, specHash, workVolume, adopt{container, volume}}], purges:[name]}
+    estate{leases:[{leaseId, slotType, desired, spec, specHash, workVolume, adopt{container, volume}}], purges:[name],
+           warmImages:[image]}
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail}], volumes:[name]}
     probeLogin → loginState{claude, kimi, checkedAt, volume}                (PRESENT|ABSENT|UNKNOWN)
     healthCheck{requestId} → healthChecked{ok, detail, requestId, checks:[{name, ok, detail, data}]}
@@ -269,7 +275,10 @@ frames are this repository's (`SystemRunnerCodec`).
 `STARTING|RUNNING|EXITED|FAILED|ENDED`, a sign-in's `state`
 `STARTING|AWAITING_CODE|AWAITING_BROWSER|SUCCEEDED|FAILED|EXPIRED|CANCELLED`. `spec` is `{image, env{}, user, limits{memory, memorySwap,
 pidsLimit, cpus, oomScoreAdj}}`; `workVolume` is the lease's **work key** (`ws-<rowId>`,
-`desk-<deskId>`, null for CI), from which the runner derives the volume's name.
+`desk-<deskId>`, null for CI), from which the runner derives the volume's name. `warmImages` is a
+list of full image references (`registry…/qits/workspace:<version>`, or `…@sha256:<digest>`) to keep
+pulled; absent or null is empty, which is what a server before it sends, so it is not a capability
+bump — both codecs ignore a field they do not know.
 
 ## Layout
 
