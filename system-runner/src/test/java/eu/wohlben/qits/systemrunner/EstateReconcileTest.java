@@ -61,6 +61,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
@@ -96,6 +97,7 @@ class EstateReconcileTest {
   private static final String WS_NEXT = REGISTRY + "workspace:2026.1024.1";
   private static final String DESK_IMAGE = REGISTRY + "project-agent:2026.1023.1";
   private static final String WARM = REGISTRY + "workspace:2026.1027.1";
+  private static final String WARM2 = REGISTRY + "workspace:2026.1027.2";
   private static final SystemRunnerAck ACK =
       new SystemRunnerAck(
           new SlotImages(REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent"),
@@ -589,6 +591,69 @@ class EstateReconcileTest {
     Thread.sleep(300);
     assertEquals(1, pullsOf(WARM), "one pull per reference: " + docker.calls());
     assertTrue(runsOf(lease(L1)).isEmpty(), "a running lease is left alone");
+  }
+
+  @Test
+  void aLeaseNeverWaitsBehindAWarmPullAndSharesTheOneOfItsOwnImage() throws Exception {
+    for (String image : List.of(WARM, WARM2, WS_NEXT)) {
+      missing(image);
+      docker.answerFor("pull", image, 0, "", "");
+      docker.hang("pull+" + safe(image), 8);
+    }
+    estateThenAck(List.of(WARM, WARM2));
+    start();
+
+    // The warm pool pulls one image at a time: WARM hangs, WARM2 waits its turn.
+    awaitTrue(() -> pullsOf(WARM) == 1);
+    Thread.sleep(300);
+    assertEquals(0, pullsOf(WARM2), "warm pulls run one at a time: " + docker.calls());
+
+    // Leases of a fresh image, of the queued warm image and of the in-flight one.
+    String l3 = "0b7c1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3";
+    host.send(
+        new Estate(
+            List.of(
+                workspace(L1, H1, "ws-42", WS_NEXT),
+                workspace(L2, H1, "ws-43", WARM2),
+                workspace(l3, H1, "ws-44", WARM)),
+            List.of(),
+            List.of(WARM, WARM2)));
+    long sent = System.nanoTime();
+    awaitTrue(() -> pullsOf(WS_NEXT) == 1 && pullsOf(WARM2) == 1);
+    assertTrue(
+        System.nanoTime() - sent < TimeUnit.SECONDS.toNanos(5),
+        "the lease pulls started while the warm pull still hangs");
+    awaitInventory(
+        i ->
+            stateOf(i, L1) == LeaseState.STARTING
+                && stateOf(i, L2) == LeaseState.STARTING
+                && stateOf(i, l3) == LeaseState.STARTING);
+    assertEquals(1, pullsOf(WARM), "the lease shares the in-flight warm pull: " + docker.calls());
+    assertEquals(1, pullsOf(WARM2), "a queued warm pull is the lease's now: " + docker.calls());
+  }
+
+  @Test
+  void theKeptEstatesWarmImagesArePulledAgainAtTheAckOfANewConnection() throws Exception {
+    missing(WARM);
+    docker.answerFor("pull", WARM, 1, "", "Error response from daemon: connection refused");
+    AtomicInteger hellos = new AtomicInteger();
+    host.script =
+        (h, message) -> {
+          if (message instanceof Hello) {
+            h.send(new Ack(IDENTITY.capabilityVersion(), 2, null, ACK.extensions()));
+            if (hellos.incrementAndGet() == 1) {
+              h.send(new Estate(List.of(), List.of(), List.of(WARM)));
+            }
+          }
+        };
+    start();
+    awaitTrue(() -> pullsOf(WARM) == 1);
+
+    // The reconnect's Ack warms the kept estate's images, before any estate on the new socket.
+    docker.answerFor("pull", WARM, 0, "", "");
+    host.closeSocket(1001, "going away");
+    awaitTrue(() -> hellos.get() == 2);
+    awaitTrue(() -> pullsOf(WARM) == 2);
   }
 
   @Test

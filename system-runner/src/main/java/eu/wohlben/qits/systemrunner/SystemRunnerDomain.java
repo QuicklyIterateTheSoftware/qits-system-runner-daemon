@@ -133,6 +133,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The image pulls' threads: bounded, off the converge lock. */
   private final ThreadPoolExecutor pullWork;
 
+  /** The warm pulls' one thread (qits-1692): never the lease pulls', so a lease never waits. */
+  private final ThreadPoolExecutor warmWork;
+
   /** The one thread a settled pull converges the latest estate again on. */
   private final ThreadPoolExecutor reconvergeWork;
 
@@ -263,7 +266,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.buildPlane = basePlane;
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
-    this.pulls = new ImagePulls(pullWork, this::reconvergeSoon);
+    this.warmWork = daemonPool("system-runner-warm", 1);
+    this.pulls = new ImagePulls(pullWork, warmWork, this::reconvergeSoon);
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
     this.launcher =
@@ -423,7 +427,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * when this target has slots and the host names a CI slot image, and the spec image of every
    * RUNNING lease of the estate kept from the last connection. The {@code Ack} carries the CI slot
    * image's repository prefix only ({@link SlotImages#ci()}), never a pinned reference, so the CI
-   * image itself is pulled once a lease names it — off the converge lock, like this.
+   * image itself is pulled once a lease names it — off the converge lock, like this. The kept
+   * estate's {@code warmImages} go to the warm pool after them.
    */
   private void prePull(RunnerSession session) {
     try {
@@ -437,6 +442,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             launcher.prefetch(entry.spec().image(), session);
           }
         }
+        pulls.retryWarm();
+        warm(kept, session);
       }
     } catch (RuntimeException e) {
       LOG.warnf("system-runner could not start its pre-pulls: %s", e.getMessage());
@@ -498,6 +505,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     signIns.stopAll("the target is being decommissioned");
     timer.shutdownNow();
     pullWork.shutdownNow();
+    warmWork.shutdownNow();
     reconvergeWork.shutdownNow();
     dockerWork.shutdownNow();
     List<LeaseContainers.Seen> seen;
@@ -572,6 +580,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     signIns.stopAll("the runner stops");
     timer.shutdownNow();
     pullWork.shutdownNow();
+    warmWork.shutdownNow();
     reconvergeWork.shutdownNow();
     dockerWork.shutdownNow();
     signInWork.shutdown();

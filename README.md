@@ -56,11 +56,13 @@ lease in it (`SystemRunnerDomain`, `LeaseLauncher`):
 - A **work volume is removed only on an `estate.purges` entry** naming it (one of this runner's
   own, or a retired runner's adopted volume), and never while a RUNNING lease of the estate mounts
   it.
-- Every **`estate.warmImages`** reference not on the node is pulled in the background on the same
-  pool, so the first lease of a newly released slot image does not wait for a cold pull
-  (qits-1692). A warm pull never holds the convergence and never fails a lease; one that fails is
-  logged once and tried again when a later estate names the image. The housekeeping that removes
-  old lease images keeps every warm image of the latest estate.
+- Every **`estate.warmImages`** reference not on the node is pulled in the background, so the
+  first lease of a newly released slot image does not wait for a cold pull (qits-1692) — on a
+  pool of its own, one at a time, so a lease's pull never waits behind one. A lease needing an
+  image being warmed shares that pull; one whose warm pull is still queued pulls it at once. A
+  warm pull never holds the convergence and never fails a lease; one that fails is logged once and
+  tried again when a later estate (or a reconnect's `Ack`, from the kept estate) names the image.
+  The housekeeping that removes old lease images keeps every warm image of the latest estate.
 
 It reports an `inventory` at the greeting, around every convergence and whenever the periodic look
 sees a change; probes the agent logins on the credential volume (`loginState`) after every

@@ -2,6 +2,7 @@ package eu.wohlben.qits.systemrunner;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -29,9 +30,13 @@ import org.jboss.logging.Logger;
  *       image afterwards, so a convergence never starts the same pull in a loop; the run's own
  *       {@code --pull missing} is the belt behind it.
  *   <li><b>A warm pull</b> ({@link #warm}, an {@code estate.warmImages} entry, qits-1692) is the
- *       same pull with nobody waiting on it: its end converges nothing again, and its failure is
- *       never a lease's — a lease that asks for the image meanwhile starts its own pull rather than
- *       inherit it — and is forgotten at the next {@code estate}, which names the image again.
+ *       same pull with nobody waiting on it, run <b>on a pool of its own</b>, one at a time, the
+ *       rest queued here — so a lease's pull never waits behind one. A lease that needs an image a
+ *       warm pull is fetching shares that pull; one whose warm pull is still queued takes it out of
+ *       the queue and pulls it on the lease pool at once. A warm pull's end converges nothing
+ *       again, its failure is never a lease's — a lease that asks for the image afterwards starts
+ *       its own pull rather than inherit it — and is forgotten at the next {@code estate}, which
+ *       names the image again.
  * </ul>
  */
 final class ImagePulls {
@@ -78,21 +83,29 @@ final class ImagePulls {
   }
 
   private final Executor executor;
+  private final Executor warmExecutor;
   private final Runnable settled;
 
-  // All four under this object's monitor.
+  // All below under this object's monitor.
   private final Set<String> running = new HashSet<>();
   /** The running pulls {@link #warm} started that no convergence has asked for since. */
   private final Set<String> warmOnly = new HashSet<>();
   private final Set<String> pulled = new HashSet<>();
   private final Map<String, Failure> failed = new HashMap<>();
+  /** The warm pull on {@link #warmExecutor} now, or null: one at a time. */
+  private String warmInFlight;
+  /** The warm pulls waiting for {@link #warmInFlight} to settle, in the order they were named. */
+  private final Map<String, Supplier<Optional<String>>> warmQueue = new LinkedHashMap<>();
 
   /**
-   * @param executor the bounded pool the pulls run on
-   * @param settled run after every pull, on the pull's thread, once its outcome is kept
+   * @param executor the bounded pool the pulls a lease needs run on
+   * @param warmExecutor the pool the warm pulls run on, one at a time: never {@code executor}
+   * @param settled run after every pull a lease waits on, on the pull's thread, once its outcome is
+   *     kept
    */
-  ImagePulls(Executor executor, Runnable settled) {
+  ImagePulls(Executor executor, Executor warmExecutor, Runnable settled) {
     this.executor = executor;
+    this.warmExecutor = warmExecutor;
     this.settled = settled;
   }
 
@@ -136,12 +149,39 @@ final class ImagePulls {
    * the last {@code estate} — a failed one is tried again only from the next.
    */
   synchronized void warm(String image, Supplier<Optional<String>> pull) {
-    if (running.contains(image) || failed.containsKey(image) || pulled.contains(image)) {
+    if (running.contains(image)
+        || failed.containsKey(image)
+        || pulled.contains(image)
+        || warmQueue.containsKey(image)) {
       return;
     }
-    if (start(image, pull, true)) {
-      warmOnly.add(image);
+    if (warmInFlight != null) {
+      warmQueue.put(image, pull);
+      return;
     }
+    startWarm(image, pull);
+  }
+
+  /** {@code image}'s warm pull on the warm pool; a stopping pool drops it and the queue. */
+  private void startWarm(String image, Supplier<Optional<String>> pull) {
+    running.add(image);
+    warmOnly.add(image);
+    warmInFlight = image;
+    try {
+      warmExecutor.execute(() -> pull(image, pull));
+    } catch (RejectedExecutionException shutDown) {
+      running.remove(image);
+      warmOnly.remove(image);
+      warmInFlight = null;
+      warmQueue.clear();
+      return;
+    }
+    LOG.infof("system-runner warms %s off the convergence", image);
+  }
+
+  /** A new connection's {@code Ack}: a failed warm pull is tried again when it is named again. */
+  synchronized void retryWarm() {
+    failed.values().removeIf(f -> f.warm);
   }
 
   /**
@@ -154,11 +194,12 @@ final class ImagePulls {
     pulled.clear();
   }
 
+  /**
+   * {@code image}'s pull on the lease pool — or the one already running, a warm one included. A
+   * warm pull still queued is taken out of the queue: the lease does not wait its turn.
+   */
   private boolean start(String image, Supplier<Optional<String>> pull) {
-    return start(image, pull, false);
-  }
-
-  private boolean start(String image, Supplier<Optional<String>> pull, boolean warm) {
+    warmQueue.remove(image);
     if (running.contains(image)) {
       return true;
     }
@@ -169,7 +210,7 @@ final class ImagePulls {
       running.remove(image);
       return false;
     }
-    LOG.infof("system-runner %s %s off the convergence", warm ? "warms" : "pulls", image);
+    LOG.infof("system-runner pulls %s off the convergence", image);
     return true;
   }
 
@@ -190,6 +231,15 @@ final class ImagePulls {
         failed.put(image, new Failure(outcome.get(), warm));
       } else {
         pulled.add(image);
+      }
+      if (image.equals(warmInFlight)) {
+        warmInFlight = null;
+        var next = warmQueue.entrySet().iterator();
+        if (next.hasNext()) {
+          var queued = next.next();
+          next.remove();
+          startWarm(queued.getKey(), queued.getValue());
+        }
       }
     }
     if (outcome.isPresent()) {
