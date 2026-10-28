@@ -64,6 +64,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -524,7 +525,19 @@ class EstateReconcileTest {
     Inventory inventory =
         awaitInventory(
             i -> stateOf(i, L1) == LeaseState.STARTING && stateOf(i, L2) == LeaseState.ENDED);
-    assertEquals(new LeaseReport(L1, LeaseState.STARTING, null, null, null), report(inventory, L1));
+    LeaseReport starting = report(inventory, L1);
+    assertEquals(LeaseState.STARTING, starting.state());
+    assertTrue(
+        starting.detail().matches("pulling " + Pattern.quote(WS_NEXT) + " since \\S+Z"),
+        starting.detail());
+    assertEquals(
+        List.of(starting.detail()),
+        host.all(Inventory.class).stream()
+            .map(i -> report(i, L1).detail())
+            .filter(d -> d != null && d.startsWith("pulling "))
+            .distinct()
+            .toList(),
+        "the same words in every inventory while the pull runs");
     awaitTrue(() -> docker.calls("pull").stream().anyMatch(c -> c.contains(WS_NEXT)));
     assertTrue(runsOf(lease(L1)).isEmpty(), "the convergence did not wait for the pull");
 
@@ -565,6 +578,22 @@ class EstateReconcileTest {
     String detail = report(inventory, L1).detail();
     assertTrue(detail.startsWith("could not pull " + WS_NEXT + ": "), detail);
     assertTrue(detail.contains("manifest unknown"), detail);
+    assertTrue(runsOf(lease(L1)).isEmpty());
+  }
+
+  @Test
+  void aPullThatDoesNotAnswerWithinItsDeadlineFailsTheLeaseSayingSo() throws Exception {
+    extraEnv.put(IDENTITY.env(RunnerSettings.PULL_TIMEOUT), "1");
+    missing(WS_NEXT);
+    docker.answerFor("pull", WS_NEXT, 0, "", "");
+    docker.hang("pull+" + safe(WS_NEXT), 4);
+    estateThenAck(workspace(L1, H1, "ws-42", WS_NEXT));
+    start();
+
+    Inventory inventory = awaitInventory(i -> stateOf(i, L1) == LeaseState.FAILED);
+    String detail = report(inventory, L1).detail();
+    assertTrue(detail.startsWith("could not pull " + WS_NEXT + ": "), detail);
+    assertTrue(detail.contains("did not answer within 1s"), detail);
     assertTrue(runsOf(lease(L1)).isEmpty());
   }
 

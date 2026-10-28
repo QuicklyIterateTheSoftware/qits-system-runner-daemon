@@ -1,11 +1,18 @@
 package eu.wohlben.qits.systemrunner;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
@@ -16,9 +23,10 @@ import org.jboss.logging.Logger;
  * image is gigabytes and can take up to the pull deadline (30 minutes by default); run inside a
  * convergence it held the lock that long, so no lease ended, no other lease started and no
  * inventory went out. Here a convergence only asks: a pull it needs is started on the bounded
- * executor, the lease is reported {@code STARTING}, and the convergence moves on. When the pull
- * settles, {@code settled} runs, and the domain converges its latest {@code estate} again — which
- * then finds the image here and creates the container.
+ * executor, the lease is reported {@code STARTING} with {@code pulling <image> since <instant>} —
+ * the same words for the whole pull, so the server sees one change — and the convergence moves on.
+ * When the pull settles, {@code settled} runs, and the domain converges its latest {@code estate}
+ * again — which then finds the image here and creates the container.
  *
  * <ul>
  *   <li><b>One pull per image reference at a time</b>: every lease of one image shares it.
@@ -37,6 +45,8 @@ import org.jboss.logging.Logger;
  *       again, its failure is never a lease's — a lease that asks for the image afterwards starts
  *       its own pull rather than inherit it — and is forgotten at the next {@code estate}, which
  *       names the image again.
+ *   <li><b>A pull that runs long says so</b>: {@link #stillPulling} names every running pull and how
+ *       long it has run, which the domain logs once a minute.
  * </ul>
  */
 final class ImagePulls {
@@ -47,7 +57,7 @@ final class ImagePulls {
   enum Phase {
     /** Pulled: the convergence may go on. */
     READY,
-    /** A pull runs: the lease is {@code STARTING}. */
+    /** A pull runs: the lease is {@code STARTING}; {@code detail} says which and since when. */
     PULLING,
     /** The last pull failed; {@code detail} is docker's words. */
     FAILED
@@ -56,7 +66,12 @@ final class ImagePulls {
   record Status(Phase phase, String detail) {
 
     static final Status READY = new Status(Phase.READY, null);
-    static final Status PULLING = new Status(Phase.PULLING, null);
+
+    /** {@code pulling <image> since 2026-10-27T19:55:49Z}: no elapsed time, so it never changes. */
+    static Status pulling(String image, Instant since) {
+      return new Status(
+          Phase.PULLING, "pulling " + image + " since " + since.truncatedTo(ChronoUnit.SECONDS));
+    }
 
     static Status failed(String detail) {
       return new Status(Phase.FAILED, detail);
@@ -85,9 +100,12 @@ final class ImagePulls {
   private final Executor executor;
   private final Executor warmExecutor;
   private final Runnable settled;
+  private final Clock clock;
 
   // All below under this object's monitor.
   private final Set<String> running = new HashSet<>();
+  /** When each of {@link #running} started. */
+  private final Map<String, Instant> since = new HashMap<>();
   /** The running pulls {@link #warm} started that no convergence has asked for since. */
   private final Set<String> warmOnly = new HashSet<>();
   private final Set<String> pulled = new HashSet<>();
@@ -104,9 +122,15 @@ final class ImagePulls {
    *     kept
    */
   ImagePulls(Executor executor, Executor warmExecutor, Runnable settled) {
+    this(executor, warmExecutor, settled, Clock.systemUTC());
+  }
+
+  /** The same, with the clock a pull's start is read from. */
+  ImagePulls(Executor executor, Executor warmExecutor, Runnable settled, Clock clock) {
     this.executor = executor;
     this.warmExecutor = warmExecutor;
     this.settled = settled;
+    this.clock = clock;
   }
 
   /**
@@ -129,7 +153,39 @@ final class ImagePulls {
     if (pulled.remove(image)) {
       return Status.READY;
     }
-    return start(image, pull) ? Status.PULLING : Status.failed(stopping());
+    if (!start(image, pull)) {
+      return Status.failed(stopping());
+    }
+    return Status.pulling(image, since.getOrDefault(image, clock.instant()));
+  }
+
+  /** When the running pull of {@code image} started; empty when none runs. */
+  synchronized Optional<Instant> pullingSince(String image) {
+    return Optional.ofNullable(since.get(image));
+  }
+
+  /**
+   * {@code system-runner still pulls <image> (83.4s)} for every running pull, by image, {@code warm
+   * image } before a warm one's: what the domain logs once a minute.
+   */
+  synchronized List<String> stillPulling(Instant now) {
+    List<String> lines = new ArrayList<>();
+    new TreeMap<>(since)
+        .forEach(
+            (image, started) ->
+                lines.add(
+                    "system-runner still pulls "
+                        + (warmOnly.contains(image) ? "warm image " : "")
+                        + image
+                        + " ("
+                        + took(Duration.between(started, now).toNanos())
+                        + ")"));
+    return lines;
+  }
+
+  /** Log {@link #stillPulling} now. */
+  void logProgress() {
+    stillPulling(clock.instant()).forEach(LOG::info);
   }
 
   /**
@@ -165,12 +221,14 @@ final class ImagePulls {
   /** {@code image}'s warm pull on the warm pool; a stopping pool drops it and the queue. */
   private void startWarm(String image, Supplier<Optional<String>> pull) {
     running.add(image);
+    since.put(image, clock.instant());
     warmOnly.add(image);
     warmInFlight = image;
     try {
       warmExecutor.execute(() -> pull(image, pull));
     } catch (RejectedExecutionException shutDown) {
       running.remove(image);
+      since.remove(image);
       warmOnly.remove(image);
       warmInFlight = null;
       warmQueue.clear();
@@ -204,10 +262,12 @@ final class ImagePulls {
       return true;
     }
     running.add(image);
+    since.put(image, clock.instant());
     try {
       executor.execute(() -> pull(image, pull));
     } catch (RejectedExecutionException shutDown) {
       running.remove(image);
+      since.remove(image);
       return false;
     }
     LOG.infof("system-runner pulls %s off the convergence", image);
@@ -226,6 +286,7 @@ final class ImagePulls {
     boolean warm;
     synchronized (this) {
       running.remove(image);
+      since.remove(image);
       warm = warmOnly.remove(image);
       if (outcome.isPresent()) {
         failed.put(image, new Failure(outcome.get(), warm));

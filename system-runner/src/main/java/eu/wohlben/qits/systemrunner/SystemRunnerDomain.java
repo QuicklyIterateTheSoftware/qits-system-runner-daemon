@@ -86,10 +86,11 @@ import org.jboss.logging.Logger;
  * decides placement: the server takes {@code capabilities.slots} as the target's total.
  *
  * <p><b>No pull runs under the converge lock</b> (qits-1543): a lease whose image, or whose
- * builder's image, is not on the node is reported {@code STARTING} while {@link ImagePulls} pulls it
- * on its own threads, and the convergence goes on to the next entry — so an end, a lease whose image
- * is here and the {@code inventory} never wait behind a multi-gigabyte cold pull. The pull's end
- * converges the latest {@code estate} again.
+ * builder's image, is not on the node is reported {@code STARTING}, {@code pulling <image> since
+ * <instant>}, while {@link ImagePulls} pulls it on its own threads, and the convergence goes on to
+ * the next entry — so an end, a lease whose image is here and the {@code inventory} never wait
+ * behind a multi-gigabyte cold pull. The pull's end converges the latest {@code estate} again. A
+ * running pull is logged once a minute with how long it has run.
  *
  * <p><b>Rollover never drains.</b> {@link #quiescent()} is "no convergence in flight", never "holds
  * nothing": a lease container is node state that outlives the runner process, and its successor
@@ -129,6 +130,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /** At most this many image pulls run at once; one per image reference ({@link ImagePulls}). */
   static final int PULL_THREADS = 2;
+
+  /** How often every running pull is logged with how long it has run. */
+  static final Duration PULL_PROGRESS_EVERY = Duration.ofMinutes(1);
 
   /** The image pulls' threads: bounded, off the converge lock. */
   private final ThreadPoolExecutor pullWork;
@@ -176,6 +180,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /** The last convergence's failure per lease, for {@code inventory}'s FAILED; cleared by success. */
   private final Map<String, String> failures = new ConcurrentHashMap<>();
+
+  /** The last convergence's STARTING words per lease for {@code inventory}: the pull it awaits. */
+  private final Map<String, String> pullingDetails = new ConcurrentHashMap<>();
 
   /** The latest {@code estate}, kept across reconnects; null before the first. */
   private volatile Estate estate;
@@ -267,7 +274,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
     this.warmWork = daemonPool("system-runner-warm", 1);
-    this.pulls = new ImagePulls(pullWork, warmWork, this::reconvergeSoon);
+    this.pulls = new ImagePulls(pullWork, warmWork, this::reconvergeSoon, clock);
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
     this.launcher =
@@ -294,6 +301,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             });
     pool.setRemoveOnCancelPolicy(true);
     this.timer = pool;
+    long progressEvery = PULL_PROGRESS_EVERY.toMillis();
+    timer.scheduleWithFixedDelay(
+        pulls::logProgress, progressEvery, progressEvery, TimeUnit.MILLISECONDS);
     this.signInWork =
         Executors.newCachedThreadPool(
             r -> {
@@ -681,6 +691,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
           "system-runner's estate%s: %d lease(s), %d purge(s)",
           again ? " again, after a pull" : "", listed.size(), e.purges().size());
       failures.keySet().retainAll(listed);
+      pullingDetails.keySet().retainAll(listed);
       sendInventory(session, false);
       if (stopOutside(listed, session)) {
         session.own().reconcile(listed);
@@ -700,8 +711,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   }
 
   /**
-   * One entry converged, under {@link #converging}: its failure kept for the inventory, and the
-   * slot held exactly while the lease runs.
+   * One entry converged, under {@link #converging}: its failure or the pull it waits on kept for the
+   * inventory, and the slot held exactly while the lease runs.
    */
   private void converge(LeaseEntry entry, RunnerSession session) {
     String leaseId = entry.leaseId();
@@ -710,6 +721,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       failures.put(leaseId, outcome.detail());
     } else {
       failures.remove(leaseId);
+    }
+    if (outcome.state() == LeaseState.STARTING && outcome.detail() != null) {
+      pullingDetails.put(leaseId, outcome.detail());
+    } else {
+      pullingDetails.remove(leaseId);
     }
     boolean held = session.held().contains(leaseId);
     if (outcome.running() && !held) {
@@ -1023,7 +1039,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * What of the leases is on this node, sorted by lease: every lease container RUNNING, STARTING
    * ({@code created}) or EXITED with its exit code; every lease whose last convergence failed
    * FAILED with why; every RUNNING lease of the latest {@code estate} with no container yet
-   * STARTING, and every ENDED one with none ENDED. Then the work volumes on the node: the runner's
+   * STARTING — with {@code pulling <image> since <instant>} while its image is pulled — and every
+   * ENDED one with none ENDED. Then the work volumes on the node: the runner's
    * own and every adopted one an estate entry names. Empty when docker did not answer.
    */
   Optional<Inventory> inventory(List<LeaseContainers.Seen> now) {
@@ -1056,8 +1073,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       for (LeaseEntry entry : e.leases()) {
         LeaseState none =
             entry.desired() == DesiredState.ENDED ? LeaseState.ENDED : LeaseState.STARTING;
+        String detail = none == LeaseState.STARTING ? pullingDetails.get(entry.leaseId()) : null;
         leases.putIfAbsent(
-            entry.leaseId(), new LeaseReport(entry.leaseId(), none, null, null, null));
+            entry.leaseId(), new LeaseReport(entry.leaseId(), none, null, null, detail));
       }
     }
     try {

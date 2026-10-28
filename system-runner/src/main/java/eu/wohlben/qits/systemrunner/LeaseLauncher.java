@@ -27,9 +27,9 @@ import org.jboss.logging.Logger;
  *   <li><b>RUNNING</b>, refused by its policy or its {@code adopt} ({@link SlotPolicy#refusal},
  *       {@link LegacyAdoption#refusal}) → {@code FAILED}, the node untouched;
  *   <li><b>RUNNING</b>, no container, its image (or a CI lease's builder image) not on the node →
- *       {@code STARTING}: the pull is started on {@link ImagePulls}, off the converge lock, and the
- *       convergence returns at once; the pull's end converges the estate again. A failed pull is
- *       {@code FAILED} with docker's words;
+ *       {@code STARTING}, {@code pulling <image> since <instant>}: the pull is started on {@link
+ *       ImagePulls}, off the converge lock, and the convergence returns at once; the pull's end
+ *       converges the estate again. A failed pull is {@code FAILED} with docker's words;
  *   <li><b>RUNNING</b>, no container, the images here → every external node volume asked after, the adopted container stopped and removed and the
  *       adopted volume asked after — or the work volume and the runner's own node volumes made
  *       labelled — then {@code run};
@@ -65,6 +65,11 @@ final class LeaseLauncher {
 
     static Outcome of(LeaseState state) {
       return new Outcome(state, null, null);
+    }
+
+    /** {@code STARTING}, saying what it waits on: {@code pulling <image> since <instant>}. */
+    static Outcome starting(String detail) {
+      return new Outcome(LeaseState.STARTING, null, detail);
     }
 
     static Outcome exited(int exitCode) {
@@ -190,8 +195,9 @@ final class LeaseLauncher {
 
   /**
    * Empty when the lease's image — and a CI lease's builder image — are on the node; else {@code
-   * STARTING} while a pull runs, or {@code FAILED} with docker's words. Never waits on a pull: both
-   * are started together, on {@link ImagePulls}, and the convergence moves on.
+   * STARTING} while a pull runs — {@code pulling <image> since <instant>}, the lease image's pull
+   * before the builder's — or {@code FAILED} with docker's words. Never waits on a pull: both are
+   * started together, on {@link ImagePulls}, and the convergence moves on.
    */
   private Optional<Outcome> awaitingImages(
       String leaseId, String image, BuildPlane plane, RunnerSession session) {
@@ -211,7 +217,7 @@ final class LeaseLauncher {
     }
     if (lease.pulling() || builder.pulling()) {
       LOG.debugf("system-runner's lease %s is STARTING: its image is being pulled", leaseId);
-      return Optional.of(Outcome.of(LeaseState.STARTING));
+      return Optional.of(Outcome.starting((lease.pulling() ? lease : builder).detail()));
     }
     return Optional.empty();
   }
