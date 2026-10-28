@@ -563,6 +563,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     return List.of(new LeaseImagesPass(docker, this::currentImages));
   }
 
+  /** When the running pull of {@code image} started; empty once it settled, its outcome kept. */
+  Optional<Instant> pullingSince(String image) {
+    return pulls.pullingSince(image);
+  }
+
   /**
    * The images in use now: every spec image of the latest {@code estate}, its warm images, and the
    * probe image.

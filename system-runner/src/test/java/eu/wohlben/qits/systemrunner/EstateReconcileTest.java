@@ -677,6 +677,8 @@ class EstateReconcileTest {
         };
     start();
     awaitTrue(() -> pullsOf(WARM) == 1);
+    // Settled, its failure kept: an Ack ahead of that would clear nothing and find it running.
+    awaitTrue(() -> domain.pullingSince(WARM).isEmpty());
 
     // The reconnect's Ack warms the kept estate's images, before any estate on the new socket.
     docker.answerFor("pull", WARM, 0, "", "");
