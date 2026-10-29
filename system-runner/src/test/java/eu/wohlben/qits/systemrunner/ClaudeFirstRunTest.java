@@ -24,9 +24,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * {@link ClaudeFirstRun}: the argv and the generated jq programs exactly, the check-then-merge
- * order — and the script itself, run by {@code bash} with {@code jq} against a temp directory
- * standing in for {@code /claude-home}: missing keys are written, every existing value survives,
- * and the files it creates are mode 600 / 644.
+ * order — and the script itself, run verbatim by {@code bash} with {@code jq}, {@code
+ * CLAUDE_CONFIG_DIR} pointed at a temp directory standing in for {@code /claude-home/.claude}:
+ * missing keys are written, every existing value survives, the files it creates are mode 600 /
+ * 644, and a run with {@code CLAUDE_CONFIG_DIR} unset refuses rather than touching anything.
  */
 @EnabledOnOs(OS.LINUX)
 class ClaudeFirstRunTest {
@@ -165,6 +166,26 @@ class ClaudeFirstRunTest {
   }
 
   @Test
+  void theScriptNeverSpellsTheCredentialVolumePath() {
+    assertFalse(ClaudeFirstRun.SCRIPT.contains("/claude-home"), ClaudeFirstRun.SCRIPT);
+  }
+
+  @Test
+  void theScriptRefusesWithoutConfigDirAndTouchesNothing() throws Exception {
+    assumeTrue(onPath("jq") && onPath("bash"), "needs bash and jq");
+    Path home = dir.resolve("claude-home");
+    Files.createDirectories(home);
+    Path bin = fakeClaude("2.1.300 (Claude Code)");
+
+    Run applied = script(home, bin, "apply", false);
+    assertTrue(applied.exit() != 0, applied.output());
+    assertTrue(applied.output().contains("CLAUDE_CONFIG_DIR is not set"), applied.output());
+    try (var children = Files.list(home)) {
+      assertTrue(children.findAny().isEmpty(), "nothing was created under home");
+    }
+  }
+
+  @Test
   void aFileJqCannotReadIsLeftAsItIsAndTheMergeFails() throws Exception {
     assumeTrue(onPath("jq") && onPath("bash"), "needs bash and jq");
     Path home = dir.resolve("claude-home");
@@ -180,12 +201,31 @@ class ClaudeFirstRunTest {
 
   private record Run(int exit, String output) {}
 
-  /** The script with {@code /claude-home} pointed at {@code home}, as {@code bash -c} runs it. */
+  /**
+   * {@link ClaudeFirstRun#SCRIPT} verbatim, as {@code bash -c} runs it in the container, with
+   * {@code CLAUDE_CONFIG_DIR} pointed at {@code home}'s {@code .claude} and {@code HOME} at {@code
+   * home}, so nothing outside the temp directory is ever touched.
+   */
   private Run script(Path home, Path bin, String mode) throws Exception {
-    String script = ClaudeFirstRun.SCRIPT.replace(LoginProbe.CLAUDE_HOME, home.toString());
-    List<String> argv = new ArrayList<>(List.of("bash", "-c", script, "qits-first-run", mode));
+    return script(home, bin, mode, true);
+  }
+
+  /**
+   * As {@link #script(Path, Path, String)}, but with {@code withConfigDir} false omitting {@code
+   * CLAUDE_CONFIG_DIR} from the environment entirely, to prove the script refuses rather than
+   * defaulting onto {@code HOME}.
+   */
+  private Run script(Path home, Path bin, String mode, boolean withConfigDir) throws Exception {
+    List<String> argv =
+        new ArrayList<>(List.of("bash", "-c", ClaudeFirstRun.SCRIPT, "qits-first-run", mode));
     ProcessBuilder pb = new ProcessBuilder(argv).redirectErrorStream(true);
     pb.environment().put("PATH", bin + ":" + System.getenv("PATH"));
+    pb.environment().put("HOME", home.toString());
+    if (withConfigDir) {
+      pb.environment().put("CLAUDE_CONFIG_DIR", home.resolve(".claude").toString());
+    } else {
+      pb.environment().remove("CLAUDE_CONFIG_DIR");
+    }
     Process p = pb.start();
     String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
     assertTrue(p.waitFor(30, TimeUnit.SECONDS));

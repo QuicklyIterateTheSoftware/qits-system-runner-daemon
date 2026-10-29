@@ -24,6 +24,13 @@ import java.util.stream.Collectors;
  * <p>The files are created owned by uid 1000 when missing ({@code .claude.json} mode 600); one that
  * holds something jq cannot read is left alone and the merge fails, rather than replaced.
  *
+ * <p><b>The two files are read from {@code CLAUDE_CONFIG_DIR}</b>, never a baked-in path: {@link
+ * #SCRIPT} resolves {@code config}/{@code settings} under {@code "$CLAUDE_CONFIG_DIR"} at run
+ * time, and {@link #argv} is what sets it, to {@code /claude-home/.claude}, alongside the probe
+ * image. An invocation outside that container — where the variable is unset — refuses with {@code
+ * CLAUDE_CONFIG_DIR is not set} rather than default onto a real config, so a stray run of
+ * the script never merges onboarding keys into somebody's own config.
+ *
  * <p><b>The container carries no owner label</b>, unlike the login probe: the toolkit's reconcile
  * removes every owner-labelled container that is not a held lease, and an {@code estate} arriving
  * mid-merge would kill a write into {@code .claude.json}. It is {@code --rm}, under the probe's
@@ -35,8 +42,11 @@ final class ClaudeFirstRun {
   /** {@code lastOnboardingVersion} when {@code claude --version} answers nothing usable. */
   static final String FALLBACK_VERSION = "2.1.283";
 
-  static final String CONFIG = LoginProbe.CLAUDE_CONFIG_DIR + "/.claude.json";
-  static final String SETTINGS = LoginProbe.CLAUDE_CONFIG_DIR + "/settings.json";
+  private static final String CONFIG_NAME = ".claude.json";
+  private static final String SETTINGS_NAME = "settings.json";
+
+  static final String CONFIG = LoginProbe.CLAUDE_CONFIG_DIR + "/" + CONFIG_NAME;
+  static final String SETTINGS = LoginProbe.CLAUDE_CONFIG_DIR + "/" + SETTINGS_NAME;
 
   /** The value of {@code lastOnboardingVersion}: the CLI's own version, read in the container. */
   static final Object CLI_VERSION = new Object();
@@ -142,8 +152,9 @@ final class ClaudeFirstRun {
     return String.join(
         "\n",
         "set -u",
-        "config=" + CONFIG,
-        "settings=" + SETTINGS,
+        "dir=\"${CLAUDE_CONFIG_DIR:?CLAUDE_CONFIG_DIR is not set}\"",
+        "config=\"$dir/" + CONFIG_NAME + "\"",
+        "settings=\"$dir/" + SETTINGS_NAME + "\"",
         "present() {",
         "  jq -e '" + checkProgram(CONFIG) + "' \"$config\" >/dev/null 2>&1 &&",
         "  jq -e '" + checkProgram(SETTINGS) + "' \"$settings\" >/dev/null 2>&1",
