@@ -3,6 +3,7 @@ package eu.wohlben.qits.systemrunner;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -49,7 +50,8 @@ class BuildPlaneTest {
             IDENTITY,
             TARGET,
             new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
-            BuildkitSettings.DEFAULTS);
+            BuildkitSettings.DEFAULTS,
+            1);
   }
 
   // --- ensure ------------------------------------------------------------------------------------
@@ -160,7 +162,11 @@ class BuildPlaneTest {
             List.of("a.example=env-a:5000", "b.example=env-b:5000"));
     BuildPlane base =
         new BuildPlane(
-            IDENTITY, TARGET, new RunnerDocker(IDENTITY, "docker", Duration.ofSeconds(1)), settings);
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, "docker", Duration.ofSeconds(1)),
+            settings,
+            1);
     Map<String, String> ack = new LinkedHashMap<>();
     ack.put("a.example", "ack-a:5000");
     ack.put("c.example", "ack-c:5000/path");
@@ -178,6 +184,53 @@ class BuildPlaneTest {
         base.configuredStamp(),
         base.withRegistryMirrors(Map.of()).configuredStamp(),
         "an empty map keeps the environment's mirrors");
+  }
+
+  @Test
+  void unsetParallelismRendersTheRunnersSlotTotal() {
+    BuildPlane withSlots =
+        new BuildPlane(
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            BuildkitSettings.DEFAULTS,
+            8);
+    assertTrue(withSlots.toml().contains("max-parallelism = 8"), withSlots.toml());
+  }
+
+  @Test
+  void anExplicitParallelismWinsOverTheSlotTotal() {
+    BuildkitSettings settings =
+        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, 3, List.of(), List.of());
+    BuildPlane explicit =
+        new BuildPlane(
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            settings,
+            8);
+    assertTrue(explicit.toml().contains("max-parallelism = 3"), explicit.toml());
+  }
+
+  @Test
+  void configuredStampDiffersBetweenTheDerivedAndAnExplicitParallelism() {
+    BuildPlane derived =
+        new BuildPlane(
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            BuildkitSettings.DEFAULTS,
+            8);
+    BuildkitSettings explicitSettings =
+        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, 3, List.of(), List.of());
+    BuildPlane explicit =
+        new BuildPlane(
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            explicitSettings,
+            8);
+    assertNotEquals(derived.configuredStamp(), explicit.configuredStamp());
   }
 
   // --- health ------------------------------------------------------------------------------------
@@ -221,7 +274,7 @@ class BuildPlaneTest {
     assertEquals(
         BuildkitSettings.DEFAULTS, BuildkitSettings.parse(IDENTITY, Map.<String, String>of()::get));
     assertEquals("moby/buildkit:v0.33.0", BuildkitSettings.DEFAULTS.image());
-    assertEquals(1, BuildkitSettings.DEFAULTS.maxParallelism());
+    assertNull(BuildkitSettings.DEFAULTS.maxParallelism());
 
     Map<String, String> env =
         Map.of(
@@ -252,6 +305,21 @@ class BuildPlaneTest {
               RunnerSettings.Invalid.class,
               () -> BuildkitSettings.parse(IDENTITY, Map.of(bad.getKey(), bad.getValue())::get));
       assertTrue(invalid.getMessage().contains(bad.getKey()), invalid.getMessage());
+    }
+  }
+
+  @Test
+  void aMalformedParallelismIsRefusedNamingItsVariable() {
+    for (String bad : List.of("0", "-1", "abc")) {
+      RunnerSettings.Invalid invalid =
+          assertThrows(
+              RunnerSettings.Invalid.class,
+              () ->
+                  BuildkitSettings.parse(
+                      IDENTITY, Map.of("QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM", bad)::get));
+      assertTrue(
+          invalid.getMessage().contains("QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM"),
+          invalid.getMessage());
     }
   }
 

@@ -269,7 +269,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.names = new TargetNames(identity, settings.runnerId());
     this.volumes = new TargetVolumes(identity, settings.runnerId(), external);
     this.containers = new LeaseContainers(identity, settings.runnerId(), docker);
-    this.basePlane = new BuildPlane(identity, settings.runnerId(), docker, buildkit);
+    this.basePlane = new BuildPlane(identity, settings.runnerId(), docker, buildkit, this.slots);
     this.buildPlane = basePlane;
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);

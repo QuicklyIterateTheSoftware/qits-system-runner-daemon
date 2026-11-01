@@ -17,7 +17,15 @@ import java.util.regex.Pattern;
  *       unset — the same pin qits-containers' {@code qits.containers.buildkit.image} and the {@code
  *       ci-slot} image's {@code buildctl} carry;
  *   <li>{@code …_BUILDKIT_MAX_PARALLELISM}: how many build operations the builder runs at once,
- *       {@value #DEFAULT_MAX_PARALLELISM} when unset (see {@link BuildPlane#WORKER_TOML});
+ *       {@code null} when unset. There is no fixed default: buildkit v0.33.0's {@code
+ *       max-parallelism} is one FIFO semaphore for the whole daemon, held by every {@code
+ *       ExecOp}/{@code FileOp}/{@code SourceOp} for its whole duration and shared across every
+ *       client session, so a small fixed number turns into cross-lease serialisation rather than a
+ *       per-build bound. Unset, {@link BuildPlane} renders the runner's slot total instead — the
+ *       most builds the target can have in flight, since each CI lease runs at most one build at a
+ *       time ({@link BuildPlane#WORKER_TOML}). The variable stays as the per-target override for a
+ *       host that cannot hold that many native builds at once: a {@code RUN} executes in the
+ *       builder's own cgroup, not the lease's, so the lease's memory limit never bounds it;
  *   <li>{@code …_BUILDKIT_HTTP_REGISTRIES}: a comma list of {@code host[:port]} buildkitd speaks plain
  *       HTTP to;
  *   <li>{@code …_BUILDKIT_REGISTRY_MIRRORS}: a comma list of {@code from=to}, {@code to} may carry a
@@ -35,7 +43,10 @@ import java.util.regex.Pattern;
  * qits-buildkitd-state}.
  */
 record BuildkitSettings(
-    String image, int maxParallelism, List<String> httpRegistries, List<String> registryMirrors) {
+    String image,
+    Integer maxParallelism,
+    List<String> httpRegistries,
+    List<String> registryMirrors) {
 
   static final String BUILDKIT_IMAGE = "BUILDKIT_IMAGE";
   static final String BUILDKIT_MAX_PARALLELISM = "BUILDKIT_MAX_PARALLELISM";
@@ -44,12 +55,6 @@ record BuildkitSettings(
 
   /** The builder image when none is named. Bump it with qits-containers' and the ci-slot image's. */
   static final String DEFAULT_IMAGE = "moby/buildkit:v0.33.0";
-
-  /**
-   * One: several GraalVM native-image builds running at once in one builder are each memory-hungry
-   * enough to push the host into the OOM killer; a second build queuing is slower, never killed.
-   */
-  static final int DEFAULT_MAX_PARALLELISM = 1;
 
   /** A registry as buildkitd.toml names it: {@code host[:port]}. */
   static final Pattern REGISTRY = Pattern.compile("[A-Za-z0-9][A-Za-z0-9.-]{0,252}(:[0-9]{1,5})?");
@@ -60,9 +65,12 @@ record BuildkitSettings(
 
   private static final Pattern IMAGE = Pattern.compile("[a-zA-Z0-9][a-zA-Z0-9._:/@+-]{0,511}");
 
-  /** Nothing named: the default image and parallelism, no registry configuration. */
+  /**
+   * Nothing named: the default image, no explicit parallelism — derived from the runner's slot
+   * total at render time — and no registry configuration.
+   */
   static final BuildkitSettings DEFAULTS =
-      new BuildkitSettings(DEFAULT_IMAGE, DEFAULT_MAX_PARALLELISM, List.of(), List.of());
+      new BuildkitSettings(DEFAULT_IMAGE, null, List.of(), List.of());
 
   BuildkitSettings {
     httpRegistries = List.copyOf(httpRegistries);
@@ -88,17 +96,19 @@ record BuildkitSettings(
     }
     String parallelismVar = identity.env(BUILDKIT_MAX_PARALLELISM);
     String rawParallelism = env.apply(parallelismVar);
-    int parallelism = DEFAULT_MAX_PARALLELISM;
+    Integer parallelism = null;
     if (!blank(rawParallelism)) {
+      int parsed;
       try {
-        parallelism = Integer.parseInt(rawParallelism.strip());
+        parsed = Integer.parseInt(rawParallelism.strip());
       } catch (NumberFormatException e) {
-        parallelism = 0;
+        parsed = 0;
       }
-      if (parallelism < 1) {
+      if (parsed < 1) {
         throw new RunnerSettings.Invalid(
             parallelismVar + " is not a positive integer: '" + rawParallelism.strip() + "'");
       }
+      parallelism = parsed;
     }
     return new BuildkitSettings(
         image,

@@ -65,7 +65,8 @@ class BuildPlaneNamesTest {
             IDENTITY,
             TARGET,
             new RunnerDocker(IDENTITY, "docker", Duration.ofSeconds(5)),
-            BuildkitSettings.DEFAULTS);
+            BuildkitSettings.DEFAULTS,
+            1);
     List<String> argv = plane.runArgv(plane.configuredStamp());
     for (String element : argv) {
       assertFalse(element.equals("qits-buildkitd"), argv::toString);

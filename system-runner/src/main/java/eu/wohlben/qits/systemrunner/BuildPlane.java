@@ -96,10 +96,11 @@ final class BuildPlane {
 
   /**
    * The worker table, the CI runner's verbatim (buildkit v0.33.0's keys): {@code networkMode =
-   * "host"} puts a {@code RUN} in buildkitd's own network namespace; {@code max-parallelism} bounds
-   * concurrently running operations ({@code …_BUILDKIT_MAX_PARALLELISM}); and the GC policies bound
-   * the state volume — anything unused for 72h goes, then the least recently used above 20 GiB,
-   * then the same cap over buildkit's internal records too.
+   * "host"} puts a {@code RUN} in buildkitd's own network namespace; {@code max-parallelism}
+   * bounds concurrently running operations — {@code …_BUILDKIT_MAX_PARALLELISM} when set, else
+   * the runner's slot total (see {@link BuildkitSettings}); and the GC policies bound the state
+   * volume — anything unused for 72h goes, then the least recently used above 20 GiB, then the
+   * same cap over buildkit's internal records too.
    */
   static final String WORKER_TOML =
       """
@@ -175,14 +176,23 @@ final class BuildPlane {
   private final String targetId;
   private final RunnerDocker docker;
   private final BuildkitSettings settings;
+  private final int slots;
   private final List<String> registryMirrors;
   private final Names names;
   private final String toml;
 
-  /** The plane under the environment's settings alone. */
+  /**
+   * The plane under the environment's settings alone. {@code slots} is the runner's own ({@code
+   * RunnerSettings.slots()}, {@code QITS_SYSTEM_RUNNER_SLOTS}): what {@code max-parallelism} falls
+   * back to when {@link BuildkitSettings#maxParallelism()} is unset, clamped to at least one.
+   */
   BuildPlane(
-      RunnerIdentity identity, String targetId, RunnerDocker docker, BuildkitSettings settings) {
-    this(identity, targetId, docker, settings, settings.registryMirrors());
+      RunnerIdentity identity,
+      String targetId,
+      RunnerDocker docker,
+      BuildkitSettings settings,
+      int slots) {
+    this(identity, targetId, docker, settings, slots, settings.registryMirrors());
   }
 
   private BuildPlane(
@@ -190,14 +200,21 @@ final class BuildPlane {
       String targetId,
       RunnerDocker docker,
       BuildkitSettings settings,
+      int slots,
       List<String> registryMirrors) {
     this.identity = identity;
     this.targetId = targetId;
     this.docker = docker;
     this.settings = settings;
+    this.slots = Math.max(1, slots);
     this.registryMirrors = List.copyOf(registryMirrors);
     this.names = Names.of(identity, targetId);
-    this.toml = renderToml(settings.httpRegistries(), this.registryMirrors, settings.maxParallelism());
+    this.toml = renderToml(settings.httpRegistries(), this.registryMirrors, maxParallelism());
+  }
+
+  /** {@code …_BUILDKIT_MAX_PARALLELISM} when set, else the runner's slot total. */
+  private int maxParallelism() {
+    return settings.maxParallelism() != null ? settings.maxParallelism() : slots;
   }
 
   /**
@@ -226,7 +243,7 @@ final class BuildPlane {
             LOG.warnf("system-runner ignored the Ack's registry mirror %s: not from=to", pair);
           }
         });
-    return new BuildPlane(identity, targetId, docker, settings, merged);
+    return new BuildPlane(identity, targetId, docker, settings, slots, merged);
   }
 
   /** buildkitd.toml: the worker table, the DNS override, then one merged table per registry host. */

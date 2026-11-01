@@ -70,7 +70,10 @@ constructor arguments; nothing reads configuration — the toolkit's `RunnerSett
 environment (`QITS_SYSTEM_RUNNER_*`), and `Main` parses the runner's own beside it
 (`ExternalVolumes`: `…_CREDENTIAL_VOLUME`, `…_M2_VOLUME`, `…_PNPM_VOLUME`, exit 2 on a bad name;
 `BuildkitSettings`: `…_BUILDKIT_IMAGE`, `…_BUILDKIT_MAX_PARALLELISM`, `…_BUILDKIT_HTTP_REGISTRIES`,
-`…_BUILDKIT_REGISTRY_MIRRORS`, likewise).
+`…_BUILDKIT_REGISTRY_MIRRORS`, likewise). `…_BUILDKIT_MAX_PARALLELISM` defaults to the runner's own
+slot total rather than a fixed number: buildkit's `max-parallelism` is one FIFO semaphore for the
+whole daemon, so a small fixed value serialises every lease's builds behind each other instead of
+bounding one.
 
 **An external node volume is never the runner's.** It is never created, labelled or removed; a
 missing one fails the lease before `docker run`, because `-v` would create it empty.

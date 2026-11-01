@@ -210,14 +210,16 @@ image pulled in the background when absent, the CI lease `STARTING` meanwhile; p
 `Ack` on a target with slots) or started, or replaced when its **stamp** — a hash of the image, the
 rendered `buildkitd.toml`, the bootstrap and the state volume — moved; the state volume rides
 across. A container under the builder's name without the stamp label is somebody else's: the CI
-lease fails and the container is left alone. The toml bounds the worker (`max-parallelism`, GC at
-72h / 20 GiB) and carries one `[registry."host"]` table per host: the environment's
-`_BUILDKIT_HTTP_REGISTRIES` (`http = true`) and `_BUILDKIT_REGISTRY_MIRRORS`, with the `Ack`'s
-`registryMirrors` merged over the latter per source host. The builder runs through the runner's
-docker process seam, not the driver: `ContainerSpec` cannot say `--privileged`, and the driver's
-`runBuildkitd` always names `qits-buildkitd`. There is no host CA bundle mount (the CI runner's
-in-container behaviour). At decommission the builder, the network and the state volume are the
-domain's teardown items, removed in that order after the lease containers.
+lease fails and the container is left alone. The toml bounds the worker (`max-parallelism` —
+`_BUILDKIT_MAX_PARALLELISM` when set, else the runner's own slot total, since each CI lease runs
+at most one build at a time; GC at 72h / 20 GiB) and carries one `[registry."host"]` table per
+host: the environment's `_BUILDKIT_HTTP_REGISTRIES` (`http = true`) and
+`_BUILDKIT_REGISTRY_MIRRORS`, with the `Ack`'s `registryMirrors` merged over the latter per source
+host. The builder runs through the runner's docker process seam, not the driver: `ContainerSpec`
+cannot say `--privileged`, and the driver's `runBuildkitd` always names `qits-buildkitd`. There is
+no host CA bundle mount (the CI runner's in-container behaviour). At decommission the builder, the
+network and the state volume are the domain's teardown items, removed in that order after the lease
+containers.
 
 Health: `buildkit` fails on a stale stamp, a stopped builder or a foreign container under its name,
 and is ok while no CI lease ever needed one; `network` is ok while missing only when no builder
@@ -245,7 +247,7 @@ fewer than the full 32-bit id space is not unhealthy for it (qits-1576).
 | `QITS_SYSTEM_RUNNER_DECOMMISSION` | The decommission helper's mode (the toolkit's). | unset |
 
 | `QITS_SYSTEM_RUNNER_BUILDKIT_IMAGE` | The builder's image. | `moby/buildkit:v0.33.0` |
-| `QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM` | Build operations the builder runs at once. | `1` |
+| `QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM` | Build operations the builder runs at once. | the runner's slot total (`QITS_SYSTEM_RUNNER_SLOTS`) |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_HTTP_REGISTRIES` | Comma list of `host[:port]` the builder speaks plain HTTP to. | none |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_REGISTRY_MIRRORS` | Comma list of `from=to` (`to` may carry a path); the `Ack`'s `registryMirrors` win per host. | none |
 
