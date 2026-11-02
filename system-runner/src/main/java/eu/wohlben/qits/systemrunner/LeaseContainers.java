@@ -32,7 +32,10 @@ final class LeaseContainers {
   /** The suffix of the label a lease container's volumes ({@link TargetVolumes#mountsHash}) ride. */
   static final String MOUNTS_LABEL_SUFFIX = "mounts";
 
-  /** One lease container as docker reported it. */
+  /**
+   * One lease container as docker reported it; {@code oomKilled} is docker's {@code
+   * State.OOMKilled}, null when docker did not say (qits-1818).
+   */
   record Seen(
       String id,
       String leaseId,
@@ -40,7 +43,8 @@ final class LeaseContainers {
       int exitCode,
       String slotType,
       String specHash,
-      String mounts) {
+      String mounts,
+      Boolean oomKilled) {
 
     boolean running() {
       return "running".equals(status);
@@ -70,7 +74,7 @@ final class LeaseContainers {
             + specHashLabel(identity)
             + "\"}}|{{index .Config.Labels \""
             + mountsLabel(identity)
-            + "\"}}";
+            + "\"}}|{{.State.OOMKilled}}";
   }
 
   /** {@code qits.system.runner.slot-type}. */
@@ -190,8 +194,9 @@ final class LeaseContainers {
   }
 
   /**
-   * {@code <id>|<status>|<exitCode>|<leaseId>|<slotType>|<specHash>|<mounts>}; empty when it is not
-   * a lease container. A label the container lacks reads as null.
+   * {@code <id>|<status>|<exitCode>|<leaseId>|<slotType>|<specHash>|<mounts>|<oomKilled>}; empty
+   * when it is not a lease container. A label the container lacks reads as null, and so does an
+   * {@code oomKilled} that is neither {@code true} nor {@code false}.
    */
   static Optional<Seen> parse(String line) {
     String[] fields = line.split("\\|", -1);
@@ -210,7 +215,18 @@ final class LeaseContainers {
             exitCode(value(fields[2])),
             nullable(fields, 4),
             nullable(fields, 5),
-            nullable(fields, 6)));
+            nullable(fields, 6),
+            bool(nullable(fields, 7))));
+  }
+
+  private static Boolean bool(String value) {
+    if ("true".equalsIgnoreCase(value)) {
+      return Boolean.TRUE;
+    }
+    if ("false".equalsIgnoreCase(value)) {
+      return Boolean.FALSE;
+    }
+    return null;
   }
 
   private static String nullable(String[] fields, int at) {

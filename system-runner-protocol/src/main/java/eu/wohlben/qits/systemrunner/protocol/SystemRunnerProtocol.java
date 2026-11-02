@@ -20,7 +20,9 @@ import java.util.Set;
  *     → Ack{slots, adoptedLeases, slotImages{ci, workspace, desk}, probeImage, registryMirrors}
  *   Estate{leases[{leaseId, slotType, desired, spec, specHash, workVolume, adopt}], purges[],
  *       warmImages[]}
- *     ← Inventory{leases[{leaseId, state, specHash, exitCode, detail}], volumes[]}
+ *     ← Inventory{leases[{leaseId, state, specHash, exitCode, detail,
+ *         oomKills?, oomEvents?, memoryPeakBytes?, oomKilled?}], volumes[],
+ *         node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?}}
  *   ProbeLogin → LoginState{claude, kimi, checkedAt, volume}
  *   HealthCheck{requestId} → HealthChecked{ok, detail, requestId, checks}
  *   SignIn{signInId, harness}, SignInCode{signInId, code}, SignInCancel{signInId}
@@ -167,6 +169,15 @@ public final class SystemRunnerProtocol {
     public static final String EXIT_CODE = "exitCode";
     public static final String DETAIL = "detail";
     public static final String VOLUMES = "volumes";
+    // inventory, qits-1818: a lease report's memory facts, and the node's — each left out when null
+    public static final String OOM_KILLS = "oomKills";
+    public static final String OOM_EVENTS = "oomEvents";
+    public static final String MEMORY_PEAK_BYTES = "memoryPeakBytes";
+    public static final String OOM_KILLED = "oomKilled";
+    public static final String NODE = "node";
+    public static final String NODE_OOM_KILLS = "nodeOomKills";
+    public static final String KERNEL_OOM_KILLS = "kernelOomKills";
+    public static final String MEMORY_MAX_BYTES = "memoryMaxBytes";
     // loginState (VOLUME above)
     public static final String CLAUDE = "claude";
     public static final String KIMI = "kimi";

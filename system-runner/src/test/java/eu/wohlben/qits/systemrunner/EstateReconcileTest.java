@@ -38,6 +38,7 @@ import eu.wohlben.qits.systemrunner.protocol.LeaseState;
 import eu.wohlben.qits.systemrunner.protocol.Limits;
 import eu.wohlben.qits.systemrunner.protocol.LoginPresence;
 import eu.wohlben.qits.systemrunner.protocol.LoginState;
+import eu.wohlben.qits.systemrunner.protocol.NodeMemory;
 import eu.wohlben.qits.systemrunner.protocol.SignIn;
 import eu.wohlben.qits.systemrunner.protocol.SignInProgress;
 import eu.wohlben.qits.systemrunner.protocol.SignInState;
@@ -49,6 +50,7 @@ import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCapabilities;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCodec;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerMessage;
 import io.vertx.core.Vertx;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -134,6 +136,9 @@ class EstateReconcileTest {
   private CompletableFuture<Integer> exit;
   private final Map<String, String> extraEnv = new HashMap<>();
 
+  /** No cgroup tree and no vmstat unless a test builds one: every memory fact null. */
+  private CgroupSettings cgroups;
+
   @TempDir Path state;
   @TempDir Path dockerDir;
 
@@ -144,6 +149,7 @@ class EstateReconcileTest {
     docker.answerFor("run", "status", 0, "{\"loggedIn\": true}\n", "");
     docker.answerFor("run", LoginProbe.KIMI_CHECK, 0, "", "");
     docker.answer("info", 0, "ENGINE-ID-1|node-1\n", "");
+    cgroups = new CgroupSettings(dockerDir.resolve("no-cgroup"), dockerDir.resolve("no-vmstat"));
   }
 
   @AfterEach
@@ -303,6 +309,76 @@ class EstateReconcileTest {
     assertEquals(new LeaseReport(L1, LeaseState.EXITED, H1, 137, null), report(inventory, L1));
     assertFalse(touched("start", lease(L1)), "its token may be gone; the owner ends it");
     assertFalse(touched("run", lease(L1)));
+  }
+
+  @Test
+  void aLeasesOomKillsAreReportedWhileItRunsAndKeptWhenItExits() throws Exception {
+    Path tree = Files.createDirectories(dockerDir.resolve("host-cgroup"));
+    Files.writeString(tree.resolve("memory.events"), "oom 0\noom_kill 292\n");
+    Files.writeString(tree.resolve("memory.max"), "max\n");
+    Path vmstat = Files.writeString(dockerDir.resolve("vmstat"), "oom_kill 297\n");
+    // FakeDocker's info names no cgroup driver: the scope is found by the search.
+    Path scope =
+        Files.createDirectories(tree.resolve("system.slice/docker-c-" + L1 + ".scope"));
+    Files.writeString(scope.resolve("memory.events"), "oom 1\noom_kill 1\n");
+    Files.writeString(scope.resolve("memory.peak"), "1073741824\n");
+    cgroups = new CgroupSettings(tree, vmstat);
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory running = awaitInventory(i -> stateOf(i, L1) == LeaseState.RUNNING);
+    assertEquals(
+        new LeaseReport(L1, LeaseState.RUNNING, H1, null, null, 1L, 1L, 1L << 30, null),
+        report(running, L1));
+    assertEquals(new NodeMemory(292L, 297L, null), running.node());
+
+    // The OOM kill ends it: the cgroup goes with the container, docker says OOMKilled.
+    Files.writeString(scope.resolve("memory.events"), "oom 1\noom_kill 2\n");
+    awaitInventory(i -> leaseOf(i, L1, r -> Long.valueOf(2L).equals(r.oomKills())));
+    for (String f : List.of("memory.events", "memory.peak")) {
+      Files.delete(scope.resolve(f));
+    }
+    Files.delete(scope);
+    Files.writeString(tree.resolve("memory.events"), "oom 0\noom_kill 294\n");
+    docker.answerFor(
+        "inspect",
+        lease(L1),
+        0,
+        "c-" + L1 + "|exited|137|" + L1 + "|WORKSPACE|" + H1 + "|" + mounts(work("ws-42"))
+            + "|true\n",
+        "");
+    Inventory exited = awaitInventory(i -> stateOf(i, L1) == LeaseState.EXITED);
+    assertEquals(
+        new LeaseReport(L1, LeaseState.EXITED, H1, 137, null, 2L, 1L, 1L << 30, true),
+        report(exited, L1));
+    assertEquals(new NodeMemory(294L, 297L, null), exited.node());
+  }
+
+  @Test
+  void anUnchangedPeakUnder64MiBSendsNoNewInventory() throws Exception {
+    Path tree = Files.createDirectories(dockerDir.resolve("host-cgroup"));
+    Path scope =
+        Files.createDirectories(tree.resolve("system.slice/docker-c-" + L1 + ".scope"));
+    Files.writeString(scope.resolve("memory.events"), "oom 0\noom_kill 0\n");
+    Files.writeString(scope.resolve("memory.peak"), "1073741824\n");
+    cgroups = new CgroupSettings(tree, dockerDir.resolve("no-vmstat"));
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitInventory(i -> stateOf(i, L1) == LeaseState.RUNNING);
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    Thread.sleep(500);
+    int before = host.all(Inventory.class).size();
+    Files.writeString(scope.resolve("memory.peak"), String.valueOf((1L << 30) + (63L << 20)));
+    // Many looks (every 200 ms here), and a growth below the step: no frame for it.
+    Thread.sleep(1_500);
+    assertEquals(before, host.all(Inventory.class).size(), () -> host.all(Inventory.class).toString());
+    Files.writeString(scope.resolve("memory.peak"), String.valueOf((1L << 30) + (64L << 20)));
+    long grown = (1L << 30) + (64L << 20);
+    awaitInventory(i -> leaseOf(i, L1, r -> Long.valueOf(grown).equals(r.memoryPeakBytes())));
+    assertEquals(before + 1, host.all(Inventory.class).size(), "one frame for the step");
   }
 
   // ---- recreate on a spec hash --------------------------------------------------------------------
@@ -980,9 +1056,12 @@ class EstateReconcileTest {
         new SystemRunnerDomain(
             settings,
             ExternalVolumes.parse(IDENTITY, env::get),
+            BuildkitSettings.DEFAULTS,
+            cgroups,
             new SystemRunnerDomain.Timing(
                 Duration.ofMillis(200), Duration.ofSeconds(60), Duration.ofSeconds(60)),
-            Clock.systemUTC());
+            Clock.systemUTC(),
+            SignInProcesses.FORKED);
     runner =
         new RunnerRuntime<>(
             vertx,
@@ -1110,6 +1189,12 @@ class EstateReconcileTest {
     awaitTrue(() -> host.all(Inventory.class).stream().anyMatch(condition));
     List<Inventory> all = new ArrayList<>(host.all(Inventory.class));
     return all.stream().filter(condition).reduce((a, b) -> b).orElseThrow();
+  }
+
+  private static boolean leaseOf(
+      Inventory inventory, String leaseId, Predicate<LeaseReport> condition) {
+    return inventory.leases().stream()
+        .anyMatch(r -> r.leaseId().equals(leaseId) && condition.test(r));
   }
 
   private static LeaseState stateOf(Inventory inventory, String leaseId) {

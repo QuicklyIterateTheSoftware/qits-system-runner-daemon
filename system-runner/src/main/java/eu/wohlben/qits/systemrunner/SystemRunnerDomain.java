@@ -128,6 +128,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   private final LoginProbe loginProbe;
   private final SignIns signIns;
 
+  /** The node's and the lease containers' memory facts, sampled before every inventory. */
+  private final MemorySampler memory;
+
   /** At most this many image pulls run at once; one per image reference ({@link ImagePulls}). */
   static final int PULL_THREADS = 2;
 
@@ -263,6 +266,35 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       Timing timing,
       Clock clock,
       SignInProcesses processes) {
+    this(settings, external, buildkit, CgroupSettings.DEFAULTS, timing, clock, processes);
+  }
+
+  /** The same, with where the node's memory facts are read from ({@link CgroupSettings}). */
+  SystemRunnerDomain(
+      RunnerSettings settings,
+      ExternalVolumes external,
+      BuildkitSettings buildkit,
+      CgroupSettings cgroups) {
+    this(
+        settings,
+        external,
+        buildkit,
+        cgroups,
+        Timing.defaults(),
+        Clock.systemUTC(),
+        SignInProcesses.FORKED);
+  }
+
+  /** Every seam: the root every other constructor ends in. */
+  SystemRunnerDomain(
+      RunnerSettings settings,
+      ExternalVolumes external,
+      BuildkitSettings buildkit,
+      CgroupSettings cgroups,
+      Timing timing,
+      Clock clock,
+      SignInProcesses processes) {
+    this.memory = new MemorySampler(cgroups);
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
     this.slots = settings.slots();
@@ -349,7 +381,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * The base's three facts and this target's own: {@code slots} (the server's total), {@code
-   * engineId} and {@code hostname} from {@code docker info} (asked until docker answers once), the
+   * engineId} and {@code hostname} from {@code docker info} (asked until docker answers once, and
+   * the cgroup driver with them, for {@link MemorySampler}), the
    * credential volume every agent lease mounts, and {@code buildkit: true}: every CI lease gets the
    * target's own builder ({@link BuildPlane}).
    */
@@ -369,7 +402,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   private void readEngine() {
     try {
       RunnerDocker.Result info =
-          docker.run(List.of(docker.binary(), "info", "--format", "{{.ID}}|{{.Name}}"));
+          docker.run(
+              List.of(
+                  docker.binary(), "info", "--format", "{{.ID}}|{{.Name}}|{{.CgroupDriver}}"));
       if (!info.ok()) {
         LOG.warnf("system-runner could not read the docker engine's id: %s", info.detail());
         return;
@@ -377,6 +412,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       String[] f = info.stdout().strip().split("\\|", -1);
       String id = f.length > 0 ? f[0].strip() : "";
       String name = f.length > 1 ? f[1].strip() : "";
+      memory.driver(f.length > 2 ? f[2].strip() : null);
       engineHost = name.isEmpty() ? null : name;
       engineId = id.isEmpty() ? null : id;
     } catch (RuntimeException e) {
@@ -1024,6 +1060,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   private void sendInventory(RunnerSession session, List<LeaseContainers.Seen> now, boolean force) {
     synchronized (inventoryLock) {
+      memory.sample(now);
       Optional<Inventory> inventory = inventory(now);
       if (inventory.isEmpty()) {
         return;
@@ -1047,6 +1084,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * STARTING — with {@code pulling <image> since <instant>} while its image is pulled — and every
    * ENDED one with none ENDED. Then the work volumes on the node: the runner's
    * own and every adopted one an estate entry names. Empty when docker did not answer.
+   *
+   * <p>A lease with a container carries its memory facts as {@link MemorySampler} last read them
+   * — an EXITED one the last values read while it ran, and docker's {@code OOMKilled} — and the
+   * frame the node's (qits-1818).
    */
   Optional<Inventory> inventory(List<LeaseContainers.Seen> now) {
     Map<String, LeaseReport> leases = new HashMap<>();
@@ -1055,6 +1096,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
           seen.running()
               ? LeaseState.RUNNING
               : seen.starting() ? LeaseState.STARTING : LeaseState.EXITED;
+      MemorySampler.LeaseMemory m = memory.lease(seen.leaseId());
       leases.put(
           seen.leaseId(),
           new LeaseReport(
@@ -1062,15 +1104,29 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
               state,
               seen.specHash(),
               state == LeaseState.EXITED ? seen.exitCode() : null,
-              null));
+              null,
+              m.oomKills(),
+              m.oomEvents(),
+              m.memoryPeakBytes(),
+              state == LeaseState.EXITED ? seen.oomKilled() : null));
     }
     failures.forEach(
         (leaseId, detail) -> {
           LeaseReport seen = leases.get(leaseId);
           leases.put(
               leaseId,
-              new LeaseReport(
-                  leaseId, LeaseState.FAILED, seen == null ? null : seen.specHash(), null, detail));
+              seen == null
+                  ? new LeaseReport(leaseId, LeaseState.FAILED, null, null, detail)
+                  : new LeaseReport(
+                      leaseId,
+                      LeaseState.FAILED,
+                      seen.specHash(),
+                      null,
+                      detail,
+                      seen.oomKills(),
+                      seen.oomEvents(),
+                      seen.memoryPeakBytes(),
+                      null));
         });
     Set<String> volumesHere = new TreeSet<>();
     Estate e = estate;
@@ -1104,7 +1160,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     }
     List<LeaseReport> sorted = new ArrayList<>(leases.values());
     sorted.sort(Comparator.comparing(LeaseReport::leaseId));
-    return Optional.of(new Inventory(sorted, List.copyOf(volumesHere)));
+    return Optional.of(new Inventory(sorted, List.copyOf(volumesHere), memory.node()));
   }
 
   private RunnerSession session() {

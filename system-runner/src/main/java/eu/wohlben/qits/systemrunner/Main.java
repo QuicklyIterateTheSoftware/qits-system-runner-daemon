@@ -30,7 +30,8 @@ import org.jboss.logging.Logger;
  * <p><b>The runner's own settings</b> — the external node volumes ({@link ExternalVolumes}: the credential volume and the agent caches) and
  * the build plane's ({@link BuildkitSettings}: {@code …_BUILDKIT_IMAGE}, {@code
  * …_BUILDKIT_MAX_PARALLELISM}, {@code …_BUILDER_CONCURRENT_BUILDS}, {@code
- * …_BUILDKIT_HTTP_REGISTRIES}, {@code …_BUILDKIT_REGISTRY_MIRRORS}) — are
+ * …_BUILDKIT_HTTP_REGISTRIES}, {@code …_BUILDKIT_REGISTRY_MIRRORS}) and where the node's memory
+ * facts are read ({@link CgroupSettings}: {@code …_HOST_CGROUP}, {@code …_VMSTAT}) — are
  * parsed here from the same environment, in runner mode only, and an invalid one refuses to start
  * with {@link RunnerExit#MISCONFIGURED} and one sentence naming the variable, as the toolkit's own
  * settings do.
@@ -84,10 +85,12 @@ public class Main {
     var identity = SystemRunnerIdentity.IDENTITY;
     ExternalVolumes external = ExternalVolumes.NONE;
     BuildkitSettings buildkit = BuildkitSettings.DEFAULTS;
+    CgroupSettings cgroups = CgroupSettings.DEFAULTS;
     if (!answersBeforeQuarkus(args, env)) {
       try {
         external = ExternalVolumes.parse(identity, env);
         buildkit = BuildkitSettings.parse(identity, env);
+        cgroups = CgroupSettings.parse(identity, env);
       } catch (RunnerSettings.Invalid invalid) {
         LOG.errorf("%s cannot start: %s. Exiting.", identity.logName(), invalid.getMessage());
         return RunnerExit.MISCONFIGURED;
@@ -95,9 +98,10 @@ public class Main {
     }
     ExternalVolumes volumes = external;
     BuildkitSettings plane = buildkit;
+    CgroupSettings memory = cgroups;
     return RunnerLauncher.main(
         identity,
-        settings -> new SystemRunnerDomain(settings, volumes, plane),
+        settings -> new SystemRunnerDomain(settings, volumes, plane, memory),
         vertx,
         args,
         env,

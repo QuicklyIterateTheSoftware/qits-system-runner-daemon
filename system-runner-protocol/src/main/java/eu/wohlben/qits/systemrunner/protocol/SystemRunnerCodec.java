@@ -35,7 +35,11 @@ import java.util.UUID;
  * {@code op} or {@code status} this version does not know.
  *
  * <p>Every frame writes {@code type} first and its fields in record order; a nullable field is
- * written as {@code null} rather than left out. {@code healthCheck} and {@code healthChecked} are
+ * written as {@code null} rather than left out — except the {@code inventory}'s memory facts
+ * (qits-1818: a lease report's {@code oomKills}, {@code oomEvents}, {@code memoryPeakBytes} and
+ * {@code oomKilled}, the frame's {@code node} and the fields inside it), which are left out when
+ * null, so an inventory without them is the same document it was before they existed. Absent reads
+ * as null. {@code healthCheck} and {@code healthChecked} are
  * {@link HealthWire}'s, every runner kind's.
  */
 public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage> {
@@ -100,10 +104,21 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
           lease.put(Field.SPEC_HASH, report.specHash());
           lease.put(Field.EXIT_CODE, report.exitCode());
           lease.put(Field.DETAIL, report.detail());
+          putPresent(lease, Field.OOM_KILLS, report.oomKills());
+          putPresent(lease, Field.OOM_EVENTS, report.oomEvents());
+          putPresent(lease, Field.MEMORY_PEAK_BYTES, report.memoryPeakBytes());
+          putPresent(lease, Field.OOM_KILLED, report.oomKilled());
           leases.add(lease);
         }
         map.put(Field.LEASES, leases);
         map.put(Field.VOLUMES, new ArrayList<>(m.volumes()));
+        if (m.node() != null) {
+          Map<String, Object> node = new LinkedHashMap<>();
+          putPresent(node, Field.NODE_OOM_KILLS, m.node().nodeOomKills());
+          putPresent(node, Field.KERNEL_OOM_KILLS, m.node().kernelOomKills());
+          putPresent(node, Field.MEMORY_MAX_BYTES, m.node().memoryMaxBytes());
+          map.put(Field.NODE, node);
+        }
       }
       case LoginState m -> {
         map.put(Field.TYPE, Type.LOGIN_STATE);
@@ -159,7 +174,8 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
               WireMaps.str(map, Field.SINCE),
               map.get(Field.ARGV) == null ? null : WireMaps.stringList(map, Field.ARGV),
               integer(map, Field.TIMEOUT_SECONDS));
-      case Type.INVENTORY -> new Inventory(reports(map), requiredStrings(map, Field.VOLUMES));
+      case Type.INVENTORY ->
+          new Inventory(reports(map), requiredStrings(map, Field.VOLUMES), node(map));
       case Type.LOGIN_STATE ->
           new LoginState(
               LoginPresence.fromWire(WireMaps.str(map, Field.CLAUDE)),
@@ -251,9 +267,30 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
               constant(LeaseState.class, WireMaps.str(lease, Field.STATE), Field.STATE),
               WireMaps.str(lease, Field.SPEC_HASH),
               exit == null ? null : exit.intValue(),
-              WireMaps.str(lease, Field.DETAIL)));
+              WireMaps.str(lease, Field.DETAIL),
+              longValue(lease, Field.OOM_KILLS),
+              longValue(lease, Field.OOM_EVENTS),
+              longValue(lease, Field.MEMORY_PEAK_BYTES),
+              bool(lease, Field.OOM_KILLED)));
     }
     return reports;
+  }
+
+  /** The inventory's {@code node}: absent, null or not an object reads as null. */
+  private static NodeMemory node(Map<String, Object> map) {
+    Map<String, Object> node;
+    try {
+      node = WireMaps.object(map, Field.NODE);
+    } catch (RuntimeException notAnObject) {
+      return null;
+    }
+    if (node == null) {
+      return null;
+    }
+    return new NodeMemory(
+        longValue(node, Field.NODE_OOM_KILLS),
+        longValue(node, Field.KERNEL_OOM_KILLS),
+        longValue(node, Field.MEMORY_MAX_BYTES));
   }
 
   // --- the spec ----------------------------------------------------------------------------------
@@ -320,6 +357,24 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
   private static Integer integer(Map<String, Object> map, String key) {
     Number value = WireMaps.number(map, key);
     return value == null ? null : value.intValue();
+  }
+
+  /** An optional long: absent is null, either box for a number is fine. */
+  private static Long longValue(Map<String, Object> map, String key) {
+    Number value = WireMaps.number(map, key);
+    return value == null ? null : value.longValue();
+  }
+
+  /** An optional boolean: absent, or anything but a boolean, is null. */
+  private static Boolean bool(Map<String, Object> map, String key) {
+    return map.get(key) instanceof Boolean value ? value : null;
+  }
+
+  /** Puts {@code value} under {@code key} only when it is not null. */
+  private static void putPresent(Map<String, Object> map, String key, Object value) {
+    if (value != null) {
+      map.put(key, value);
+    }
   }
 
   /** An enum spelled as its constant's name; absent or unknown is a refusal, never a guess. */

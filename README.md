@@ -71,6 +71,27 @@ answers a `healthCheck` with the toolkit's `docker`, `nodeInventory` and `sessio
 `login` (reports only — the server decides), `buildkit` and `network` (see "The build plane"). It never asks for work: there is no `reserve`, the
 server allocates.
 
+### Memory and OOM kills
+
+Every `inventory` carries what the node's cgroup v2 tree says about memory (qits-1818), so an OOM
+kill is visible without host access (`CgroupMemory`, `MemorySampler`). The tree is read where
+`QITS_SYSTEM_RUNNER_HOST_CGROUP` points (the install line binds the node's at `/qits/host-cgroup`
+read-only); without it every cgroup-derived fact is null, never an error.
+
+- **Per lease**: `oomKills` (its cgroup's `memory.events` `oom_kill`), `oomEvents` (`oom`: its own
+  limit was hit) and `memoryPeakBytes` (`memory.peak`, kernel 5.19+), read from
+  `system.slice/docker-<id>.scope` (systemd cgroup driver, from `docker info`) or `docker/<id>`
+  (cgroupfs), else from a directory naming the container id at most three levels down. An `EXITED`
+  lease keeps the last values read while it ran — its cgroup is gone — plus docker's `OOMKilled`
+  as `oomKilled`.
+- **For the node**: `node.nodeOomKills` (the root's `memory.events` `oom_kill` — the LXC's own
+  counter; null on a bare host, whose root has no `memory.events`), `node.kernelOomKills`
+  (`/proc/vmstat`: every OOM kill on the physical host) and `node.memoryMaxBytes` (the root's
+  `memory.max`, null when `max`).
+
+A change in any OOM counter sends an `inventory`; the peak does not, until it grew by 64 MiB from
+the value last reported — so a growing lease costs one frame per 64 MiB, not one per look.
+
 ### Slot policies
 
 A spec carries an image, an environment, a user and limits — nothing else. Everything below is
@@ -258,6 +279,8 @@ fewer than the full 32-bit id space is not unhealthy for it (qits-1576).
 | `QITS_SYSTEM_RUNNER_BUILDER_CONCURRENT_BUILDS` | How many image builds this target's CI leases may run on the shared builder at once; handed to each CI lease as `QITS_CI_BUILDER_SLOTS`. | `1` |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_HTTP_REGISTRIES` | Comma list of `host[:port]` the builder speaks plain HTTP to. | none |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_REGISTRY_MIRRORS` | Comma list of `from=to` (`to` may carry a path); the `Ack`'s `registryMirrors` win per host. | none |
+| `QITS_SYSTEM_RUNNER_HOST_CGROUP` | The node's cgroup v2 tree, bound read-only into the runner's container; the memory facts in the `inventory` are read from it. Not there: every cgroup-derived fact is null. | `/qits/host-cgroup` |
+| `QITS_SYSTEM_RUNNER_VMSTAT` | The kernel's counters, for the host-wide `oom_kill`. | `/proc/vmstat` |
 
 ### Exit codes
 
@@ -276,7 +299,9 @@ frames are this repository's (`SystemRunnerCodec`).
     ack{capabilityVersion, slots, slotImages{ci, workspace, desk}, probeImage, registryMirrors, adoptedLeases}
     estate{leases:[{leaseId, slotType, desired, spec, specHash, workVolume, adopt{container, volume}}], purges:[name],
            warmImages:[image]}
-    runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail}], volumes:[name]}
+    runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail,
+                       oomKills?, oomEvents?, memoryPeakBytes?, oomKilled?}], volumes:[name],
+                       node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?}}
     probeLogin → loginState{claude, kimi, checkedAt, volume}                (PRESENT|ABSENT|UNKNOWN)
     healthCheck{requestId} → healthChecked{ok, detail, requestId, checks:[{name, ok, detail, data}]}
     signIn{signInId, harness} → signInProgress{signInId, harness, state, url, userCode, detail} …
@@ -290,7 +315,9 @@ pidsLimit, cpus, oomScoreAdj}}`; `workVolume` is the lease's **work key** (`ws-<
 `desk-<deskId>`, null for CI), from which the runner derives the volume's name. `warmImages` is a
 list of full image references (`registry…/qits/workspace:<version>`, or `…@sha256:<digest>`) to keep
 pulled; absent or null is empty, which is what a server before it sends, so it is not a capability
-bump — both codecs ignore a field they do not know.
+bump — both codecs ignore a field they do not know. The `?` fields of an `inventory` (qits-1818) are
+the same kind of addition: written only when not null, so an inventory without them is the document
+it always was, and absent reads as null.
 
 ## Layout
 

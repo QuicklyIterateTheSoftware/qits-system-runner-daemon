@@ -104,6 +104,16 @@ class SystemRunnerCodecTest {
                 new LeaseReport("l5", LeaseState.ENDED, null, null, null)),
             List.of("qits-system-runner-work-ws-42-1a2b3c4d")),
         new Inventory(List.of(), List.of()),
+        new Inventory(
+            List.of(
+                new LeaseReport(
+                    L1, LeaseState.RUNNING, "sha256:aaa", null, null, 2L, 1L, 3L << 30, null),
+                new LeaseReport(
+                    L2, LeaseState.EXITED, "sha256:bbb", 137, null, 1L, 1L, 4L << 30, true),
+                new LeaseReport("l3", LeaseState.EXITED, "h", 0, null, 0L, 0L, null, false)),
+            List.of(),
+            new NodeMemory(292L, 297L, 32L << 30)),
+        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null)),
         new LoginState(
             LoginPresence.PRESENT,
             LoginPresence.ABSENT,
@@ -290,6 +300,31 @@ class SystemRunnerCodecTest {
   }
 
   @Test
+  void theInventorysMemoryFactsAreSpelledAfterTheOldFieldsAndLeftOutWhenNull() {
+    assertJson(
+        "{\"type\":\"inventory\",\"leases\":["
+            + "{\"leaseId\":\"l2\",\"state\":\"EXITED\",\"specHash\":\"h\",\"exitCode\":137,"
+            + "\"detail\":null,\"oomKills\":1,\"oomEvents\":1,\"memoryPeakBytes\":4294967296,"
+            + "\"oomKilled\":true},"
+            + "{\"leaseId\":\"l3\",\"state\":\"RUNNING\",\"specHash\":\"h\",\"exitCode\":null,"
+            + "\"detail\":null,\"oomKills\":0}],"
+            + "\"volumes\":[],"
+            + "\"node\":{\"nodeOomKills\":292,\"kernelOomKills\":297,"
+            + "\"memoryMaxBytes\":34359738368}}",
+        new Inventory(
+            List.of(
+                new LeaseReport("l2", LeaseState.EXITED, "h", 137, null, 1L, 1L, 4L << 30, true),
+                new LeaseReport("l3", LeaseState.RUNNING, "h", null, null, 0L, null, null, null)),
+            List.of(),
+            new NodeMemory(292L, 297L, 32L << 30)));
+    // A bare host's root has no memory.events and no limit: only the kernel's count is left.
+    assertJson(
+        "{\"type\":\"inventory\",\"leases\":[],\"volumes\":[],"
+            + "\"node\":{\"kernelOomKills\":297}}",
+        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null)));
+  }
+
+  @Test
   void theSignInFramesAreSpelledExactlyAsTheContractSaysKeyOrderIncluded() {
     assertJson(
         "{\"type\":\"signIn\",\"signInId\":\"" + S1 + "\",\"harness\":\"kimi\"}",
@@ -421,6 +456,46 @@ class SystemRunnerCodecTest {
     lease.put("spec", spec);
     estate.put("leases", List.of(lease));
     assertEquals(new Estate(List.of(workspace()), List.of()), CODEC.decode(estate));
+  }
+
+  @Test
+  void anInventoryOfTheOldShapeDecodesWithEveryMemoryFactNull() {
+    Map<String, Object> lease = new LinkedHashMap<>();
+    lease.put("leaseId", L1);
+    lease.put("state", "EXITED");
+    lease.put("specHash", "h");
+    lease.put("exitCode", 137);
+    lease.put("detail", null);
+    Map<String, Object> old = new LinkedHashMap<>();
+    old.put("type", "inventory");
+    old.put("leases", List.of(lease));
+    old.put("volumes", List.of());
+    Inventory inventory = (Inventory) CODEC.decode(old);
+    assertEquals(
+        new Inventory(
+            List.of(new LeaseReport(L1, LeaseState.EXITED, "h", 137, null)), List.of(), null),
+        inventory);
+    LeaseReport report = inventory.leases().getFirst();
+    assertNull(report.oomKills());
+    assertNull(report.oomEvents());
+    assertNull(report.memoryPeakBytes());
+    assertNull(report.oomKilled());
+    assertNull(inventory.node());
+
+    // Either box for a number, a null node, and a node that is not an object all read tolerantly.
+    lease.put("oomKills", 3);
+    lease.put("memoryPeakBytes", 4.294967296E9);
+    lease.put("oomKilled", "yes");
+    old.put("node", "not-an-object");
+    Inventory tolerant = (Inventory) CODEC.decode(old);
+    assertEquals(3L, tolerant.leases().getFirst().oomKills());
+    assertEquals(4L << 30, tolerant.leases().getFirst().memoryPeakBytes());
+    assertNull(tolerant.leases().getFirst().oomKilled());
+    assertNull(tolerant.node());
+    old.put("node", null);
+    assertNull(((Inventory) CODEC.decode(old)).node());
+    old.put("node", Map.of("kernelOomKills", 5));
+    assertEquals(new NodeMemory(null, 5L, null), ((Inventory) CODEC.decode(old)).node());
   }
 
   @Test
