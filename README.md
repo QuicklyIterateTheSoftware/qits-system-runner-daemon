@@ -211,8 +211,8 @@ image pulled in the background when absent, the CI lease `STARTING` meanwhile; p
 rendered `buildkitd.toml`, the bootstrap and the state volume — moved; the state volume rides
 across. A container under the builder's name without the stamp label is somebody else's: the CI
 lease fails and the container is left alone. The toml bounds the worker (`max-parallelism` —
-`_BUILDKIT_MAX_PARALLELISM` when set, else the runner's own slot total, since each CI lease runs
-at most one build at a time; GC at 72h / 20 GiB) and carries one `[registry."host"]` table per
+`_BUILDKIT_MAX_PARALLELISM` when set, else the runner's own slot total — it only sets how far an
+admitted build fans out, since the build gate below bounds how many builds run; GC at 72h / 20 GiB) and carries one `[registry."host"]` table per
 host: the environment's `_BUILDKIT_HTTP_REGISTRIES` (`http = true`) and
 `_BUILDKIT_REGISTRY_MIRRORS`, with the `Ack`'s `registryMirrors` merged over the latter per source
 host. The builder runs through the runner's docker process seam, not the driver: `ContainerSpec`

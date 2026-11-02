@@ -17,15 +17,11 @@ import java.util.regex.Pattern;
  *       unset — the same pin qits-containers' {@code qits.containers.buildkit.image} and the {@code
  *       ci-slot} image's {@code buildctl} carry;
  *   <li>{@code …_BUILDKIT_MAX_PARALLELISM}: how many build operations the builder runs at once,
- *       {@code null} when unset. There is no fixed default: buildkit v0.33.0's {@code
- *       max-parallelism} is one FIFO semaphore for the whole daemon, held by every {@code
- *       ExecOp}/{@code FileOp}/{@code SourceOp} for its whole duration and shared across every
- *       client session, so a small fixed number turns into cross-lease serialisation rather than a
- *       per-build bound. Unset, {@link BuildPlane} renders the runner's slot total instead — the
- *       most builds the target can have in flight, since each CI lease runs at most one build at a
- *       time ({@link BuildPlane#WORKER_TOML}). The variable stays as the per-target override for a
- *       host that cannot hold that many native builds at once: a {@code RUN} executes in the
- *       builder's own cgroup, not the lease's, so the lease's memory limit never bounds it;
+ *       {@code null} when unset, and then {@link BuildPlane} renders the runner's slot total. It is
+ *       not what bounds concurrent builds: the build gate below lets only {@code
+ *       …_BUILDER_CONCURRENT_BUILDS} builds reach the builder at a time (qits-1807), so this only
+ *       sets how far the builds the gate admitted may fan out their own stages, and it can be as
+ *       high as a host likes;
  *   <li>{@code …_BUILDKIT_HTTP_REGISTRIES}: a comma list of {@code host[:port]} buildkitd speaks plain
  *       HTTP to;
  *   <li>{@code …_BUILDKIT_REGISTRY_MIRRORS}: a comma list of {@code from=to}, {@code to} may carry a
