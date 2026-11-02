@@ -25,7 +25,8 @@ import java.util.Set;
  *   user              spec, never 0                   spec, never 0            spec, never 0
  *   /claude-home      never                           credential volume, rw    credential volume, rw
  *   /workspace        container filesystem            work volume              work volume
- *   caches            ci-git, ci-m2, ci-pnpm          m2, pnpm                 m2, pnpm
+ *   caches            ci-git, ci-m2, ci-pnpm,         m2, pnpm                 m2, pnpm
+ *                     ci-daemon
  *   networks          bridge + the build network      bridge                   bridge
  *   BUILDKIT_HOST     injected                        never                    never
  *   cap-drop / nnp    yes / yes                       no / no                  no / no
@@ -51,7 +52,7 @@ enum SlotPolicy {
       true,
       false,
       false,
-      List.of(Cache.CI_GIT, Cache.CI_M2, Cache.CI_PNPM),
+      List.of(Cache.CI_GIT, Cache.CI_M2, Cache.CI_PNPM, Cache.CI_DAEMON),
       true,
       true,
       true,
@@ -116,7 +117,13 @@ enum SlotPolicy {
     /** CI's maven cache: {@code qits-system-runner-ci-m2-<id8>}. */
     CI_M2("/caches/m2"),
     /** CI's pnpm store: {@code qits-system-runner-ci-pnpm-<id8>}. */
-    CI_PNPM("/caches/pnpm");
+    CI_PNPM("/caches/pnpm"),
+    /**
+     * CI's qits-ci-daemon cache: {@code qits-system-runner-ci-daemon-<id8>}. qits-ci's lease
+     * bootstrap caches the per-version daemon binary here instead of fetching it on every lease
+     * (qits-1809); the ci-slot image already has a build-owned {@code /caches/ci-daemon} directory.
+     */
+    CI_DAEMON("/caches/ci-daemon");
 
     final String target;
 
@@ -138,11 +145,12 @@ enum SlotPolicy {
       String pnpm,
       String ciGit,
       String ciM2,
-      String ciPnpm) {
+      String ciPnpm,
+      String ciDaemon) {
 
     /** The agent types' volumes alone. */
     Mounts(String workVolume, String credential, String m2, String pnpm) {
-      this(workVolume, credential, m2, pnpm, null, null, null);
+      this(workVolume, credential, m2, pnpm, null, null, null, null);
     }
   }
 
@@ -305,6 +313,7 @@ enum SlotPolicy {
             case CI_GIT -> mounts.ciGit();
             case CI_M2 -> mounts.ciM2();
             case CI_PNPM -> mounts.ciPnpm();
+            case CI_DAEMON -> mounts.ciDaemon();
           },
           cache.target);
     }

@@ -31,10 +31,12 @@ import java.util.Optional;
  *       qits-system-runner-work-<workKey>-<id8>}, labelled {@code qits.system.runner=<id>} and
  *       {@code qits.system.runner.work-key=<workKey>}, kept when its lease ends — it is the work —
  *       and removed only on an {@code estate.purges} entry or with the runner at decommission;
- *   <li>the <b>CI caches</b> ({@code /cache/git}, {@code /caches/m2}, {@code /caches/pnpm} of a CI
- *       lease): {@code qits-system-runner-ci-git-<id8>}, {@code qits-system-runner-ci-m2-<id8>},
- *       {@code qits-system-runner-ci-pnpm-<id8>}, always the runner's own, created labelled on the
- *       first CI lease and never mounted into a WORKSPACE or DESK lease.
+ *   <li>the <b>CI caches</b> ({@code /cache/git}, {@code /caches/m2}, {@code /caches/pnpm}, {@code
+ *       /caches/ci-daemon} of a CI lease): {@code qits-system-runner-ci-git-<id8>}, {@code
+ *       qits-system-runner-ci-m2-<id8>}, {@code qits-system-runner-ci-pnpm-<id8>}, {@code
+ *       qits-system-runner-ci-daemon-<id8>} (the per-version qits-ci-daemon binary qits-ci's lease
+ *       bootstrap caches there, qits-1809), always the runner's own, created labelled on the first
+ *       CI lease and never mounted into a WORKSPACE or DESK lease.
  * </ul>
  *
  * <p>The node volumes are labelled with the runner's ownership label alone: they belong to no
@@ -49,6 +51,7 @@ final class TargetVolumes {
   static final String CI_GIT = "ci-git";
   static final String CI_M2 = "ci-m2";
   static final String CI_PNPM = "ci-pnpm";
+  static final String CI_DAEMON = "ci-daemon";
 
   /** The label a work volume's key rides under: {@code qits.system.runner.work-key}. */
   static final String WORK_KEY_LABEL_SUFFIX = "work-key";
@@ -98,15 +101,23 @@ final class TargetVolumes {
     return identity.nodeVolume(targetId, CI_PNPM);
   }
 
+  /**
+   * CI's qits-ci-daemon cache: {@code qits-system-runner-ci-daemon-<id8>} — the per-version daemon
+   * binary qits-ci's lease bootstrap caches there (qits-1809).
+   */
+  String ciDaemon() {
+    return identity.nodeVolume(targetId, CI_DAEMON);
+  }
+
   /** The CI caches, made labelled on a CI lease's start. */
   List<String> ciCaches() {
-    return List.of(ciGit(), ciM2(), ciPnpm());
+    return List.of(ciGit(), ciM2(), ciPnpm(), ciDaemon());
   }
 
   /** Every volume a lease of any type may mount, as {@link SlotPolicy.Mounts}. */
   SlotPolicy.Mounts mounts(String workVolume) {
     return new SlotPolicy.Mounts(
-        workVolume, credential(), m2(), pnpm(), ciGit(), ciM2(), ciPnpm());
+        workVolume, credential(), m2(), pnpm(), ciGit(), ciM2(), ciPnpm(), ciDaemon());
   }
 
   /** {@code qits-system-runner-work-<workKey>-<id8>}. */
@@ -165,10 +176,14 @@ final class TargetVolumes {
   /**
    * {@link #mountsHash(String)} for a lease of {@code policy}: a CI lease's is over the CI caches
    * it mounts, an agent type's over its work volume and the node's.
+   *
+   * <p>Adding {@code ciDaemon()} to the CI branch (qits-1809) changes this hash: an existing CI
+   * lease container, labelled with the old one, now reads as carrying other volumes and is
+   * recreated — intended, since the new cache has to be mounted in.
    */
   String mountsHash(SlotPolicy policy, String workVolume) {
     if (!policy.agentVolumes()) {
-      return hash(String.join("\n", "ci", ciGit(), ciM2(), ciPnpm()));
+      return hash(String.join("\n", "ci", ciGit(), ciM2(), ciPnpm(), ciDaemon()));
     }
     return mountsHash(workVolume);
   }

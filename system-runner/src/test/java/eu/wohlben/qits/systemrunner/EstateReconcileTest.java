@@ -120,6 +120,7 @@ class EstateReconcileTest {
   private static final String CI_GIT = "qits-system-runner-ci-git-r1";
   private static final String CI_M2 = "qits-system-runner-ci-m2-r1";
   private static final String CI_PNPM = "qits-system-runner-ci-pnpm-r1";
+  private static final String CI_DAEMON = "qits-system-runner-ci-daemon-r1";
   private static final String BUILDER = "qits-system-runner-buildkitd-r1";
   private static final String BUILD_NET = "qits-system-runner-build-r1";
 
@@ -464,11 +465,12 @@ class EstateReconcileTest {
     assertTrue(run.contains(CI_GIT + ":/cache/git"), run::toString);
     assertTrue(run.contains(CI_M2 + ":/caches/m2"), run::toString);
     assertTrue(run.contains(CI_PNPM + ":/caches/pnpm"), run::toString);
+    assertTrue(run.contains(CI_DAEMON + ":/caches/ci-daemon"), run::toString);
     for (String never : List.of(DOT_CLAUDE, M2, PNPM, "/claude-home", "/workspace")) {
       assertTrue(run.stream().noneMatch(e -> e.contains(never)), never + " in " + run);
     }
     assertFalse(run.contains("CLAUDE_CONFIG_DIR=/claude-home/.claude"));
-    for (String cache : List.of(CI_GIT, CI_M2, CI_PNPM)) {
+    for (String cache : List.of(CI_GIT, CI_M2, CI_PNPM, CI_DAEMON)) {
       assertEquals(Map.of("qits.system.runner", TARGET), docker.volumes().get(cache), cache);
     }
     List<List<String>> calls = docker.calls();

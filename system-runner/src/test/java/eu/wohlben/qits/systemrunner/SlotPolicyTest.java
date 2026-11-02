@@ -49,7 +49,8 @@ class SlotPolicyTest {
           "qits_shared_pnpm",
           "qits-system-runner-ci-git-1a2b3c4d",
           "qits-system-runner-ci-m2-1a2b3c4d",
-          "qits-system-runner-ci-pnpm-1a2b3c4d");
+          "qits-system-runner-ci-pnpm-1a2b3c4d",
+          "qits-system-runner-ci-daemon-1a2b3c4d");
   private static final SlotPolicy.Build BUILD =
       new SlotPolicy.Build(
           "qits-system-runner-build-1a2b3c4d", "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234");
@@ -62,10 +63,11 @@ class SlotPolicyTest {
     assertTrue(ci.enabled);
     assertFalse(ci.credentialHome, "/claude-home: never");
     assertFalse(ci.workVolume, "/workspace: the container filesystem");
-    assertEquals(List.of(Cache.CI_GIT, Cache.CI_M2, Cache.CI_PNPM), ci.caches);
+    assertEquals(List.of(Cache.CI_GIT, Cache.CI_M2, Cache.CI_PNPM, Cache.CI_DAEMON), ci.caches);
     assertEquals("/cache/git", Cache.CI_GIT.target);
     assertEquals("/caches/m2", Cache.CI_M2.target);
     assertEquals("/caches/pnpm", Cache.CI_PNPM.target);
+    assertEquals("/caches/ci-daemon", Cache.CI_DAEMON.target);
     assertTrue(ci.buildNetwork, "bridge + the build network");
     assertTrue(ci.injectsBuildkitHost);
     assertTrue(ci.capDropAll);
@@ -92,7 +94,9 @@ class SlotPolicyTest {
         List.of(
             new ContainerSpec.SharedMount("qits-system-runner-ci-git-1a2b3c4d", "/cache/git"),
             new ContainerSpec.SharedMount("qits-system-runner-ci-m2-1a2b3c4d", "/caches/m2"),
-            new ContainerSpec.SharedMount("qits-system-runner-ci-pnpm-1a2b3c4d", "/caches/pnpm")),
+            new ContainerSpec.SharedMount("qits-system-runner-ci-pnpm-1a2b3c4d", "/caches/pnpm"),
+            new ContainerSpec.SharedMount(
+                "qits-system-runner-ci-daemon-1a2b3c4d", "/caches/ci-daemon")),
         c.sharedMounts());
     Map<String, String> expected = new LinkedHashMap<>(env());
     expected.put("BUILDKIT_HOST", "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234");
@@ -117,7 +121,8 @@ class SlotPolicyTest {
                 "qits-system-runner-pnpm-1a2b3c4d",
                 "qits-system-runner-ci-git-1a2b3c4d",
                 "qits-system-runner-ci-m2-1a2b3c4d",
-                "qits-system-runner-ci-pnpm-1a2b3c4d"))) {
+                "qits-system-runner-ci-pnpm-1a2b3c4d",
+                "qits-system-runner-ci-daemon-1a2b3c4d"))) {
       ContainerSpec c =
           SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, Map.of(), "1001"), mounts, BUILD);
       List<String> mounted = new java.util.ArrayList<>();
@@ -127,7 +132,8 @@ class SlotPolicyTest {
           List.of(mounts.workVolume(), mounts.credential(), mounts.m2(), mounts.pnpm())) {
         assertFalse(mounted.contains(never), never + " in " + mounted);
       }
-      assertEquals(List.of(mounts.ciGit(), mounts.ciM2(), mounts.ciPnpm()), mounted);
+      assertEquals(
+          List.of(mounts.ciGit(), mounts.ciM2(), mounts.ciPnpm(), mounts.ciDaemon()), mounted);
       List<String> targets = new java.util.ArrayList<>();
       c.volumeMounts().forEach(m -> targets.add(m.containerPath()));
       c.sharedMounts().forEach(m -> targets.add(m.containerPath()));

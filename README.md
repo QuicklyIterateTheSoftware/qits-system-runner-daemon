@@ -82,7 +82,7 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | user | spec, never 0 | spec, never 0 | spec, never 0 |
 | `/claude-home` | never | credential volume, rw | credential volume, rw |
 | `/workspace` | container filesystem | work volume | work volume |
-| caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
+| caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
 | networks | `bridge` + the build network | `bridge` | `bridge` |
 | `BUILDKIT_HOST` | injected | never | never |
 | cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no |
@@ -194,7 +194,7 @@ the running leases by their label.
 | the first-run keys | container `qits-system-runner-first-run-<id8>` (`--rm`) | none — the reconcile removes owner-labelled containers; a teardown item |
 | a sign-in | container `qits-system-runner-sign-in-<harness>-<id8>` (`--rm -i`) | none, likewise |
 
-| the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
+| the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, `qits-system-runner-ci-daemon-<id8>` (the per-version qits-ci-daemon binary qits-ci's lease bootstrap caches there, qits-1809), created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
 | the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
 | the build network | bridge `qits-system-runner-build-<id8>` | `qits.system.runner=<id>` |
 | the builder's state | volume `qits-system-runner-buildkitd-state-<id8>` | `qits.system.runner.buildkitd=state` |
