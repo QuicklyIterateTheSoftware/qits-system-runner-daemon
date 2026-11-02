@@ -29,6 +29,7 @@ import java.util.Set;
  *                     ci-daemon
  *   networks          bridge + the build network      bridge                   bridge
  *   BUILDKIT_HOST     injected                        never                    never
+ *   QITS_CI_BUILDER_SLOTS injected                    never                    never
  *   cap-drop / nnp    yes / yes                       no / no                  no / no
  *   --init            yes                             yes                      yes
  *   restart           no                              no                       unless-stopped
@@ -37,8 +38,13 @@ import java.util.Set;
  *
  * <p>A spec env key the policy owns ({@link #OWNED_ENV}) is refused, naming the key: {@code
  * CLAUDE_CONFIG_DIR} is the policy's ({@code /claude-home/.claude} for every type that mounts the
- * credential volume), {@code BUILDKIT_HOST} is CI's build plane, and {@code HOME} is the image's —
- * a spec that moved it would move where every tool looks for its configuration.
+ * credential volume), {@code BUILDKIT_HOST} and {@code QITS_CI_BUILDER_SLOTS} are CI's build plane,
+ * and {@code HOME} is the image's — a spec that moved it would move where every tool looks for its
+ * configuration. {@code QITS_CI_BUILDER_SLOTS} is the width of qits-ci-daemon's target-wide FIFO
+ * build gate (a {@code buildctl} shim, its gate directory under {@code /cache/git}) a CI lease's
+ * builds queue at before they reach the shared builder — {@code
+ * …_BUILDER_CONCURRENT_BUILDS} ({@link BuildkitSettings}), {@code 1} when unset — never buildkitd's
+ * own {@code max-parallelism} (qits-1807).
  *
  * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
  * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent
@@ -100,11 +106,13 @@ enum SlotPolicy {
   static final String NETWORK = "bridge";
 
   static final String BUILDKIT_HOST = "BUILDKIT_HOST";
+  static final String QITS_CI_BUILDER_SLOTS = "QITS_CI_BUILDER_SLOTS";
   static final String HOME = "HOME";
   static final String CLAUDE_CONFIG_DIR = "CLAUDE_CONFIG_DIR";
 
   /** The environment keys the policy owns: a spec naming one is refused. */
-  static final Set<String> OWNED_ENV = Set.of(BUILDKIT_HOST, HOME, CLAUDE_CONFIG_DIR);
+  static final Set<String> OWNED_ENV =
+      Set.of(BUILDKIT_HOST, QITS_CI_BUILDER_SLOTS, HOME, CLAUDE_CONFIG_DIR);
 
   /** A cache volume a type mounts, and where. */
   enum Cache {
@@ -154,8 +162,11 @@ enum SlotPolicy {
     }
   }
 
-  /** The build plane a CI lease joins: its network and the {@code BUILDKIT_HOST} it dials. */
-  record Build(String network, String buildkitHost) {}
+  /**
+   * The build plane a CI lease joins: its network, the {@code BUILDKIT_HOST} it dials, and the
+   * width of the target-wide build gate it is handed as {@code QITS_CI_BUILDER_SLOTS}.
+   */
+  record Build(String network, String buildkitHost, int builderSlots) {}
 
   final SlotType type;
   final boolean enabled;
@@ -297,6 +308,7 @@ enum SlotPolicy {
     }
     if (injectsBuildkitHost) {
       b.env(BUILDKIT_HOST, build.buildkitHost());
+      b.env(QITS_CI_BUILDER_SLOTS, String.valueOf(build.builderSlots()));
     }
     if (workVolume) {
       b.mount(mounts.workVolume(), WORKSPACE_TARGET);

@@ -221,6 +221,13 @@ no host CA bundle mount (the CI runner's in-container behaviour). At decommissio
 network and the state volume are the domain's teardown items, removed in that order after the lease
 containers.
 
+Before a CI lease's builds ever reach the builder, they queue at a target-wide FIFO build gate —
+implemented by qits-ci-daemon's `buildctl` shim, against a gate directory under `/cache/git`, not by
+buildkitd's own `max-parallelism`. The gate's width is `_BUILDER_CONCURRENT_BUILDS`, handed to each
+CI lease as `QITS_CI_BUILDER_SLOTS`; `1` when unset. Waiting at the gate does not count against the
+CI step's deadline (qits-1807), and at the default width of one, a build no longer waits inside
+buildkitd's own per-operation semaphore instead.
+
 Health: `buildkit` fails on a stale stamp, a stopped builder or a foreign container under its name,
 and is ok while no CI lease ever needed one; `network` is ok while missing only when no builder
 exists. Both are read-only. There is no uid/gid range check: a host whose user namespace maps
@@ -248,6 +255,7 @@ fewer than the full 32-bit id space is not unhealthy for it (qits-1576).
 
 | `QITS_SYSTEM_RUNNER_BUILDKIT_IMAGE` | The builder's image. | `moby/buildkit:v0.33.0` |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM` | Build operations the builder runs at once. | the runner's slot total (`QITS_SYSTEM_RUNNER_SLOTS`) |
+| `QITS_SYSTEM_RUNNER_BUILDER_CONCURRENT_BUILDS` | How many image builds this target's CI leases may run on the shared builder at once; handed to each CI lease as `QITS_CI_BUILDER_SLOTS`. | `1` |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_HTTP_REGISTRIES` | Comma list of `host[:port]` the builder speaks plain HTTP to. | none |
 | `QITS_SYSTEM_RUNNER_BUILDKIT_REGISTRY_MIRRORS` | Comma list of `from=to` (`to` may carry a path); the `Ack`'s `registryMirrors` win per host. | none |
 

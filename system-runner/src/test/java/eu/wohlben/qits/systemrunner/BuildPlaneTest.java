@@ -158,6 +158,7 @@ class BuildPlaneTest {
         new BuildkitSettings(
             "moby/buildkit:v0.33.0",
             1,
+            BuildkitSettings.DEFAULT_CONCURRENT_BUILDS,
             List.of(),
             List.of("a.example=env-a:5000", "b.example=env-b:5000"));
     BuildPlane base =
@@ -201,7 +202,7 @@ class BuildPlaneTest {
   @Test
   void anExplicitParallelismWinsOverTheSlotTotal() {
     BuildkitSettings settings =
-        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, 3, List.of(), List.of());
+        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, 3, BuildkitSettings.DEFAULT_CONCURRENT_BUILDS, List.of(), List.of());
     BuildPlane explicit =
         new BuildPlane(
             IDENTITY,
@@ -222,7 +223,7 @@ class BuildPlaneTest {
             BuildkitSettings.DEFAULTS,
             8);
     BuildkitSettings explicitSettings =
-        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, 3, List.of(), List.of());
+        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, 3, BuildkitSettings.DEFAULT_CONCURRENT_BUILDS, List.of(), List.of());
     BuildPlane explicit =
         new BuildPlane(
             IDENTITY,
@@ -275,20 +276,50 @@ class BuildPlaneTest {
         BuildkitSettings.DEFAULTS, BuildkitSettings.parse(IDENTITY, Map.<String, String>of()::get));
     assertEquals("moby/buildkit:v0.33.0", BuildkitSettings.DEFAULTS.image());
     assertNull(BuildkitSettings.DEFAULTS.maxParallelism());
+    assertEquals(1, BuildkitSettings.DEFAULTS.concurrentBuilds(), "unset means 1");
 
     Map<String, String> env =
         Map.of(
             "QITS_SYSTEM_RUNNER_BUILDKIT_IMAGE", "moby/buildkit:v0.34.0",
             "QITS_SYSTEM_RUNNER_BUILDKIT_MAX_PARALLELISM", "3",
+            "QITS_SYSTEM_RUNNER_BUILDER_CONCURRENT_BUILDS", "5",
             "QITS_SYSTEM_RUNNER_BUILDKIT_HTTP_REGISTRIES", "registry.qits:5000, mirror:8080",
             "QITS_SYSTEM_RUNNER_BUILDKIT_REGISTRY_MIRRORS", "docker.io=mirror:8080/hub");
     assertEquals(
         new BuildkitSettings(
             "moby/buildkit:v0.34.0",
             3,
+            5,
             List.of("registry.qits:5000", "mirror:8080"),
             List.of("docker.io=mirror:8080/hub")),
         BuildkitSettings.parse(IDENTITY, env::get));
+  }
+
+  @Test
+  void concurrentBuildsIsOneWhenUnsetAndAnExplicitValueWins() throws Exception {
+    assertEquals(
+        1, BuildkitSettings.parse(IDENTITY, Map.<String, String>of()::get).concurrentBuilds());
+    assertEquals(
+        7,
+        BuildkitSettings.parse(
+                IDENTITY, Map.of("QITS_SYSTEM_RUNNER_BUILDER_CONCURRENT_BUILDS", "7")::get)
+            .concurrentBuilds());
+  }
+
+  @Test
+  void aMalformedConcurrentBuildsIsRefusedNamingItsVariable() {
+    for (String bad : List.of("0", "-1", "abc")) {
+      RunnerSettings.Invalid invalid =
+          assertThrows(
+              RunnerSettings.Invalid.class,
+              () ->
+                  BuildkitSettings.parse(
+                      IDENTITY,
+                      Map.of("QITS_SYSTEM_RUNNER_BUILDER_CONCURRENT_BUILDS", bad)::get));
+      assertTrue(
+          invalid.getMessage().contains("QITS_SYSTEM_RUNNER_BUILDER_CONCURRENT_BUILDS"),
+          invalid.getMessage());
+    }
   }
 
   @Test

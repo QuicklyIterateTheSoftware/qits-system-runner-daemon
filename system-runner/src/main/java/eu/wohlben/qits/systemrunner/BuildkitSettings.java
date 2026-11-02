@@ -30,7 +30,13 @@ import java.util.regex.Pattern;
  *       HTTP to;
  *   <li>{@code …_BUILDKIT_REGISTRY_MIRRORS}: a comma list of {@code from=to}, {@code to} may carry a
  *       path prefix. The {@code Ack}'s {@code registryMirrors} are merged over these, per source host
- *       ({@link BuildPlane#withRegistryMirrors}).
+ *       ({@link BuildPlane#withRegistryMirrors});
+ *   <li>{@code …_BUILDER_CONCURRENT_BUILDS}: how many image builds a CI lease of this target may run
+ *       on the shared builder at once, {@value #DEFAULT_CONCURRENT_BUILDS} when unset. This is not
+ *       buildkitd's {@code max-parallelism} — that bounds operations inside the daemon, this bounds
+ *       how many CI leases are let past qits-ci-daemon's own target-wide FIFO build gate
+ *       ({@code SlotPolicy.QITS_CI_BUILDER_SLOTS}, qits-1807): a lease waiting at that gate does not
+ *       hold the builder and does not count against buildkitd's own semaphore.
  * </ul>
  *
  * <p>Every registry is checked against its charset here because it is rendered inside a TOML string:
@@ -45,16 +51,21 @@ import java.util.regex.Pattern;
 record BuildkitSettings(
     String image,
     Integer maxParallelism,
+    int concurrentBuilds,
     List<String> httpRegistries,
     List<String> registryMirrors) {
 
   static final String BUILDKIT_IMAGE = "BUILDKIT_IMAGE";
   static final String BUILDKIT_MAX_PARALLELISM = "BUILDKIT_MAX_PARALLELISM";
+  static final String BUILDER_CONCURRENT_BUILDS = "BUILDER_CONCURRENT_BUILDS";
   static final String BUILDKIT_HTTP_REGISTRIES = "BUILDKIT_HTTP_REGISTRIES";
   static final String BUILDKIT_REGISTRY_MIRRORS = "BUILDKIT_REGISTRY_MIRRORS";
 
   /** The builder image when none is named. Bump it with qits-containers' and the ci-slot image's. */
   static final String DEFAULT_IMAGE = "moby/buildkit:v0.33.0";
+
+  /** The build gate's width when {@code …_BUILDER_CONCURRENT_BUILDS} is unset: one at a time. */
+  static final int DEFAULT_CONCURRENT_BUILDS = 1;
 
   /** A registry as buildkitd.toml names it: {@code host[:port]}. */
   static final Pattern REGISTRY = Pattern.compile("[A-Za-z0-9][A-Za-z0-9.-]{0,252}(:[0-9]{1,5})?");
@@ -70,7 +81,7 @@ record BuildkitSettings(
    * total at render time — and no registry configuration.
    */
   static final BuildkitSettings DEFAULTS =
-      new BuildkitSettings(DEFAULT_IMAGE, null, List.of(), List.of());
+      new BuildkitSettings(DEFAULT_IMAGE, null, DEFAULT_CONCURRENT_BUILDS, List.of(), List.of());
 
   BuildkitSettings {
     httpRegistries = List.copyOf(httpRegistries);
@@ -110,9 +121,29 @@ record BuildkitSettings(
       }
       parallelism = parsed;
     }
+    String concurrentBuildsVar = identity.env(BUILDER_CONCURRENT_BUILDS);
+    String rawConcurrentBuilds = env.apply(concurrentBuildsVar);
+    int concurrentBuilds = DEFAULT_CONCURRENT_BUILDS;
+    if (!blank(rawConcurrentBuilds)) {
+      int parsed;
+      try {
+        parsed = Integer.parseInt(rawConcurrentBuilds.strip());
+      } catch (NumberFormatException e) {
+        parsed = 0;
+      }
+      if (parsed < 1) {
+        throw new RunnerSettings.Invalid(
+            concurrentBuildsVar
+                + " is not a positive integer: '"
+                + rawConcurrentBuilds.strip()
+                + "'");
+      }
+      concurrentBuilds = parsed;
+    }
     return new BuildkitSettings(
         image,
         parallelism,
+        concurrentBuilds,
         httpRegistries(identity.env(BUILDKIT_HTTP_REGISTRIES), env),
         mirrors(identity.env(BUILDKIT_REGISTRY_MIRRORS), env));
   }

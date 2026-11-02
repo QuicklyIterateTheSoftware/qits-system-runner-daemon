@@ -309,7 +309,9 @@ final class LeaseLauncher {
     SlotPolicy.Build build = null;
     if (policy.buildNetwork) {
       plane = buildPlane.get();
-      build = new SlotPolicy.Build(plane.names().network(), plane.names().address());
+      build =
+          new SlotPolicy.Build(
+              plane.names().network(), plane.names().address(), plane.concurrentBuilds());
     }
     ContainerSpec container;
     try {

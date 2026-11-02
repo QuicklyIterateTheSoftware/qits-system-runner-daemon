@@ -48,6 +48,13 @@ change to that table, reviewed as one, with the test cell beside it.
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled
   container that is not a held lease. It is the one privileged `docker run`, a fixed argv through
   `RunnerDocker`, and its three names are the domain's `TeardownItem`s.
+- **A CI lease's builds queue at a target-wide FIFO build gate before they reach the builder**,
+  implemented by qits-ci-daemon's `buildctl` shim against a gate directory under `/cache/git` — not
+  by buildkitd's own `max-parallelism`. The gate's width is `…_BUILDER_CONCURRENT_BUILDS`
+  (`BuildkitSettings`, `1` when unset), handed to the lease as `QITS_CI_BUILDER_SLOTS`
+  (`SlotPolicy.Build`). Waiting at the gate does not count against the CI step's deadline
+  (qits-1807); at the default width of one, a build no longer waits inside buildkitd's own
+  per-operation semaphore instead.
 - **The user is the spec's and never root** (`0`, `root`, with or without a group).
 - **The image must start with `Ack.slotImages.<type>`**.
 - **Policy-owned env keys** (`BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR`) in a spec fail the lease
@@ -69,8 +76,9 @@ Plain records, plain constructors, no annotations; fields are read through `Wire
 constructor arguments; nothing reads configuration — the toolkit's `RunnerSettings` parses the
 environment (`QITS_SYSTEM_RUNNER_*`), and `Main` parses the runner's own beside it
 (`ExternalVolumes`: `…_CREDENTIAL_VOLUME`, `…_M2_VOLUME`, `…_PNPM_VOLUME`, exit 2 on a bad name;
-`BuildkitSettings`: `…_BUILDKIT_IMAGE`, `…_BUILDKIT_MAX_PARALLELISM`, `…_BUILDKIT_HTTP_REGISTRIES`,
-`…_BUILDKIT_REGISTRY_MIRRORS`, likewise). `…_BUILDKIT_MAX_PARALLELISM` defaults to the runner's own
+`BuildkitSettings`: `…_BUILDKIT_IMAGE`, `…_BUILDKIT_MAX_PARALLELISM`, `…_BUILDER_CONCURRENT_BUILDS`,
+`…_BUILDKIT_HTTP_REGISTRIES`, `…_BUILDKIT_REGISTRY_MIRRORS`, likewise).
+`…_BUILDKIT_MAX_PARALLELISM` defaults to the runner's own
 slot total rather than a fixed number: buildkit's `max-parallelism` is one FIFO semaphore for the
 whole daemon, so a small fixed value serialises every lease's builds behind each other instead of
 bounding one.

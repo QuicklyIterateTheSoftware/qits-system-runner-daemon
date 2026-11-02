@@ -53,7 +53,9 @@ class SlotPolicyTest {
           "qits-system-runner-ci-daemon-1a2b3c4d");
   private static final SlotPolicy.Build BUILD =
       new SlotPolicy.Build(
-          "qits-system-runner-build-1a2b3c4d", "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234");
+          "qits-system-runner-build-1a2b3c4d",
+          "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234",
+          1);
 
   // --- the table ---------------------------------------------------------------------------------
 
@@ -100,6 +102,7 @@ class SlotPolicyTest {
         c.sharedMounts());
     Map<String, String> expected = new LinkedHashMap<>(env());
     expected.put("BUILDKIT_HOST", "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234");
+    expected.put("QITS_CI_BUILDER_SLOTS", "1");
     assertEquals(expected, c.env());
     assertFalse(c.env().containsKey("CLAUDE_CONFIG_DIR"), "no /claude-home, no config dir");
     assertFalse(c.env().containsKey("HOME"), "the image's own");
@@ -151,8 +154,21 @@ class SlotPolicyTest {
         assertFalse(m.sharedName().contains("-ci-"), type + " " + m);
       }
       assertFalse(c.env().containsKey("BUILDKIT_HOST"), type.name());
+      assertFalse(c.env().containsKey("QITS_CI_BUILDER_SLOTS"), type.name());
       assertEquals(List.of("bridge"), SlotPolicy.of(type).networks(BUILD), type.name());
     }
+  }
+
+  @Test
+  void aCiLeasesEnvCarriesTheBuildGatesWidthAsQitsCiBuilderSlots() {
+    SlotPolicy.Build wideGate =
+        new SlotPolicy.Build(
+            "qits-system-runner-build-1a2b3c4d",
+            "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234",
+            4);
+    ContainerSpec c =
+        SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, env(), "1001"), ALL_MOUNTS, wideGate);
+    assertEquals("4", c.env().get("QITS_CI_BUILDER_SLOTS"));
   }
 
   @Test
@@ -278,7 +294,7 @@ class SlotPolicyTest {
   @Test
   void aSpecEnvKeyThePolicyOwnsIsRefusedNamingIt() {
     for (SlotType type : List.of(SlotType.CI, SlotType.WORKSPACE, SlotType.DESK)) {
-      for (String key : Set.of("BUILDKIT_HOST", "HOME", "CLAUDE_CONFIG_DIR")) {
+      for (String key : Set.of("BUILDKIT_HOST", "QITS_CI_BUILDER_SLOTS", "HOME", "CLAUDE_CONFIG_DIR")) {
         Map<String, String> env = new LinkedHashMap<>(env());
         env.put(key, "/somewhere");
         Optional<String> refused =

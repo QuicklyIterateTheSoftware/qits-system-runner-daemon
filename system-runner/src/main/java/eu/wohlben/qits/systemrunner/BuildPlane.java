@@ -289,6 +289,14 @@ final class BuildPlane {
     return settings.image();
   }
 
+  /**
+   * {@code …_BUILDER_CONCURRENT_BUILDS}: the width of qits-ci-daemon's target-wide build gate a CI
+   * lease is handed as {@code QITS_CI_BUILDER_SLOTS} ({@link SlotPolicy}).
+   */
+  int concurrentBuilds() {
+    return settings.concurrentBuilds();
+  }
+
   String toml() {
     return toml;
   }

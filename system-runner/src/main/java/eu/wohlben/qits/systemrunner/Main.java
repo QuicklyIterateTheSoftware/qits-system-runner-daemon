@@ -29,8 +29,8 @@ import org.jboss.logging.Logger;
  *
  * <p><b>The runner's own settings</b> — the external node volumes ({@link ExternalVolumes}: the credential volume and the agent caches) and
  * the build plane's ({@link BuildkitSettings}: {@code …_BUILDKIT_IMAGE}, {@code
- * …_BUILDKIT_MAX_PARALLELISM}, {@code …_BUILDKIT_HTTP_REGISTRIES}, {@code
- * …_BUILDKIT_REGISTRY_MIRRORS}) — are
+ * …_BUILDKIT_MAX_PARALLELISM}, {@code …_BUILDER_CONCURRENT_BUILDS}, {@code
+ * …_BUILDKIT_HTTP_REGISTRIES}, {@code …_BUILDKIT_REGISTRY_MIRRORS}) — are
  * parsed here from the same environment, in runner mode only, and an invalid one refuses to start
  * with {@link RunnerExit#MISCONFIGURED} and one sentence naming the variable, as the toolkit's own
  * settings do.
