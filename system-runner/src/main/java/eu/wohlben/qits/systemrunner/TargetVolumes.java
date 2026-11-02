@@ -177,13 +177,15 @@ final class TargetVolumes {
    * {@link #mountsHash(String)} for a lease of {@code policy}: a CI lease's is over the CI caches
    * it mounts, an agent type's over its work volume and the node's.
    *
-   * <p>Adding {@code ciDaemon()} to the CI branch (qits-1809) changes this hash: an existing CI
-   * lease container, labelled with the old one, now reads as carrying other volumes and is
-   * recreated — intended, since the new cache has to be mounted in.
+   * <p>{@code ciDaemon()} (qits-1809) is deliberately <b>not</b> in the CI branch. A CI container
+   * belongs to one lease, so every new lease mounts the cache anyway; folding it in would only make
+   * the upgraded runner read each CI container still running as carrying other volumes, stop it and
+   * start it again — killing every run in flight at the upgrade. A lease without the mount fetches
+   * its daemon into {@code /tmp}, as before.
    */
   String mountsHash(SlotPolicy policy, String workVolume) {
     if (!policy.agentVolumes()) {
-      return hash(String.join("\n", "ci", ciGit(), ciM2(), ciPnpm(), ciDaemon()));
+      return hash(String.join("\n", "ci", ciGit(), ciM2(), ciPnpm()));
     }
     return mountsHash(workVolume);
   }
