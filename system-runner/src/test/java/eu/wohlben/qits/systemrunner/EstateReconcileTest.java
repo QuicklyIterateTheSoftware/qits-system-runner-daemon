@@ -297,6 +297,39 @@ class EstateReconcileTest {
     }
   }
 
+  /**
+   * qits-1868: the look keeps ticking after the runtime's run returned, so closing the domain
+   * meets a docker call in flight. Closing waits for it — an interrupted call would return at once
+   * while the process it forked runs on, still writing into the suite's directory — and starts no
+   * other.
+   */
+  @Test
+  void closingTheDomainWaitsForTheDockerCallInFlightAndStartsNoOther() throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(workspace(L1, H1));
+    start();
+    awaitInventory(i -> i.leases().stream().anyMatch(r -> r.leaseId().equals(L1)));
+    runner.stop(RunnerExit.OK);
+    exit.get(30, TimeUnit.SECONDS);
+    runner = null;
+    // The look's own inspect of the lease hangs, so the next look is inside it when closing comes.
+    docker.hang("inspect+" + safe(lease(L1)), 3);
+    Thread.sleep(500);
+
+    domain.close();
+    List<ProcessHandle> alive =
+        ProcessHandle.current().descendants().filter(ProcessHandle::isAlive).toList();
+    int calls = docker.calls().size();
+    domain = null;
+
+    assertEquals(
+        List.of(),
+        alive.stream().map(p -> p.info().commandLine().orElse(String.valueOf(p.pid()))).toList(),
+        "no docker process outlives the close");
+    Thread.sleep(1_000);
+    assertEquals(calls, docker.calls().size(), docker.calls()::toString);
+  }
+
   @Test
   void anExitedLeaseIsReportedWithItsExitCodeAndNeverRestarted() throws Exception {
     seen(L1, "exited", 137, "WORKSPACE", H1, mounts(work("ws-42")));
