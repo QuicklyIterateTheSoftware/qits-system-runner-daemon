@@ -52,6 +52,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -154,6 +155,12 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The sign-ins' slow steps: a thread each while one runs, so none waits on a probe or a tick. */
   private final ExecutorService signInWork;
 
+  /**
+   * How long {@link #close} waits for its threads once it has interrupted them; the toolkit's
+   * {@code RunnerRuntime} waits as long for its own.
+   */
+  static final long INTERRUPTED_THREADS_MILLIS = 5_000;
+
   /** At most this many {@code docker} frames run at once; the rest wait their turn. */
   static final int DOCKER_THREADS = 4;
 
@@ -217,6 +224,12 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /** Set once this runner learns it was deleted: from then on it starts nothing. */
   private volatile boolean decommissioning;
+
+  /**
+   * Set first thing in {@link #close}: from then on no pool of this domain starts another docker
+   * call, so the ones in flight are the last.
+   */
+  private volatile boolean closing;
 
   /** The handle the toolkit gave: the same across reconnects, null before the first session. */
   private volatile RunnerSession session;
@@ -306,7 +319,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
     this.warmWork = daemonPool("system-runner-warm", 1);
-    this.pulls = new ImagePulls(pullWork, warmWork, this::reconvergeSoon, clock);
+    this.pulls =
+        new ImagePulls(
+            unlessClosing(pullWork), unlessClosing(warmWork), this::reconvergeSoon, clock);
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
     this.launcher =
@@ -332,6 +347,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
               return t;
             });
     pool.setRemoveOnCancelPolicy(true);
+    // A login probe or a sign-in's expiry still waiting when the domain closes never runs.
+    pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     this.timer = pool;
     long progressEvery = PULL_PROGRESS_EVERY.toMillis();
     timer.scheduleWithFixedDelay(
@@ -372,6 +389,20 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             });
     pool.allowCoreThreadTimeOut(true);
     return pool;
+  }
+
+  /**
+   * {@code pool}, with every task it dequeues once the domain is closing dropped unrun: a pull
+   * queued behind the running ones is not started by the pool's orderly shutdown.
+   */
+  private Executor unlessClosing(ExecutorService pool) {
+    return task ->
+        pool.execute(
+            () -> {
+              if (!closing) {
+                task.run();
+              }
+            });
   }
 
   @Override
@@ -626,16 +657,63 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     return images;
   }
 
-  /** Stop the node's timers; the process ending does the same. For a suite's teardown. */
+  /**
+   * Stop every thread this domain started and wait for them, so a suite deletes the fake docker's
+   * directory only once nothing of this domain still runs docker there (qits-1868). The look keeps
+   * ticking after the runtime's run returned — nothing ends the session on a plain stop — so the
+   * domain is told it is closing first, and none of its pools starts another docker call; the
+   * sign-ins are cancelled, their processes killed and their containers removed on their own
+   * threads.
+   * Nothing is interrupted at first, for qits-860's reason: an interrupted docker call returns at
+   * once while the docker process it forked runs on, unwatched, and the next call on that thread is
+   * forked before its interrupt kills it. So the work in flight is let finish, up to one docker
+   * deadline — no single docker call runs longer — and only a thread still busy past that is
+   * interrupted, as the last resort it is. For a suite's teardown; the process ending does the same.
+   */
   void close() {
+    closing = true;
     signIns.stopAll("the runner stops");
-    timer.shutdownNow();
-    pullWork.shutdownNow();
-    warmWork.shutdownNow();
-    reconvergeWork.shutdownNow();
-    dockerWork.shutdownNow();
-    signInWork.shutdown();
+    synchronized (timer) {
+      if (tick != null) {
+        tick.cancel(false);
+      }
+      if (nextProbe != null) {
+        nextProbe.cancel(false);
+      }
+    }
+    List<ExecutorService> pools =
+        List.of(timer, pullWork, warmWork, reconvergeWork, dockerWork, signInWork);
+    pools.forEach(ExecutorService::shutdown);
+    long deadline = System.nanoTime() + docker.deadline().toNanos();
+    try {
+      if (terminated(pools, deadline)) {
+        healthChecks.close();
+        return;
+      }
+      LOG.warnf(
+          "system-runner's work was still running %ds after it stopped; interrupting it",
+          docker.deadline().toSeconds());
+      pools.forEach(ExecutorService::shutdownNow);
+      if (!terminated(
+          pools, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(INTERRUPTED_THREADS_MILLIS))) {
+        LOG.warnf("system-runner closes with work still running");
+      }
+    } catch (InterruptedException e) {
+      pools.forEach(ExecutorService::shutdownNow);
+      Thread.currentThread().interrupt();
+    }
     healthChecks.close();
+  }
+
+  /** Every pool terminated by {@code deadline}, a {@link System#nanoTime} instant. */
+  private static boolean terminated(List<ExecutorService> pools, long deadline)
+      throws InterruptedException {
+    for (ExecutorService pool : pools) {
+      if (!pool.awaitTermination(deadline - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // --- the frames ---------------------------------------------------------------------------------
@@ -699,7 +777,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
           () -> {
             reconvergeQueued.set(false);
             RunnerSession s = session;
-            if (s != null) {
+            if (s != null && !closing) {
               convergeEstate(null, s, true);
             }
           });
@@ -714,7 +792,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * {@code estate} arrived on the current connection).
    */
   private void convergeEstate(Estate given, RunnerSession session, boolean again) {
-    if (decommissioning) {
+    if (decommissioning || closing) {
       return;
     }
     boolean converged = false;
@@ -722,7 +800,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     converging.lock();
     try {
       Estate e = given != null ? given : estate;
-      if (e == null || decommissioning || (again && (!live || !estateThisSession))) {
+      if (e == null || decommissioning || closing || (again && (!live || !estateThisSession))) {
         return;
       }
       Set<String> listed = new LinkedHashSet<>();
@@ -738,7 +816,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
         session.own().reconcile(listed);
       }
       for (LeaseEntry entry : e.leases()) {
+        if (closing) {
+          return;
+        }
         converge(entry, session);
+      }
+      if (closing) {
+        return;
       }
       purge(e, session);
       converged = true;
@@ -746,7 +830,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       converging.unlock();
       inFlight.decrementAndGet();
     }
-    if (converged) {
+    if (converged && !closing) {
       look(session, true);
     }
   }
@@ -906,7 +990,14 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       return;
     }
     try {
-      dockerWork.execute(() -> sendDocker(session, dockerOps.answer(request)));
+      dockerWork.execute(
+          () ->
+              sendDocker(
+                  session,
+                  closing
+                      ? DockerResult.of(
+                          request.requestId(), DockerStatus.FAILED, "the runner is stopping")
+                      : dockerOps.answer(request)));
     } catch (RejectedExecutionException stopping) {
       sendDocker(
           session,
@@ -947,7 +1038,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    */
   private void probeLogin() {
     RunnerSession s = session;
-    if (s == null || !live || decommissioning) {
+    if (s == null || !live || decommissioning || closing) {
       return;
     }
     LoginState state = loginProbe.probe(s.driver(), ack.probeImage(), s.registry()::pull);
@@ -1008,7 +1099,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The periodic look; skipped while a convergence holds the node, which reports for itself. */
   private void tickOnce() {
     RunnerSession s = session;
-    if (s == null || !live || decommissioning) {
+    if (s == null || !live || decommissioning || closing) {
       return;
     }
     if (!converging.tryLock()) {
