@@ -315,10 +315,13 @@ class EstateReconcileTest {
     // The look's own inspect of the lease hangs, so the next look is inside it when closing comes.
     docker.hang("inspect+" + safe(lease(L1)), 3);
     Thread.sleep(500);
+    // Taken before closing: an interrupted call's child is killed but its own child, the script's
+    // sleep, is orphaned and leaves the descendants, so asking afterwards would miss it.
+    List<ProcessHandle> inFlight = ProcessHandle.current().descendants().toList();
+    assertFalse(inFlight.isEmpty(), "a docker call is in flight when closing comes");
 
     domain.close();
-    List<ProcessHandle> alive =
-        ProcessHandle.current().descendants().filter(ProcessHandle::isAlive).toList();
+    List<ProcessHandle> alive = inFlight.stream().filter(ProcessHandle::isAlive).toList();
     int calls = docker.calls().size();
     domain = null;
 
