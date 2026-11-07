@@ -46,7 +46,7 @@
              dependency in system-runner so this version wins resolution; moved by the maintenance
              bump like any other released pin. qits-system-service, the register host, records no
              golden masters yet: its pin joins here when it does. -->
-        <qits.observability-golden-masters.version>2026.1018.155850</qits.observability-golden-masters.version>
+        <qits.observability-golden-masters.version>2026.1107.172205</qits.observability-golden-masters.version>
 
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
