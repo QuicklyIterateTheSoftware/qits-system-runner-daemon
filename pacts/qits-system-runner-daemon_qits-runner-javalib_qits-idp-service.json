@@ -18,7 +18,7 @@
           "qits-via": {
             "artifact": "eu.wohlben.qits:qits-runner-toolkit",
             "repository": "qits-runner-javalib",
-            "version": "2026.1109.3936"
+            "version": "2026.1109.192419"
           }
         }
       },
@@ -117,7 +117,7 @@
           "qits-via": {
             "artifact": "eu.wohlben.qits:qits-runner-toolkit",
             "repository": "qits-runner-javalib",
-            "version": "2026.1109.3936"
+            "version": "2026.1109.192419"
           }
         }
       },
