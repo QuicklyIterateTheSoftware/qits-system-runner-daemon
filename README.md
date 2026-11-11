@@ -105,7 +105,7 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | `/workspace` | container filesystem | work volume | work volume |
 | caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
 | networks | `bridge` + the build network, + `qits-private` where the private edge is visible | `bridge`, + `qits-private` where the private edge is visible | as WORKSPACE |
-| resolvers | the node's; the private edge's VIP first where it is visible, else `100.96.0.1` first where the node tunnel answers | as CI | as CI |
+| resolvers | the node's; the private edge's VIP first where it is visible, else `100.96.0.1` first where the node tunnel answers — and the builder the CI lease dials gets `100.96.0.1` first too where the node tunnel answers | as CI, without the builder | as WORKSPACE |
 | `BUILDKIT_HOST` | injected | never | never |
 | cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no |
 | `--init` | yes | no | yes |
@@ -134,15 +134,37 @@ reply with the query's id counts. Then the lease stays on `bridge` alone, with n
 and gets `--dns 100.96.0.1` followed by the runner's own upstreams, read exactly as above without
 `100.96.0.1` itself. Silence, REFUSED or any other answer runs the lease with the node's resolvers,
 as before, with a DEBUG line; an answering tunnel and no upstream is the same with a WARN. A lease
-that already got the private edge's VIP is never probed. Nothing of it is hashed. The known limits:
+that already got the private edge's VIP is never probed. Nothing of it is hashed into a lease.
+
+The same answer (`NodeTunnel.resolvers()`, qits-2090) is given to the runner's own two
+containers, each time asked afresh:
+
+- **The runner's own container**, from its next rollover: the toolkit asks
+  `SystemRunnerDomain.successorDns()` each time it builds the successor's `docker run`, and each
+  resolver becomes one `--dns`, logged as `system-runner starts its successor via the node tunnel,
+  resolvers [...]`. On the platform host, or where the tunnel is silent, the answer is empty and the
+  successor runs with the node's resolvers, as before.
+- **buildkitd**: asked once per `BuildPlane.ensure`, the list goes in as one `--dns` each right
+  after `--network <build network>` and into the builder's stamp — only when it is non-empty, so a
+  builder without it keeps exactly the stamp it had and is not recreated by this change. On the
+  build network docker's embedded DNS (`127.0.0.11`, the toml's `[dns]`) forwards to those servers,
+  so buildkitd and its `RUN` steps resolve private names through the tunnel. The tunnel coming or
+  going changes the stamp, and the next CI lease replaces the builder exactly as a bumped image
+  does (`docker rm -f`, the state volume kept) — a build in flight on the old builder at that moment
+  loses its builder and fails.
+
+The known limits:
 
 - **A lease keeps the resolvers it was created with.** If the tunnel goes down later, every public
   lookup first waits glibc's timeout (5 s) on `100.96.0.1` before it asks the next server, until the
   tunnel is back or the lease is recreated. While the tunnel is up, public names resolve at once:
   the edge answers them REFUSED and glibc moves on.
-- **A CI lease's builds do not see private names.** buildkitd's `RUN` steps resolve through
-  docker's `127.0.0.11` on the build network, not through the lease's resolvers; the registry, the
-  mirror and the git host stay on their public names.
+- **The install script's first container has no tunnel resolvers** until its first rollover: it
+  is started by the script, not by a predecessor, so it resolves the platform publicly until then.
+- **While the tunnel is down**, the runner's own container and a builder started with the tunnel's
+  resolvers first wait out a timeout on `100.96.0.1` before they get the public answer — about 5 s
+  in the runner's Netty resolver, about 4 s in docker's embedded DNS on the build network — until
+  the next rollover or the next CI lease's `ensure` decides without the tunnel.
 - **The tunnel's MTU is 1380**, against `bridge`'s 1500: large packets through it rely on path MTU
   discovery.
 
@@ -174,8 +196,9 @@ A target is **one docker container**: the static `qits-system-runner` binary in 
 `registry.qits.<domain>/qits/qits-system-runner:<version>`, started with docker's own restart
 policy (`unless-stopped`) and the host's docker socket mounted so it can start leases. No service
 to install, no binary on the host. It is never on the platform's internal network: it reaches the
-platform through its public names — or, where the host runs the node tunnel, its leases resolve the
-private names through it (see the node tunnel above).
+platform through its public names — or, where the host runs the node tunnel, its leases, its
+builder and (from its first rollover) the runner itself resolve the private names through it (see
+the node tunnel above).
 
 ### What you need
 

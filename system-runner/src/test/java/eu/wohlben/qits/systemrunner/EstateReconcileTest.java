@@ -807,6 +807,44 @@ class EstateReconcileTest {
     assertFalse(
         has(docker.calls(), List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
         docker.calls()::toString);
+    // qits-2090: the builder the CI lease started resolves through the tunnel too.
+    List<String> builder = runOf(BUILDER);
+    int network = builder.indexOf("--network");
+    assertEquals(
+        List.of("--network", BUILD_NET, "--dns", "100.96.0.1", "--dns", "192.168.188.1"),
+        builder.subList(network, network + 6),
+        builder::toString);
+  }
+
+  @Test
+  void withoutTheTunnelTheBuilderRunsWithoutResolvers() throws Exception {
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+    List<String> builder = runOf(BUILDER);
+    assertFalse(builder.contains("--dns"), builder::toString);
+  }
+
+  @Test
+  void theSuccessorStartsWithTheTunnelsResolversWhereItAnswers() throws Exception {
+    nodeTunnelUp();
+    start();
+
+    assertEquals(List.of("100.96.0.1", "192.168.188.1"), domain.successorDns());
+    int asked = tunnelAsked.size();
+    domain.successorDns();
+    assertEquals(asked + 1, tunnelAsked.size(), "asked afresh at each rollover");
+  }
+
+  @Test
+  void theSuccessorStartsWithoutResolversWhereTheTunnelIsSilent() throws Exception {
+    Files.writeString(resolvConf, "nameserver 192.168.188.1\n");
+    start();
+
+    assertEquals(List.of(), domain.successorDns());
   }
 
   @Test

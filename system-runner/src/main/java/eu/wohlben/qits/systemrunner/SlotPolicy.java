@@ -40,6 +40,10 @@ import java.util.Set;
  *
  *   (*) where the private edge is visible on the node's daemon, its VIP the first resolver
  *   (+) the edge's VIP first with (*); else 100.96.0.1 first where the node tunnel's DNS answers
+ *
+ *   Not a lease's, so not in the table: the builder a CI lease dials ({@link BuildPlane}) and the
+ *   runner's own successor ({@link SystemRunnerDomain#successorDns()}) get 100.96.0.1 first where
+ *   the node tunnel's DNS answers too (qits-2090), never the edge's VIP.
  * </pre>
  *
  * <p>A spec env key the policy owns ({@link #OWNED_ENV}) is refused, naming the key: {@code

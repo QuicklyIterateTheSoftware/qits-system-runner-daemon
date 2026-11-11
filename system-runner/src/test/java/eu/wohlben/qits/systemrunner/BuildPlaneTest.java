@@ -12,12 +12,18 @@ import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.RunnerSettings;
 import eu.wohlben.qits.runner.toolkit.health.RunnerHealthCheck;
 import eu.wohlben.qits.runner.toolkit.testing.FakeDocker;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -130,6 +136,125 @@ class BuildPlaneTest {
 
     docker.answer("network-connect", 1, "", "Error: No such container: x");
     assertTrue(plane.connect("qits-system-runner-lease-l1-r1").isPresent());
+  }
+
+  // --- the node tunnel's resolvers (qits-2090) ----------------------------------------------------
+
+  private static final List<String> TUNNEL = List.of("100.96.0.1", "192.168.188.1");
+
+  private BuildPlane planeWith(Supplier<List<String>> resolvers) {
+    return new BuildPlane(
+        IDENTITY,
+        TARGET,
+        new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+        BuildkitSettings.DEFAULTS,
+        1,
+        resolvers);
+  }
+
+  /** The stamp before qits-2090, restated: image, toml, bootstrap and state volume, nothing else. */
+  private static String stampBeforeTheTunnel(BuildPlane plane) throws Exception {
+    String material =
+        plane.image() + "\n" + plane.toml() + "\n" + BuildPlane.BOOTSTRAP + "\n" + STATE;
+    byte[] digest =
+        MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
+    return HexFormat.of().formatHex(digest).substring(0, 16);
+  }
+
+  private List<String> builderRun() {
+    return docker.calls("run").stream().filter(c -> c.contains(BUILDER)).findFirst().orElseThrow();
+  }
+
+  private void noBuilderYet() throws Exception {
+    docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+  }
+
+  @Test
+  void theTunnelsResolversAreOneDnsEachRightAfterTheNetworkAndMoveTheStamp() throws Exception {
+    AtomicInteger asked = new AtomicInteger();
+    BuildPlane tunnelled =
+        planeWith(
+            () -> {
+              asked.incrementAndGet();
+              return TUNNEL;
+            });
+    noBuilderYet();
+
+    assertEquals(Optional.empty(), tunnelled.ensure());
+
+    assertEquals(1, asked.get(), "decided once per ensure, for the stamp and the run alike");
+    String stamp = tunnelled.configuredStamp(TUNNEL);
+    List<String> expected = new ArrayList<>(tunnelled.runArgv(stamp));
+    int network = expected.indexOf("--network");
+    expected.addAll(network + 2, List.of("--dns", "100.96.0.1", "--dns", "192.168.188.1"));
+    assertEquals(expected, tunnelled.runArgv(stamp, TUNNEL));
+    List<String> run = builderRun();
+    int at = run.indexOf("--network");
+    assertEquals(
+        List.of("--network", NETWORK, "--dns", "100.96.0.1", "--dns", "192.168.188.1", "--label"),
+        run.subList(at, at + 7),
+        run::toString);
+    assertEquals(Map.of("qits.system.runner.buildkitd", stamp), docker.containers().get(BUILDER));
+    assertNotEquals(tunnelled.configuredStamp(List.of()), stamp, "the resolvers move the stamp");
+    assertNotEquals(stampBeforeTheTunnel(tunnelled), stamp);
+    assertNotEquals(
+        stamp,
+        tunnelled.configuredStamp(List.of("100.96.0.1", "1.1.1.1")),
+        "another upstream is another stamp");
+  }
+
+  @Test
+  void noResolversAreTodaysArgvAndTodaysStampByteForByte() throws Exception {
+    BuildPlane untunnelled = planeWith(List::of);
+    noBuilderYet();
+
+    assertEquals(Optional.empty(), untunnelled.ensure());
+
+    String stamp = untunnelled.configuredStamp(List.of());
+    assertEquals(stampBeforeTheTunnel(untunnelled), stamp);
+    assertEquals(stamp, untunnelled.configuredStamp());
+    assertEquals(plane.configuredStamp(), stamp, "the five-argument plane is the same builder");
+    assertEquals(untunnelled.runArgv(stamp), untunnelled.runArgv(stamp, List.of()));
+    List<String> run = builderRun();
+    assertFalse(run.contains("--dns"), run::toString);
+    int at = run.indexOf("--network");
+    assertEquals(List.of("--network", NETWORK, "--label"), run.subList(at, at + 3), run::toString);
+    assertEquals(Map.of("qits.system.runner.buildkitd", stamp), docker.containers().get(BUILDER));
+  }
+
+  @Test
+  void aThrowingOrNullSeamIsNoResolvers() throws Exception {
+    BuildPlane throwing =
+        planeWith(
+            () -> {
+              throw new IllegalStateException("boom");
+            });
+    assertEquals(List.of(), throwing.resolvers());
+    assertEquals(stampBeforeTheTunnel(throwing), throwing.configuredStamp());
+    assertEquals(List.of(), planeWith(() -> null).resolvers());
+  }
+
+  @Test
+  void theTunnelArrivingReplacesTheBuilderAsAnImageBumpDoes() throws Exception {
+    BuildPlane tunnelled = planeWith(() -> TUNNEL);
+    docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
+    docker.answerFor(
+        "inspect", BUILDER, 0, tunnelled.configuredStamp(List.of()) + "|running\n", "");
+    docker.volume(STATE, Map.of("qits.system.runner.buildkitd", "state"));
+
+    assertEquals(Optional.empty(), tunnelled.ensure());
+
+    assertTrue(has(List.of("rm", "-f", BUILDER)), docker.calls()::toString);
+    assertTrue(builderRun().contains("--dns"), docker.calls()::toString);
+    assertTrue(docker.volumes().containsKey(STATE), "the state volume rides across");
+  }
+
+  @Test
+  void theMirrorsMergeKeepsTheResolversSeam() {
+    BuildPlane merged = planeWith(() -> TUNNEL).withRegistryMirrors(Map.of("a.example", "m:5000"));
+    assertEquals(TUNNEL, merged.resolvers());
+    assertEquals(merged.configuredStamp(TUNNEL), merged.configuredStamp());
   }
 
   // --- toml and mirrors --------------------------------------------------------------------------

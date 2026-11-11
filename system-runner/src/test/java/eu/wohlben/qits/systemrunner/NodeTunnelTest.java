@@ -193,6 +193,68 @@ class NodeTunnelTest {
     assertSame(spec, throwing.apply(spec, LEASE));
   }
 
+  // ---- resolvers(): the same decision without a spec (qits-2090) ------------------------------
+
+  @Test
+  void resolversAreTheTunnelThenTheUpstreamsWhenTheProbeHearsAnAnswer() {
+    answers = true;
+
+    assertEquals(List.of("100.96.0.1", "192.168.188.1"), tunnel.resolvers());
+    assertEquals(
+        List.of(new Asked(new InetSocketAddress("100.96.0.1", 53), HOST, Duration.ofSeconds(1))),
+        asked,
+        "one probe per question, never cached");
+    tunnel.resolvers();
+    assertEquals(2, asked.size(), "asked afresh");
+  }
+
+  @Test
+  void resolversAreNoneWhenTheProbeHearsNothing() {
+    answers = false;
+
+    assertEquals(List.of(), tunnel.resolvers());
+    assertEquals(1, asked.size());
+  }
+
+  @Test
+  void resolversAreNoneWithoutAnUpstream() throws Exception {
+    answers = true;
+
+    Files.writeString(resolvConf, "nameserver 127.0.0.53\n");
+    assertEquals(List.of(), tunnel.resolvers(), "loopback only");
+
+    Files.writeString(resolvConf, "nameserver 100.96.0.1\n");
+    assertEquals(List.of(), tunnel.resolvers(), "only the tunnel itself");
+
+    Files.delete(resolvConf);
+    assertEquals(List.of(), tunnel.resolvers(), "no file to read");
+  }
+
+  @Test
+  void resolversAreNoneWhenTheProbeThrows() {
+    NodeTunnel throwing =
+        new NodeTunnel(
+            (server, name, timeout) -> {
+              throw new IllegalStateException("boom");
+            },
+            HOST,
+            resolvConf);
+
+    assertEquals(List.of(), throwing.resolvers());
+  }
+
+  @Test
+  void resolversStayTheSameOnceTheRunnersOwnResolvConfListsTheTunnelFirst() throws Exception {
+    answers = true;
+    List<String> before = tunnel.resolvers();
+    // The runner's successor started with --dns 100.96.0.1 --dns 192.168.188.1, on bridge.
+    Files.writeString(
+        resolvConf, "nameserver 100.96.0.1\nnameserver 192.168.188.1\nsearch fritz.box\n");
+
+    assertEquals(List.of("100.96.0.1", "192.168.188.1"), tunnel.resolvers());
+    assertEquals(before, tunnel.resolvers(), "no second 100.96.0.1, so no new builder stamp");
+  }
+
   @Test
   void theProbeNameIsTheServerUrlsHost() {
     assertEquals("system.qits.wohlben.eu", NodeTunnel.hostOf("https://system.qits.wohlben.eu"));

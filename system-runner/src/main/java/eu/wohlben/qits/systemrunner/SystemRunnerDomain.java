@@ -180,6 +180,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The build plane under the environment's settings alone: what every {@code Ack} merges over. */
   private final BuildPlane basePlane;
 
+  /**
+   * Whether the node tunnel answers, and its resolvers: a lease's at its create ({@link
+   * LeaseLauncher}), the builder's at each {@link BuildPlane#ensure} and the successor's at each
+   * rollover ({@link #successorDns()}) — always asked afresh (qits-2068, qits-2090).
+   */
+  private final NodeTunnel nodeTunnel;
+
   /** The build plane with the latest {@code Ack}'s registry mirrors merged in. */
   private volatile BuildPlane buildPlane;
 
@@ -384,7 +391,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.names = new TargetNames(identity, settings.runnerId());
     this.volumes = new TargetVolumes(identity, settings.runnerId(), external);
     this.containers = new LeaseContainers(identity, settings.runnerId(), docker);
-    this.basePlane = new BuildPlane(identity, settings.runnerId(), docker, buildkit, this.slots);
+    this.nodeTunnel = new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf);
+    this.basePlane =
+        new BuildPlane(
+            identity, settings.runnerId(), docker, buildkit, this.slots, nodeTunnel::resolvers);
     this.buildPlane = basePlane;
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
@@ -395,8 +405,6 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
     PrivateEdge privateEdge = new PrivateEdge(docker, resolvConf);
-    NodeTunnel nodeTunnel =
-        new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf);
     this.loginProbe =
         new LoginProbe(
             identity,
@@ -488,6 +496,22 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
                 task.run();
               }
             });
+  }
+
+  /**
+   * The resolvers the toolkit starts this runner's successor with, asked at each rollover on the
+   * self-update thread (qits-2090): the node tunnel's ({@link NodeTunnel#resolvers()}) where it
+   * answers, so the next runner reaches the private edge's names through the tunnel as its leases
+   * do; empty — the toolkit's default, no {@code --dns} — on the platform host and on a node
+   * without the tunnel. Never throws.
+   */
+  @Override
+  public List<String> successorDns() {
+    List<String> dns = nodeTunnel.resolvers();
+    if (!dns.isEmpty()) {
+      LOG.infof("system-runner starts its successor via the node tunnel, resolvers %s", dns);
+    }
+    return dns;
   }
 
   @Override

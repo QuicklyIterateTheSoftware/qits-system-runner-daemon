@@ -49,6 +49,15 @@ import org.jboss.logging.Logger;
  * node's choice is reported {@code resolversStale} — refreshed only by the owner, through the
  * lease's {@code LeaseEntry.generation}, never by the runner on its own. Never throws; neither the
  * environment nor anything else of the spec is logged.
+ *
+ * <p><b>Not only the leases</b> (qits-2090): {@link #resolvers()} answers the same list without a
+ * spec, for the runner's own successor ({@link SystemRunnerDomain#successorDns()}: one {@code
+ * --dns} each when the toolkit starts it at a rollover) and for the builder ({@link BuildPlane}:
+ * {@code --dns} on buildkitd, whose stamp then carries the list). The install script's first
+ * runner container has none until its first rollover. While the tunnel is down, those containers'
+ * lookups first wait out a timeout on {@value #DNS_ADDRESS} — about 5 s in the runner's Netty
+ * resolver, about 4 s in docker's embedded DNS on the build network — and then get the public
+ * answer.
  */
 final class NodeTunnel {
 
@@ -175,6 +184,36 @@ final class NodeTunnel {
     ContainerSpec resolved = PrivateEdge.with(spec, dns, spec.extraNetworks());
     LOG.debugf("system-runner puts %s on the node tunnel: resolvers %s", containerName, dns);
     return resolved;
+  }
+
+  /**
+   * The node tunnel's resolvers as of now: {@value #DNS_ADDRESS} followed by the runner's own
+   * upstreams — the lookup {@link #apply} makes, without a spec (qits-2090). {@code List.of()} when
+   * the probe hears nothing, when no upstream is left besides {@value #DNS_ADDRESS}, or on any
+   * {@link RuntimeException}. Asked for the runner's successor ({@link
+   * SystemRunnerDomain#successorDns()}) and the builder ({@link BuildPlane}), each time afresh. Once
+   * the runner itself runs with these resolvers its own resolv.conf lists {@value #DNS_ADDRESS}
+   * first; {@link PrivateEdge#upstreamsBesides} drops it, so the answer stays the same list. Never
+   * throws.
+   */
+  public List<String> resolvers() {
+    try {
+      Lookup lookup = lookup();
+      if (!lookup.answers()) {
+        LOG.debugf(
+            "system-runner runs its own containers off the node tunnel: %s does not answer",
+            DNS_ADDRESS);
+      } else if (lookup.dns().isEmpty()) {
+        LOG.warnf(
+            "system-runner runs its own containers off the node tunnel although %s answers: no"
+                + " upstream resolver in %s",
+            DNS_ADDRESS, resolvConf);
+      }
+      return lookup.dns();
+    } catch (RuntimeException e) {
+      LOG.warnf("system-runner runs its own containers off the node tunnel: %s", e.getMessage());
+      return List.of();
+    }
   }
 
   /**

@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 import org.jboss.logging.Logger;
 
 /**
@@ -40,8 +41,9 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Ownership is the stamp label</b> {@code qits.system.runner.buildkitd}: a container under the
  * builder's name without it is somebody else's and is refused, not touched. The stamp hashes the
- * image, the rendered toml and the bootstrap, so a bumped pin or a changed registry setting (the
- * environment's, or the {@code Ack}'s mirrors) replaces the container, and the state volume rides
+ * image, the rendered toml, the bootstrap and the resolvers when there are any, so a bumped pin, a
+ * changed registry setting (the environment's, or the {@code Ack}'s mirrors) or a changed resolver
+ * list replaces the container, and the state volume rides
  * across. The builder deliberately does not carry the owner label {@code qits.system.runner=<id>}:
  * the toolkit's reconcile removes every owner-labelled container that is not a held lease.
  *
@@ -51,6 +53,17 @@ import org.jboss.logging.Logger;
  * connect. So, as in the CI runner, the builder's argv is one fixed shape here ({@link #runArgv}),
  * run through {@link RunnerDocker} under its deadline; {@code --privileged} is never something a
  * spec can say.
+ *
+ * <p><b>Through the node tunnel where the node has one</b> (qits-2090): the {@code resolvers}
+ * seam — {@link NodeTunnel#resolvers()} in production — is asked once per {@link #ensure}, and a
+ * non-empty answer is one {@code --dns} each right after {@code --network} and part of the stamp.
+ * On the build network docker's embedded DNS ({@value #EXEC_NAMESERVER}, the toml's {@code [dns]})
+ * forwards to those servers, so buildkitd and every {@code RUN} resolve private names through the
+ * tunnel. An empty answer — the platform host, a node without the tunnel — adds nothing to either,
+ * so such a builder keeps the stamp it had before this seam. The tunnel coming or going changes the
+ * stamp, and the next CI lease replaces the builder as a bumped image does; while it is down with
+ * the builder still on its resolvers, a lookup first waits out about 4 s in docker's embedded DNS
+ * before the public answer.
  *
  * <p>Departure from the CI runner: no host CA bundle mount. This runner always runs in a container
  * and makes no host-path mount; the builder trusts the image's own bundle (what the CI runner did in
@@ -180,6 +193,7 @@ final class BuildPlane {
   private final List<String> registryMirrors;
   private final Names names;
   private final String toml;
+  private final Supplier<List<String>> resolvers;
 
   /**
    * The plane under the environment's settings alone. {@code slots} is the runner's own ({@code
@@ -192,7 +206,22 @@ final class BuildPlane {
       RunnerDocker docker,
       BuildkitSettings settings,
       int slots) {
-    this(identity, targetId, docker, settings, slots, settings.registryMirrors());
+    this(identity, targetId, docker, settings, slots, List::of);
+  }
+
+  /**
+   * The same, with the builder's resolvers: {@link NodeTunnel#resolvers()} in production, asked
+   * once per {@link #ensure} (and by {@link #configuredStamp()}); {@code List::of} is no {@code
+   * --dns}, the builder as before qits-2090.
+   */
+  BuildPlane(
+      RunnerIdentity identity,
+      String targetId,
+      RunnerDocker docker,
+      BuildkitSettings settings,
+      int slots,
+      Supplier<List<String>> resolvers) {
+    this(identity, targetId, docker, settings, slots, settings.registryMirrors(), resolvers);
   }
 
   private BuildPlane(
@@ -201,7 +230,9 @@ final class BuildPlane {
       RunnerDocker docker,
       BuildkitSettings settings,
       int slots,
-      List<String> registryMirrors) {
+      List<String> registryMirrors,
+      Supplier<List<String>> resolvers) {
+    this.resolvers = resolvers;
     this.identity = identity;
     this.targetId = targetId;
     this.docker = docker;
@@ -243,7 +274,7 @@ final class BuildPlane {
             LOG.warnf("system-runner ignored the Ack's registry mirror %s: not from=to", pair);
           }
         });
-    return new BuildPlane(identity, targetId, docker, settings, slots, merged);
+    return new BuildPlane(identity, targetId, docker, settings, slots, merged, resolvers);
   }
 
   /** buildkitd.toml: the worker table, the DNS override, then one merged table per registry host. */
@@ -306,10 +337,39 @@ final class BuildPlane {
     return identity.driverNamespace() + STAMP_LABEL_SUFFIX;
   }
 
-  /** The stamp {@link #ensure} starts the builder under now. */
+  /**
+   * The resolvers the builder is started with now: the seam's answer, empty when it throws or
+   * answers null. Asked once per {@link #ensure}.
+   */
+  List<String> resolvers() {
+    try {
+      List<String> answer = resolvers.get();
+      return answer == null ? List.of() : List.copyOf(answer);
+    } catch (RuntimeException e) {
+      LOG.warnf("system-runner starts its builder off the node tunnel: %s", e.getMessage());
+      return List.of();
+    }
+  }
+
+  /**
+   * The stamp {@link #ensure} starts the builder under now — the resolvers asked afresh, so the
+   * {@code buildkit} health check compares against what the next CI lease would start.
+   */
   String configuredStamp() {
+    return configuredStamp(resolvers());
+  }
+
+  /**
+   * The stamp over the image, the toml, the bootstrap, the state volume and — only when there are
+   * any — the resolvers: an empty list is the stamp from before qits-2090, byte for byte, so a
+   * builder without resolvers is not replaced by this change.
+   */
+  String configuredStamp(List<String> dns) {
     String material =
         settings.image() + "\n" + toml + "\n" + BOOTSTRAP + "\n" + names.stateVolume();
+    if (!dns.isEmpty()) {
+      material += "\n" + String.join(",", dns);
+    }
     try {
       byte[] digest =
           MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
@@ -361,7 +421,9 @@ final class BuildPlane {
     if (!volume.ok()) {
       return Optional.of("could not create " + names.stateVolume() + ": " + volume.detail());
     }
-    String stamp = configuredStamp();
+    // Decided once: the stamp and the run must name the same resolvers.
+    List<String> dns = resolvers();
+    String stamp = configuredStamp(dns);
     Builder builder = builder();
     switch (builder.presence()) {
       case UNKNOWN -> {
@@ -405,9 +467,12 @@ final class BuildPlane {
         return pulled;
       }
     }
-    RunnerDocker.Result started = docker.run(runArgv(stamp));
+    RunnerDocker.Result started = docker.run(runArgv(stamp, dns));
     if (!started.ok()) {
       return Optional.of("could not run the builder: " + started.detail());
+    }
+    if (!dns.isEmpty()) {
+      LOG.infof("system-runner starts its builder via the node tunnel, resolvers %s", dns);
     }
     LOG.infof("system-runner's builder %s is up on %s", names.builder(), image());
     return Optional.empty();
@@ -438,28 +503,36 @@ final class BuildPlane {
    * overlayfs for its sandboxes without {@code --privileged}, and no spec may ever say it.
    */
   List<String> runArgv(String stamp) {
-    return List.of(
-        docker.binary(),
-        "run",
-        "-d",
-        "--name",
-        names.builder(),
-        "--network",
-        names.network(),
-        "--label",
-        stampLabel() + "=" + stamp,
-        "--privileged",
-        "--restart",
-        "unless-stopped",
-        "-v",
-        names.stateVolume() + ":/var/lib/buildkit",
-        "-e",
-        "BUILDKITD_TOML=" + toml,
-        "--entrypoint",
-        "/bin/sh",
-        image(),
-        "-c",
-        BOOTSTRAP);
+    return runArgv(stamp, List.of());
+  }
+
+  /** The same, with one {@code --dns} per resolver right after {@code --network}. */
+  List<String> runArgv(String stamp, List<String> dns) {
+    List<String> argv = new ArrayList<>();
+    argv.addAll(
+        List.of(
+            docker.binary(), "run", "-d", "--name", names.builder(), "--network", names.network()));
+    for (String server : dns) {
+      argv.add("--dns");
+      argv.add(server);
+    }
+    argv.addAll(
+        List.of(
+            "--label",
+            stampLabel() + "=" + stamp,
+            "--privileged",
+            "--restart",
+            "unless-stopped",
+            "-v",
+            names.stateVolume() + ":/var/lib/buildkit",
+            "-e",
+            "BUILDKITD_TOML=" + toml,
+            "--entrypoint",
+            "/bin/sh",
+            image(),
+            "-c",
+            BOOTSTRAP));
+    return List.copyOf(argv);
   }
 
   /**
