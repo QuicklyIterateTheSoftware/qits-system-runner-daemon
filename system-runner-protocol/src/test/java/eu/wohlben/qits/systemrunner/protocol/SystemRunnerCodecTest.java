@@ -88,7 +88,9 @@ class SystemRunnerCodecTest {
                 workspace(),
                 endedDesk(),
                 new LeaseEntry(
-                    "l3", SlotType.CI, DesiredState.RUNNING, bareSpec(), "h", null, null)),
+                    "l3", SlotType.CI, DesiredState.RUNNING, bareSpec(), "h", null, null),
+                new LeaseEntry(
+                    "l4", SlotType.WORKSPACE, DesiredState.RUNNING, bareSpec(), "h", "ws-9", null, 3)),
             List.of("qits-system-runner-work-ws-9-1a2b3c4d"),
             List.of(WARM_TAG, WARM_DIGEST)),
         new Estate(List.of(), List.of()),
@@ -114,6 +116,23 @@ class SystemRunnerCodecTest {
             List.of(),
             new NodeMemory(292L, 297L, 32L << 30)),
         new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null)),
+        new Inventory(
+            List.of(
+                new LeaseReport(
+                    L1,
+                    LeaseState.RUNNING,
+                    "h",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    List.of("100.96.0.1", "192.168.188.1"),
+                    false),
+                new LeaseReport(
+                    L2, LeaseState.RUNNING, "h", null, null, 0L, null, null, null, List.of(), true)),
+            List.of()),
         new LoginState(
             LoginPresence.PRESENT,
             LoginPresence.ABSENT,
@@ -322,6 +341,89 @@ class SystemRunnerCodecTest {
         "{\"type\":\"inventory\",\"leases\":[],\"volumes\":[],"
             + "\"node\":{\"kernelOomKills\":297}}",
         new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null)));
+  }
+
+  @Test
+  void theResolversAndTheGenerationAreSpelledLastAndLeftOutAtTheirDefaults() {
+    assertJson(
+        "{\"type\":\"inventory\",\"leases\":["
+            + "{\"leaseId\":\"l1\",\"state\":\"RUNNING\",\"specHash\":\"h\",\"exitCode\":null,"
+            + "\"detail\":null,\"oomKills\":0,\"resolvers\":[\"100.96.0.1\",\"192.168.188.1\"]},"
+            + "{\"leaseId\":\"l2\",\"state\":\"RUNNING\",\"specHash\":\"h\",\"exitCode\":null,"
+            + "\"detail\":null,\"resolversStale\":true},"
+            + "{\"leaseId\":\"l3\",\"state\":\"RUNNING\",\"specHash\":\"h\",\"exitCode\":null,"
+            + "\"detail\":null}],"
+            + "\"volumes\":[]}",
+        new Inventory(
+            List.of(
+                new LeaseReport(
+                    "l1",
+                    LeaseState.RUNNING,
+                    "h",
+                    null,
+                    null,
+                    0L,
+                    null,
+                    null,
+                    null,
+                    List.of("100.96.0.1", "192.168.188.1"),
+                    false),
+                new LeaseReport(
+                    "l2", LeaseState.RUNNING, "h", null, null, null, null, null, null, null, true),
+                new LeaseReport("l3", LeaseState.RUNNING, "h", null, null)),
+            List.of()));
+    assertJson(
+        "{\"type\":\"estate\",\"leases\":["
+            + "{\"leaseId\":\"l1\",\"slotType\":\"DESK\",\"desired\":\"ENDED\",\"spec\":null,"
+            + "\"specHash\":null,\"workVolume\":\"desk-7\",\"adopt\":null,\"generation\":2},"
+            + "{\"leaseId\":\"l2\",\"slotType\":\"DESK\",\"desired\":\"ENDED\",\"spec\":null,"
+            + "\"specHash\":null,\"workVolume\":\"desk-7\",\"adopt\":null}],"
+            + "\"purges\":[],\"warmImages\":[]}",
+        new Estate(
+            List.of(
+                new LeaseEntry("l1", SlotType.DESK, DesiredState.ENDED, null, null, "desk-7", null, 2),
+                new LeaseEntry("l2", SlotType.DESK, DesiredState.ENDED, null, null, "desk-7", null)),
+            List.of()));
+  }
+
+  @Test
+  void framesWithoutTheResolversOrTheGenerationReadAsTheDefaults() {
+    Map<String, Object> lease = new LinkedHashMap<>();
+    lease.put("leaseId", L1);
+    lease.put("state", "RUNNING");
+    lease.put("specHash", "h");
+    Map<String, Object> inventory = new LinkedHashMap<>();
+    inventory.put("type", "inventory");
+    inventory.put("leases", List.of(lease));
+    inventory.put("volumes", List.of());
+    LeaseReport report = ((Inventory) CODEC.decode(inventory)).leases().getFirst();
+    assertEquals(List.of(), report.resolvers());
+    assertEquals(false, report.resolversStale());
+    lease.put("resolvers", null);
+    lease.put("resolversStale", null);
+    report = ((Inventory) CODEC.decode(inventory)).leases().getFirst();
+    assertEquals(List.of(), report.resolvers());
+    assertEquals(false, report.resolversStale());
+
+    Estate estate =
+        (Estate) CODEC.decode(estateOf(Map.of("leaseId", L2, "slotType", "DESK", "desired", "ENDED")));
+    assertEquals(0, estate.leases().getFirst().generation());
+    // Either box for a number, as for every other one.
+    estate =
+        (Estate)
+            CODEC.decode(
+                estateOf(
+                    Map.of("leaseId", L2, "slotType", "DESK", "desired", "ENDED", "generation", 4)));
+    assertEquals(4, estate.leases().getFirst().generation());
+  }
+
+  @Test
+  void aNegativeGenerationIsMalformedAndRefusedByTheRecord() {
+    assertMalformed(
+        estateOf(Map.of("leaseId", L2, "slotType", "DESK", "desired", "ENDED", "generation", -1)));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new LeaseEntry(L2, SlotType.DESK, DesiredState.ENDED, null, null, null, null, -1));
   }
 
   @Test

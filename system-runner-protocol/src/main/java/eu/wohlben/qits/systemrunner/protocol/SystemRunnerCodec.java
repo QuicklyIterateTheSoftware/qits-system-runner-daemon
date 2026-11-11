@@ -39,7 +39,10 @@ import java.util.UUID;
  * (qits-1818: a lease report's {@code oomKills}, {@code oomEvents}, {@code memoryPeakBytes} and
  * {@code oomKilled}, the frame's {@code node} and the fields inside it), which are left out when
  * null, so an inventory without them is the same document it was before they existed. Absent reads
- * as null. {@code healthCheck} and {@code healthChecked} are
+ * as null. The same for qits-2091's three: a lease entry's {@code generation} is left out when
+ * {@code 0}, a lease report's {@code resolvers} when empty and {@code resolversStale} when false,
+ * and absent reads as those defaults — so neither frame changes for a lease the fields say nothing
+ * about, and a peer before them reads the frame as it always did. {@code healthCheck} and {@code healthChecked} are
  * {@link HealthWire}'s, every runner kind's.
  */
 public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage> {
@@ -108,6 +111,12 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
           putPresent(lease, Field.OOM_EVENTS, report.oomEvents());
           putPresent(lease, Field.MEMORY_PEAK_BYTES, report.memoryPeakBytes());
           putPresent(lease, Field.OOM_KILLED, report.oomKilled());
+          if (!report.resolvers().isEmpty()) {
+            lease.put(Field.RESOLVERS, new ArrayList<>(report.resolvers()));
+          }
+          if (report.resolversStale()) {
+            lease.put(Field.RESOLVERS_STALE, true);
+          }
           leases.add(lease);
         }
         map.put(Field.LEASES, leases);
@@ -221,6 +230,9 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
       adopt.put(Field.VOLUME, e.adopt().volume());
       map.put(Field.ADOPT, adopt);
     }
+    if (e.generation() != 0) {
+      map.put(Field.GENERATION, e.generation());
+    }
     return map;
   }
 
@@ -245,8 +257,17 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
         adoptMap == null
             ? null
             : new Adopt(WireMaps.str(adoptMap, Field.CONTAINER), WireMaps.str(adoptMap, Field.VOLUME));
+    // A negative one is the record's refusal, so the frame is MALFORMED like any other.
+    Long generation = longValue(map, Field.GENERATION);
     return new LeaseEntry(
-        leaseId, slotType, desired, spec, specHash, WireMaps.str(map, Field.WORK_VOLUME), adopt);
+        leaseId,
+        slotType,
+        desired,
+        spec,
+        specHash,
+        WireMaps.str(map, Field.WORK_VOLUME),
+        adopt,
+        generation == null ? 0 : generation);
   }
 
   private static List<LeaseEntry> entries(Map<String, Object> map) {
@@ -271,7 +292,9 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
               longValue(lease, Field.OOM_KILLS),
               longValue(lease, Field.OOM_EVENTS),
               longValue(lease, Field.MEMORY_PEAK_BYTES),
-              bool(lease, Field.OOM_KILLED)));
+              bool(lease, Field.OOM_KILLED),
+              WireMaps.stringList(lease, Field.RESOLVERS),
+              WireMaps.boolVal(lease, Field.RESOLVERS_STALE)));
     }
     return reports;
   }

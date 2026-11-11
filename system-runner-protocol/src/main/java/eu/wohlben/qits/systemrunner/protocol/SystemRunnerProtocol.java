@@ -151,6 +151,8 @@ public final class SystemRunnerProtocol {
     public static final String SPEC_HASH = "specHash";
     public static final String WORK_VOLUME = "workVolume";
     public static final String ADOPT = "adopt";
+    // a lease entry, qits-2091: left out when 0
+    public static final String GENERATION = "generation";
     // adopt
     public static final String CONTAINER = "container";
     public static final String VOLUME = "volume";
@@ -178,6 +180,9 @@ public final class SystemRunnerProtocol {
     public static final String NODE_OOM_KILLS = "nodeOomKills";
     public static final String KERNEL_OOM_KILLS = "kernelOomKills";
     public static final String MEMORY_MAX_BYTES = "memoryMaxBytes";
+    // inventory, qits-2091: a lease report's resolvers — left out when empty, and false
+    public static final String RESOLVERS = "resolvers";
+    public static final String RESOLVERS_STALE = "resolversStale";
     // loginState (VOLUME above)
     public static final String CLAUDE = "claude";
     public static final String KIMI = "kimi";

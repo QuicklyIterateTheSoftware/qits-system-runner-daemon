@@ -15,6 +15,11 @@ package eu.wohlben.qits.systemrunner.protocol;
  *     qits-system-runner-work-<workKey>-<id8>}; never a volume name, so no frame can point the
  *     runner at a volume it does not own. Null for a type without one (CI)
  * @param adopt the retired runner's container and volume to take over, or null
+ * @param generation the owner's refresh counter (qits-2091): the runner labels the container with
+ *     it and recreates the container — keeping its volume — when an entry carries a different one,
+ *     so a lease is made to pick up what the runner decides only at create (its resolvers) without
+ *     a spec change. {@code 0} is none, and a container without the label reads as {@code 0}, so
+ *     nothing is recreated until the owner raises it; never negative
  */
 public record LeaseEntry(
     String leaseId,
@@ -23,7 +28,8 @@ public record LeaseEntry(
     LeaseSpec spec,
     String specHash,
     String workVolume,
-    Adopt adopt) {
+    Adopt adopt,
+    long generation) {
 
   public LeaseEntry {
     if (leaseId == null || leaseId.isBlank()) {
@@ -43,5 +49,20 @@ public record LeaseEntry(
         throw new IllegalArgumentException("a running lease entry has no spec hash");
       }
     }
+    if (generation < 0) {
+      throw new IllegalArgumentException("a lease entry's generation is negative: " + generation);
+    }
+  }
+
+  /** An entry without a generation: the shape before qits-2091, generation {@code 0}. */
+  public LeaseEntry(
+      String leaseId,
+      SlotType slotType,
+      DesiredState desired,
+      LeaseSpec spec,
+      String specHash,
+      String workVolume,
+      Adopt adopt) {
+    this(leaseId, slotType, desired, spec, specHash, workVolume, adopt, 0);
   }
 }
