@@ -42,13 +42,21 @@ import org.jboss.logging.Logger;
  *   <li><b>ENDED</b> → {@code stop}, {@code rm}; the work volume stays until a purge names it.
  * </ul>
  *
+ * <p><b>Every lease runs on {@code bridge}</b>, and — where the private edge is visible on the
+ * node's daemon — also on {@code qits-private} with the edge's VIP as its first resolver ({@link
+ * PrivateEdge}, qits-2062): asked just before each {@code run}, joined by the driver right after
+ * it ({@code ContainerSpec.extraNetworks}, {@code --dns}). A join that fails removes the container
+ * and fails the lease. Off the platform host there is no overlay and the lease runs on {@code
+ * bridge} with the node's resolvers, exactly as before. Neither is hashed: a running lease is not
+ * recreated when the edge arrives or moves.
+ *
  * <p><b>A CI lease</b> starts the target's {@link BuildPlane} first (on the first one, and
- * re-checked on every later one), makes the CI caches labelled, runs on {@code bridge} with {@code
- * BUILDKIT_HOST} injected, and is then joined to the build network with a {@code docker network
- * connect}: the driver's {@code ContainerSpec} carries one network (qits-1302's {@code
- * extraNetworks} was never built). A connect that fails removes the container again and fails the
- * lease, so a CI container never runs without its builder. It mounts no external node volume, so
- * none is asked after.
+ * re-checked on every later one), makes the CI caches labelled, runs with {@code BUILDKIT_HOST}
+ * injected, and is then joined to the build network with a {@code docker network connect} of the
+ * runner's own ({@link BuildPlane#connect}) — the build network is the runner's, created and
+ * checked by it, so its membership stays beside it. A connect that fails removes the container
+ * again and fails the lease, so a CI container never runs without its builder. It mounts no
+ * external node volume, so none is asked after.
  *
  * <p>The hash is the server's, carried on the frame and written to the label as is: the runner
  * never computes one, so the two can never disagree about a canonical form.
@@ -96,6 +104,7 @@ final class LeaseLauncher {
   private final LeaseContainers containers;
   private final Supplier<BuildPlane> buildPlane;
   private final ImagePulls pulls;
+  private final PrivateEdge privateEdge;
 
   LeaseLauncher(
       RunnerIdentity identity,
@@ -104,7 +113,8 @@ final class LeaseLauncher {
       TargetVolumes volumes,
       LeaseContainers containers,
       Supplier<BuildPlane> buildPlane,
-      ImagePulls pulls) {
+      ImagePulls pulls,
+      PrivateEdge privateEdge) {
     this.identity = identity;
     this.docker = docker;
     this.names = names;
@@ -112,6 +122,7 @@ final class LeaseLauncher {
     this.containers = containers;
     this.buildPlane = buildPlane;
     this.pulls = pulls;
+    this.privateEdge = privateEdge;
   }
 
   /**
@@ -349,10 +360,21 @@ final class LeaseLauncher {
     labels.put(LeaseContainers.slotTypeLabel(identity), entry.slotType().name());
     labels.put(LeaseContainers.specHashLabel(identity), entry.specHash());
     labels.put(LeaseContainers.mountsLabel(identity), mounts);
-    ContainersDriver.Started started =
-        driver.run(container, name, labels, policy.lifecycle(), deadline);
+    // Asked at every create and never hashed: the labels above are the server's spec and the
+    // runner's mounts, so a lease is not recreated when the edge's VIP moves (qits-2062).
+    ContainerSpec run = privateEdge.apply(container, name);
+    boolean onEdge = run.extraNetworks().contains(PrivateEdge.NETWORK);
+    ContainersDriver.Started started = driver.run(run, name, labels, policy.lifecycle(), deadline);
     if (!started.started()) {
-      return failed(leaseId, "docker could not run " + name + ": " + brief(started.detail()));
+      // The driver joins qits-private after the run and removes the container when that fails,
+      // answering the join's words as the run's.
+      return failed(
+          leaseId,
+          "docker could not run "
+              + name
+              + (onEdge ? " and join it to " + PrivateEdge.NETWORK : "")
+              + ": "
+              + brief(started.detail()));
     }
     if (plane != null) {
       Optional<String> joined = plane.connect(name);
@@ -361,7 +383,12 @@ final class LeaseLauncher {
         return failed(leaseId, brief(joined.get()));
       }
     }
-    LOG.infof("system-runner runs %s lease %s as %s", entry.slotType(), leaseId, name);
+    LOG.infof(
+        "system-runner runs %s lease %s as %s%s",
+        entry.slotType(),
+        leaseId,
+        name,
+        run.dns().isEmpty() ? "" : " on " + PrivateEdge.NETWORK + ", resolvers " + run.dns());
     return Outcome.of(LeaseState.RUNNING);
   }
 

@@ -39,6 +39,7 @@ import eu.wohlben.qits.systemrunner.protocol.SystemRunnerAck;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCapabilities;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerCodec;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerMessage;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -298,7 +299,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
         SignInProcesses.FORKED);
   }
 
-  /** Every seam: the root every other constructor ends in. */
+  /** The same, with the runner's own resolv.conf, which {@link PrivateEdge} reads. */
   SystemRunnerDomain(
       RunnerSettings settings,
       ExternalVolumes external,
@@ -307,6 +308,24 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       Timing timing,
       Clock clock,
       SignInProcesses processes) {
+    this(
+        settings, external, buildkit, cgroups, timing, clock, processes, PrivateEdge.RESOLV_CONF);
+  }
+
+  /**
+   * Every seam: the root every other constructor ends in. {@code resolvConf} is where {@link
+   * PrivateEdge} reads the upstream resolvers a lease on the private edge gets after its VIP —
+   * another path for the suite only.
+   */
+  SystemRunnerDomain(
+      RunnerSettings settings,
+      ExternalVolumes external,
+      BuildkitSettings buildkit,
+      CgroupSettings cgroups,
+      Timing timing,
+      Clock clock,
+      SignInProcesses processes,
+      Path resolvConf) {
     this.memory = new MemorySampler(cgroups);
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
@@ -325,7 +344,15 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
     this.launcher =
-        new LeaseLauncher(identity, docker, names, volumes, containers, () -> buildPlane, pulls);
+        new LeaseLauncher(
+            identity,
+            docker,
+            names,
+            volumes,
+            containers,
+            () -> buildPlane,
+            pulls,
+            new PrivateEdge(docker, resolvConf));
     this.loginProbe =
         new LoginProbe(
             identity,

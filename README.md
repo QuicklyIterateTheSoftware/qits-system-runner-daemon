@@ -104,18 +104,31 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | `/claude-home` | never | credential volume, rw | credential volume, rw |
 | `/workspace` | container filesystem | work volume | work volume |
 | caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
-| networks | `bridge` + the build network | `bridge` | `bridge` |
+| networks | `bridge` + the build network, + `qits-private` where the private edge is visible | `bridge`, + `qits-private` where the private edge is visible | as WORKSPACE |
+| resolvers | the node's; the private edge's VIP first where it is visible | as CI | as CI |
 | `BUILDKIT_HOST` | injected | never | never |
 | cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no |
 | `--init` | yes | no | yes |
 | restart | no | no | unless-stopped |
 | on ENDED | container removed | container removed, work volume kept | as WORKSPACE |
 
+Every lease runs on `bridge`. Where the private edge is visible on the node's own docker daemon —
+the `qits-private` overlay exists, exactly one swarm service carries
+`qits.platform.deployments.app-name=qits-edge-private` with a VIP on it, and the runner's
+`/etc/resolv.conf` names at least one non-loopback upstream (its `# ExtServers:` line, else its
+`nameserver` lines) — the lease also joins `qits-private` and gets `--dns <vip>` followed by those
+upstreams, so private names resolve to the private edge and every other name still resolves
+(qits-2062, `PrivateEdge`; the same questions qits-containers' `PrivateEdgeResolver` asks). It is
+all or nothing: any piece missing, or docker not answering, runs the lease exactly as before with
+one log line — DEBUG off the platform host, where there is no overlay, WARN on it. It is asked at
+every create and never hashed into the spec-hash or mounts label, so a running lease is not
+recreated when the edge arrives or its VIP moves. The driver joins `qits-private` right after the
+run and removes the container when that join fails, which fails the lease.
+
 A CI lease gets `BUILDKIT_HOST=tcp://qits-system-runner-buildkitd-<id8>:1234`, mounts the CI caches
-and nothing else — **never the credential volume, the agent caches or a work volume** — and is run
-on `bridge`, then joined to the build network with `docker network connect` (the driver's
-`ContainerSpec` carries one network); a connect that fails removes the container again and fails
-the lease. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
+and nothing else — **never the credential volume, the agent caches or a work volume** — and is then
+joined to the build network with the runner's own `docker network connect` (`BuildPlane.connect`);
+a connect that fails removes the container again and fails the lease. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
 from the policy; a spec env key the policy owns — `BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR` — is
 `FAILED` with a detail naming it. A WORKSPACE lease's work key is `ws-<rowId>`, a DESK lease's
 `desk-<deskId>`.

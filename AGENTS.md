@@ -40,9 +40,14 @@ mount, a network, a capability, `--init` or a restart. A change to what a slot t
 change to that table, reviewed as one, with the test cell beside it.
 
 - **CI never mounts the credential volume, the agent caches or a work volume**, and WORKSPACE and
-  DESK never a CI cache or `BUILDKIT_HOST`; `SlotPolicyTest` holds both. A CI lease's second
-  network is a `docker network connect` after the driver's run (`BuildPlane.connect`), because
-  `ContainerSpec` carries one network; a failed connect removes the container again.
+  DESK never a CI cache or `BUILDKIT_HOST`; `SlotPolicyTest` holds both. A CI lease's build
+  network is a `docker network connect` of the runner's own after the driver's run
+  (`BuildPlane.connect`); a failed connect removes the container again.
+- **Every lease joins `qits-private` with the private edge's VIP as first resolver where the edge
+  is visible on the node's daemon** (`PrivateEdge`, qits-2062), applied to the policy's spec just
+  before the run and never part of the spec-hash or mounts label — a moved VIP or a new rollout
+  never recreates a running lease. All or nothing, read-only, never throws; off the platform host it
+  adds nothing. The driver does the join (`ContainerSpec.extraNetworks`) and `--dns`.
 - **The build plane is the target's own** (`BuildPlane`): every name derived, none configurable,
   never `qits-buildkitd` / `qits-buildkitd-state` (`BuildPlaneNamesTest`). The builder carries the
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled

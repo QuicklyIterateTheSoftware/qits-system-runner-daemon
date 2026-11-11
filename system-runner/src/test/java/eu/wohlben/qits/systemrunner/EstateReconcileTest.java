@@ -142,6 +142,9 @@ class EstateReconcileTest {
   @TempDir Path state;
   @TempDir Path dockerDir;
 
+  /** The runner's own resolv.conf as {@link PrivateEdge} reads it; written where a test needs it. */
+  private Path resolvConf;
+
   @BeforeEach
   void setUp() throws Exception {
     host = new FakeRunnerHost(vertx, IDENTITY, CODEC);
@@ -150,6 +153,7 @@ class EstateReconcileTest {
     docker.answerFor("run", LoginProbe.KIMI_CHECK, 0, "", "");
     docker.answer("info", 0, "ENGINE-ID-1|node-1\n", "");
     cgroups = new CgroupSettings(dockerDir.resolve("no-cgroup"), dockerDir.resolve("no-vmstat"));
+    resolvConf = dockerDir.resolve("resolv.conf");
   }
 
   @AfterEach
@@ -242,6 +246,10 @@ class EstateReconcileTest {
             WS_IMAGE),
         run,
         "the bridge, no extra host, no docker socket, --init (qits-1598), no restart, no sandbox flags");
+    assertTrue(docker.calls("service").isEmpty(), "no qits-private here: no edge asked after");
+    assertFalse(
+        has(docker.calls(), List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
+        "and never joined to it");
     List<List<String>> calls = docker.calls();
     List<String> pull =
         calls.stream()
@@ -606,6 +614,119 @@ class EstateReconcileTest {
     assertEquals(LeaseState.RUNNING, report(inventory, L1).state());
     awaitTrue(() -> runner.session().held().equals(List.of(L1)));
     assertEquals(1, runsOf(lease(L1)).size(), "the same spec and mounts: left alone");
+  }
+
+  // ---- the private edge (qits-2062) -------------------------------------------------------------
+
+  private static final String EDGE_NET_ID = "0a1b2c3d4e5f";
+  private static final String EDGE_SERVICE = "svc9edge";
+
+  /** The platform host as the runner's own daemon answers it: the overlay, the edge, its VIP. */
+  private void privateEdgeVisible() throws Exception {
+    docker.answerFor("network-inspect", PrivateEdge.NETWORK, 0, EDGE_NET_ID + "\n", "");
+    docker.answerFor(
+        "service",
+        "label=" + PrivateEdge.APP_NAME_LABEL + "=" + PrivateEdge.APPLICATION,
+        0,
+        EDGE_SERVICE + "\n",
+        "");
+    docker.answerFor(
+        "service",
+        EDGE_SERVICE,
+        0,
+        "ingress00 10.0.0.7/24\n" + EDGE_NET_ID + " 10.231.0.2/16\n",
+        "");
+    Files.writeString(
+        resolvConf,
+        "nameserver 127.0.0.11\n# ExtServers: [host(192.168.188.1) 1.1.1.1]\n# Overrides: []\n");
+  }
+
+  @Test
+  void whereThePrivateEdgeIsVisibleAWorkspaceLeaseRunsWithItsVipFirstAndJoinsQitsPrivateAfter()
+      throws Exception {
+    privateEdgeVisible();
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitCall(calls -> has(calls, List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))));
+    List<String> run = runOf(lease(L1));
+    int dns = run.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "10.231.0.2", "--dns", "192.168.188.1", "--dns", "1.1.1.1"),
+        run.subList(dns, dns + 6),
+        run::toString);
+    assertEquals("bridge", run.get(run.indexOf("--network") + 1), "bridge stays the run's network");
+    List<List<String>> calls = docker.calls();
+    assertTrue(
+        calls.indexOf(run)
+            < calls.indexOf(List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
+        "joined after the run: " + calls);
+    assertTrue(
+        run.contains("qits.system.runner.spec-hash=" + H1)
+            && run.contains("qits.system.runner.mounts=" + mounts(work("ws-42"))),
+        "the labels are the server's hash and the mounts, never the edge: " + run);
+  }
+
+  @Test
+  void whereThePrivateEdgeIsVisibleACiLeaseJoinsQitsPrivateThenItsBuildNetwork() throws Exception {
+    privateEdgeVisible();
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+    List<String> run = runOf(lease(L1));
+    int dns = run.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "10.231.0.2", "--dns", "192.168.188.1", "--dns", "1.1.1.1"),
+        run.subList(dns, dns + 6),
+        run::toString);
+    List<List<String>> calls = docker.calls();
+    int edge = calls.indexOf(List.of("network", "connect", PrivateEdge.NETWORK, lease(L1)));
+    int build = calls.indexOf(List.of("network", "connect", BUILD_NET, lease(L1)));
+    assertTrue(calls.indexOf(run) < edge && edge < build, "run, qits-private, build: " + calls);
+  }
+
+  @Test
+  void aFailedJoinToQitsPrivateRemovesTheContainerAndFailsTheLeaseSayingSo() throws Exception {
+    privateEdgeVisible();
+    docker.answerFor(
+        "network-connect",
+        lease(L1),
+        1,
+        "",
+        "Error response from daemon: network qits-private not found");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    String detail = report(inventory, L1).detail();
+    assertTrue(detail.contains("and join it to qits-private"), detail);
+    assertTrue(detail.contains("network qits-private not found"), detail);
+    List<List<String>> calls = docker.calls();
+    int join = calls.indexOf(List.of("network", "connect", PrivateEdge.NETWORK, lease(L1)));
+    assertTrue(
+        join >= 0
+            && calls.subList(join, calls.size()).stream()
+                .anyMatch(c -> c.getFirst().equals("rm") && c.contains(lease(L1))),
+        "the half-joined container is removed: " + calls);
+  }
+
+  @Test
+  void anOverlayWithoutTheEdgesServiceRunsTheLeaseExactlyAsWithoutIt() throws Exception {
+    docker.answerFor("network-inspect", PrivateEdge.NETWORK, 0, EDGE_NET_ID + "\n", "");
+    Files.writeString(resolvConf, "nameserver 192.168.188.1\n");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<String> run = runOf(lease(L1));
+    assertFalse(run.contains("--dns"), run::toString);
+    assertFalse(
+        has(docker.calls(), List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
+        docker.calls()::toString);
   }
 
   @Test
@@ -1097,7 +1218,8 @@ class EstateReconcileTest {
             new SystemRunnerDomain.Timing(
                 Duration.ofMillis(200), Duration.ofSeconds(60), Duration.ofSeconds(60)),
             Clock.systemUTC(),
-            SignInProcesses.FORKED);
+            SignInProcesses.FORKED,
+            resolvConf);
     runner =
         new RunnerRuntime<>(
             vertx,

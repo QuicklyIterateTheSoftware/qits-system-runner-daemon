@@ -28,12 +28,15 @@ import java.util.Set;
  *   caches            ci-git, ci-m2, ci-pnpm,         m2, pnpm                 m2, pnpm
  *                     ci-daemon
  *   networks          bridge + the build network      bridge                   bridge
+ *                     + qits-private (*)              + qits-private (*)       + qits-private (*)
  *   BUILDKIT_HOST     injected                        never                    never
  *   QITS_CI_BUILDER_SLOTS injected                    never                    never
  *   cap-drop / nnp    yes / yes                       no / no                  no / no
  *   --init            yes                             yes                      yes
  *   restart           no                              no                       unless-stopped
  *   on ENDED          container removed               container removed, work volume kept
+ *
+ *   (*) where the private edge is visible on the node's daemon, its VIP the first resolver
  * </pre>
  *
  * <p>A spec env key the policy owns ({@link #OWNED_ENV}) is refused, naming the key: {@code
@@ -45,6 +48,12 @@ import java.util.Set;
  * builds queue at before they reach the shared builder — {@code
  * …_BUILDER_CONCURRENT_BUILDS} ({@link BuildkitSettings}), {@code 1} when unset — never buildkitd's
  * own {@code max-parallelism} (qits-1807).
+ *
+ * <p>The {@code qits-private} membership and its resolvers (*) are not this table's to decide:
+ * they are a fact of the node's docker daemon, not of the slot type, so {@link PrivateEdge} adds
+ * them to the spec this table built, just before the run, wherever the private edge is visible on
+ * that daemon (qits-2062) — and off the platform host, nothing. {@link #containerSpec} itself
+ * never sets either, and neither enters the spec-hash or mounts label.
  *
  * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
  * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent
@@ -272,9 +281,11 @@ enum SlotPolicy {
 
   /**
    * The driver's spec of a lease container under this policy. Only for an entry {@link #refusal}
-   * passed. The spec's network is {@code bridge} for every type; a CI lease's second network, the
-   * build network, is {@link #networks}' and joined after the run ({@link BuildPlane#connect}),
-   * because the driver's {@code ContainerSpec} carries one network.
+   * passed. The spec's network is {@code bridge} for every type, with no extra network and no
+   * resolver: a CI lease's build network is {@link #networks}' and joined after the run by the
+   * runner's own connect ({@link BuildPlane#connect}), and {@code qits-private} with the edge's VIP
+   * as first resolver is {@link PrivateEdge}'s, added to this spec just before the run where the
+   * node's daemon has the private edge (qits-2062).
    *
    * @throws IllegalStateException for a policy this runner version does not run, or a CI lease
    *     without its build plane
@@ -341,8 +352,9 @@ enum SlotPolicy {
   }
 
   /**
-   * The networks a lease of this type is on: {@code bridge} — the spec's, at {@code docker run} —
-   * and for CI the build network after it.
+   * The networks this policy puts a lease of this type on: {@code bridge} — the spec's, at {@code
+   * docker run} — and for CI the build network after it. {@code qits-private}, where the node has
+   * the private edge, is {@link PrivateEdge}'s and not listed here.
    */
   List<String> networks(Build build) {
     if (!buildNetwork) {
