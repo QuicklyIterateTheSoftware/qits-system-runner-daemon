@@ -58,7 +58,9 @@ import java.util.Set;
  * that daemon (qits-2062) — and off the platform host, nothing; there {@link NodeTunnel} puts the
  * node tunnel's {@code 100.96.0.1} first among the resolvers where it answers (qits-2068), on
  * {@code bridge} alone. {@link #containerSpec} itself never sets either, and neither enters the
- * spec-hash or mounts label.
+ * spec-hash or mounts label, still: each lease's resolvers are reported, with whether they are
+ * stale against what the node offers now, and refreshed only by the owner through the lease's
+ * generation (qits-2091).
  *
  * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
  * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent

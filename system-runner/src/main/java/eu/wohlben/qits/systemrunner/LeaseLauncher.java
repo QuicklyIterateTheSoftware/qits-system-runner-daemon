@@ -34,12 +34,17 @@ import org.jboss.logging.Logger;
  *       adopted volume asked after — or the work volume and the runner's own node volumes made
  *       labelled — then, for a WORKSPACE or DESK lease, Claude Code's first-run keys made sure of
  *       on the credential volume ({@link ClaudeFirstRun}), then {@code run};
- *   <li><b>RUNNING</b>, a container whose {@code spec-hash} and {@code mounts} labels are the
- *       entry's → nothing: {@code RUNNING}, {@code STARTING} while docker has it {@code created},
- *       or {@code EXITED} with its exit code — an exited lease is the owner's to end, never the
- *       runner's to restart (its token may already be gone);
- *   <li><b>RUNNING</b>, a container of another hash → {@code stop}, {@code rm} the container —
- *       <b>never its volume</b>, which holds the work — then {@code run} the new spec;
+ *   <li><b>RUNNING</b>, a container whose {@code spec-hash}, {@code mounts} and {@code generation}
+ *       labels are the entry's — an absent generation label is {@code 0}, an entry's absent
+ *       generation too, so a container from before qits-2091 matches — → nothing: {@code
+ *       RUNNING}, {@code STARTING} while docker has it {@code created}, or {@code EXITED} with its
+ *       exit code — an exited lease is the owner's to end, never the runner's to restart (its
+ *       token may already be gone);
+ *   <li><b>RUNNING</b>, a container of another hash, other volumes or another generation → {@code
+ *       stop}, {@code rm} the container — <b>never its volume</b>, which holds the work — then
+ *       {@code run} the new spec, asking {@link PrivateEdge} and {@link NodeTunnel} again. Another
+ *       generation is the owner's refresh (qits-2091): nothing of the spec changed, the lease is
+ *       recreated to pick up the resolvers the node offers now;
  *   <li><b>ENDED</b> → {@code stop}, {@code rm}; the work volume stays until a purge names it.
  * </ul>
  *
@@ -51,8 +56,11 @@ import org.jboss.logging.Logger;
  * bridge} with the node's resolvers — unless the node runs the node tunnel: where the tunnel's
  * DNS at {@code 100.96.0.1} answers, the lease stays on {@code bridge} alone and gets that address
  * as its first resolver, followed by the runner's own ({@link NodeTunnel}, qits-2068), so private
- * names resolve through the tunnel. Nothing of either is hashed: a running lease is not recreated
- * when the edge arrives or moves, or the tunnel comes or goes.
+ * names resolve through the tunnel. Nothing of either is hashed, still: the runner does not
+ * recreate a running lease when the edge arrives or moves, or the tunnel comes or goes. Each lease's
+ * resolvers are reported instead, with whether they are stale against the node's choice now
+ * ({@link NodeResolvers}), and refreshed only by the owner through the lease's generation
+ * (qits-2091).
  *
  * <p><b>A CI lease</b> starts the target's {@link BuildPlane} first (on the first one, and
  * re-checked on every later one), makes the CI caches labelled, runs with {@code BUILDKIT_HOST}
@@ -180,7 +188,8 @@ final class LeaseLauncher {
     String mounts = volumes.mountsHash(policy, workVolume);
     if (seen.isPresent()
         && entry.specHash().equals(seen.get().specHash())
-        && mounts.equals(seen.get().mounts())) {
+        && mounts.equals(seen.get().mounts())
+        && entry.generation() == seen.get().generation()) {
       LeaseContainers.Seen s = seen.get();
       if (s.running()) {
         return Outcome.of(LeaseState.RUNNING);
@@ -210,9 +219,7 @@ final class LeaseLauncher {
       if (gone.isPresent()) {
         return failed(leaseId, gone.get());
       }
-      LOG.infof(
-          "system-runner recreates lease %s: its %s changed",
-          leaseId, entry.specHash().equals(seen.get().specHash()) ? "volumes" : "spec");
+      LOG.infof("system-runner recreates lease %s: %s", leaseId, why(entry, seen.get(), mounts));
     } else if (entry.adopt() != null) {
       Optional<String> adopted = takeOver(leaseId, entry.adopt(), driver, deadline);
       if (adopted.isPresent()) {
@@ -220,6 +227,17 @@ final class LeaseLauncher {
       }
     }
     return create(entry, policy, name, workVolume, mounts, session);
+  }
+
+  /** Why a lease's container is recreated, for the log line: the spec first, then its volumes. */
+  private static String why(LeaseEntry entry, LeaseContainers.Seen seen, String mounts) {
+    if (!entry.specHash().equals(seen.specHash())) {
+      return "its spec changed";
+    }
+    if (!mounts.equals(seen.mounts())) {
+      return "its volumes changed";
+    }
+    return "refreshed (generation " + entry.generation() + ")";
   }
 
   /**
@@ -381,9 +399,15 @@ final class LeaseLauncher {
     labels.put(LeaseContainers.slotTypeLabel(identity), entry.slotType().name());
     labels.put(LeaseContainers.specHashLabel(identity), entry.specHash());
     labels.put(LeaseContainers.mountsLabel(identity), mounts);
-    // Both asked at every create and never hashed: the labels above are the server's spec and the
-    // runner's mounts, so a lease is not recreated when the edge's VIP moves (qits-2062) or the
-    // node tunnel comes or goes (qits-2068). The tunnel only where the edge added no resolvers.
+    if (entry.generation() > 0) {
+      // Only above 0: a lease the owner never refreshed keeps the labels it had before qits-2091.
+      labels.put(LeaseContainers.generationLabel(identity), Long.toString(entry.generation()));
+    }
+    // Both asked at every create and still never hashed: the labels above are the server's spec,
+    // the runner's mounts and the owner's generation, so the runner does not recreate a lease when
+    // the edge's VIP moves (qits-2062) or the node tunnel comes or goes (qits-2068) — it reports a
+    // lease whose resolvers went stale, and the owner refreshes it through the generation
+    // (qits-2091). The tunnel only where the edge added no resolvers.
     ContainerSpec run = nodeTunnel.apply(privateEdge.apply(container, name), name);
     boolean onEdge = run.extraNetworks().contains(PrivateEdge.NETWORK);
     ContainersDriver.Started started = driver.run(run, name, labels, policy.lifecycle(), deadline);

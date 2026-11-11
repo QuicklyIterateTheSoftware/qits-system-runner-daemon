@@ -63,6 +63,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
@@ -136,6 +137,12 @@ class EstateReconcileTest {
   private CompletableFuture<Integer> exit;
   private final Map<String, String> extraEnv = new HashMap<>();
 
+  /** The domain's clock: the system's, moved forward when a test outwaits a cache (qits-2091). */
+  private final ShiftedClock clock = new ShiftedClock();
+
+  /** Undone after each test: a log handler a test added, for one. */
+  private final List<Runnable> cleanups = new ArrayList<>();
+
   /** No cgroup tree and no vmstat unless a test builds one: every memory fact null. */
   private CgroupSettings cgroups;
 
@@ -161,6 +168,7 @@ class EstateReconcileTest {
 
   @AfterEach
   void tearDown() throws Exception {
+    cleanups.forEach(Runnable::run);
     if (runner != null) {
       runner.stop(RunnerExit.OK);
       exit.get(10, TimeUnit.SECONDS);
@@ -820,6 +828,142 @@ class EstateReconcileTest {
     assertTrue(tunnelAsked.isEmpty(), "never probed: " + tunnelAsked);
   }
 
+  // ---- stale resolvers, refreshed by the generation (qits-2091) --------------------------------
+
+  @Test
+  void aLeaseCreatedWhileTheTunnelWasSilentIsReportedStaleOnceAndRecreatedOnlyByItsGeneration()
+      throws Exception {
+    AtomicBoolean tunnelAnswers = new AtomicBoolean(false);
+    tunnelProbe = (server, name, timeout) -> tunnelAnswers.get();
+    Files.writeString(resolvConf, "nameserver 192.168.188.1\n");
+    List<String> warnings = captureWarnings();
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    // Created while the tunnel did not answer: the node's own resolvers, and nothing stale.
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    assertFalse(runOf(lease(L1)).contains("--dns"), runOf(lease(L1))::toString);
+    inspected(L1, H1, "null", "<no value>");
+    Inventory before =
+        awaitInventory(i -> leaseOf(i, L1, r -> r.state() == LeaseState.RUNNING));
+    assertEquals(List.of(), report(before, L1).resolvers());
+    assertFalse(report(before, L1).resolversStale());
+
+    // The tunnel answers now; once the cached choice runs out, the next look reports it stale.
+    tunnelAnswers.set(true);
+    clock.advance(NodeResolvers.CACHE_FOR.plusSeconds(1));
+    Inventory stale = awaitInventory(i -> leaseOf(i, L1, LeaseReport::resolversStale));
+    assertEquals(List.of(), report(stale, L1).resolvers());
+    // Many looks later, still one WARN, and the lease untouched: stale is only reported.
+    Thread.sleep(1_000);
+    assertEquals(
+        List.of(
+            "system-runner's lease "
+                + L1
+                + " runs without the node tunnel resolver although 100.96.0.1 answers"),
+        warnings);
+    assertEquals(1, runsOf(lease(L1)).size(), docker.calls()::toString);
+    assertFalse(touched("stop", lease(L1)), docker.calls()::toString);
+    assertFalse(touched("rm", lease(L1)), docker.calls()::toString);
+
+    // The owner raises the generation: the container goes, its volume stays, the run asks again.
+    host.send(new Estate(List.of(workspace(L1, H1, 1)), List.of()));
+    awaitTrue(() -> runsOf(lease(L1)).size() == 2);
+    List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
+    int removed = calls.lastIndexOf(List.of("rm", "-f", lease(L1)));
+    assertTrue(
+        calls.indexOf(List.of("stop", lease(L1))) >= 0 && removed > 0, "stopped and removed");
+    List<String> again = runsOf(lease(L1)).get(1);
+    assertTrue(calls.indexOf(FakeDocker.withoutConfig(again)) > removed, "run after the rm");
+    int dns = again.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "100.96.0.1", "--dns", "192.168.188.1"),
+        again.subList(dns, dns + 4),
+        again::toString);
+    assertTrue(labelsOf(again).contains("qits.system.runner.generation=1"), again::toString);
+    assertTrue(docker.volumes().containsKey(work("ws-42")), "the work volume stays");
+    assertTrue(docker.calls("volume").stream().noneMatch(c -> c.contains("rm")), calls::toString);
+
+    inspected(L1, H1, "[\"100.96.0.1\",\"192.168.188.1\"]", "1");
+    Inventory refreshed =
+        awaitInventory(
+            i -> leaseOf(i, L1, r -> !r.resolvers().isEmpty() && !r.resolversStale()));
+    assertEquals(List.of("100.96.0.1", "192.168.188.1"), report(refreshed, L1).resolvers());
+    assertEquals(LeaseState.RUNNING, report(refreshed, L1).state());
+    assertEquals(1, warnings.size(), warnings::toString);
+  }
+
+  @Test
+  void aContainerWithoutAGenerationLabelIsNotRecreatedForAnEntryOfGenerationZero()
+      throws Exception {
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    // The line this runner's inspect reads off a container from before qits-2091.
+    inspected(L1, H1, "null", "<no value>");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory inventory = awaitInventory(i -> leaseOf(i, L1, r -> true));
+    assertEquals(new LeaseReport(L1, LeaseState.RUNNING, H1, null, null), report(inventory, L1));
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    // A second estate converges the lease again: still nothing to do.
+    int sent = host.all(Inventory.class).size();
+    host.send(new Estate(List.of(workspace(L1, H1)), List.of()));
+    awaitTrue(() -> host.all(Inventory.class).size() >= sent + 2);
+    for (String verb : List.of("run", "start", "stop", "rm")) {
+      assertFalse(touched(verb, lease(L1)), docker.calls()::toString);
+    }
+  }
+
+  /** The lease's container as the inspect answers it from now on, its dns and generation said. */
+  private void inspected(String leaseId, String hash, String dnsJson, String generation)
+      throws Exception {
+    docker.answerFor(
+        "inspect",
+        lease(leaseId),
+        0,
+        "c-" + leaseId + "|running|0|" + leaseId + "|WORKSPACE|" + hash + "|"
+            + mounts(work("ws-42")) + "|false|" + dnsJson + "|" + generation + "\n",
+        "");
+  }
+
+  /**
+   * Every WARN {@link SystemRunnerDomain} logs from now on, formatted; the handler goes with the
+   * test.
+   */
+  private List<String> captureWarnings() {
+    List<String> warnings = new java.util.concurrent.CopyOnWriteArrayList<>();
+    java.util.logging.Logger logger =
+        java.util.logging.Logger.getLogger(SystemRunnerDomain.class.getName());
+    java.util.logging.Handler handler =
+        new java.util.logging.Handler() {
+          @Override
+          public void publish(java.util.logging.LogRecord record) {
+            if (record.getLevel().intValue() == java.util.logging.Level.WARNING.intValue()) {
+              String text = formatted(record);
+              if (text.contains(" runs without the ")) {
+                warnings.add(text);
+              }
+            }
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    logger.addHandler(handler);
+    cleanups.add(() -> logger.removeHandler(handler));
+    return warnings;
+  }
+
+  /** A record's text: jboss-logging's {@code warnf} hands the printf pattern and its arguments. */
+  private static String formatted(java.util.logging.LogRecord record) {
+    Object[] params = record.getParameters();
+    String message = record.getMessage();
+    return params == null || params.length == 0 ? message : String.format(message, params);
+  }
+
   private static List<String> labelsOf(List<String> run) {
     List<String> labels = new ArrayList<>();
     for (int i = 0; i < run.size() - 1; i++) {
@@ -1448,7 +1592,7 @@ class EstateReconcileTest {
             cgroups,
             new SystemRunnerDomain.Timing(
                 Duration.ofMillis(200), Duration.ofSeconds(60), Duration.ofSeconds(60)),
-            Clock.systemUTC(),
+            clock,
             SignInProcesses.FORKED,
             resolvConf,
             tunnelProbe);
@@ -1509,6 +1653,18 @@ class EstateReconcileTest {
   private static LeaseEntry workspace(String leaseId, String hash) {
     return new LeaseEntry(
         leaseId, SlotType.WORKSPACE, DesiredState.RUNNING, spec(WS_IMAGE, env()), hash, "ws-42", null);
+  }
+
+  private static LeaseEntry workspace(String leaseId, String hash, long generation) {
+    return new LeaseEntry(
+        leaseId,
+        SlotType.WORKSPACE,
+        DesiredState.RUNNING,
+        spec(WS_IMAGE, env()),
+        hash,
+        "ws-42",
+        null,
+        generation);
   }
 
   private static LeaseEntry workspace(String leaseId, String hash, String workKey, String image) {
@@ -1644,5 +1800,31 @@ class EstateReconcileTest {
       Thread.sleep(20);
     }
     assertTrue(condition.getAsBoolean(), "the condition never held");
+  }
+
+  /** The system clock, plus an offset a test moves forward. */
+  static final class ShiftedClock extends Clock {
+
+    private final java.util.concurrent.atomic.AtomicReference<Duration> offset =
+        new java.util.concurrent.atomic.AtomicReference<>(Duration.ZERO);
+
+    void advance(Duration by) {
+      offset.updateAndGet(o -> o.plus(by));
+    }
+
+    @Override
+    public java.time.ZoneId getZone() {
+      return java.time.ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(java.time.ZoneId zone) {
+      return this;
+    }
+
+    @Override
+    public java.time.Instant instant() {
+      return java.time.Instant.now().plus(offset.get());
+    }
   }
 }

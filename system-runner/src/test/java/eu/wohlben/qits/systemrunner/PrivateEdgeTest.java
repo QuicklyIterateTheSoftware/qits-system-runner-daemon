@@ -148,6 +148,16 @@ class PrivateEdgeTest {
   }
 
   @Test
+  void theChoiceIsTheVipApplyPutsFirstAndNoneWhereApplyLeavesTheSpecUnchanged() throws Exception {
+    assertEquals(Optional.empty(), edge.choice(), "no overlay");
+    platformHost();
+    assertEquals(Optional.of("10.231.0.2"), edge.choice());
+    assertEquals(edge.choice().orElseThrow(), edge.apply(spec(), LEASE).dns().getFirst());
+    Files.writeString(resolvConf, "nameserver 127.0.0.11\n");
+    assertEquals(Optional.empty(), edge.choice(), "all or nothing: no upstream, no choice");
+  }
+
+  @Test
   void aSpecAlreadyOnQitsPrivateIsNotJoinedToItTwice() {
     platformHost();
     ContainerSpec primary =

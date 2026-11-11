@@ -45,10 +45,14 @@ import org.jboss.logging.Logger;
  * unchanged and one log line: WARN once the network exists, because then the node is the platform
  * host and something is off. Never throws.
  *
- * <p>The result is applied to the driver's spec just before the run and is <b>never hashed</b>: the
- * spec-hash label is the server's and the mounts label {@link TargetVolumes#mountsHash}'s, so a
- * running lease is not recreated when this class arrives or when the edge's VIP moves; the next
- * create picks the new one up.
+ * <p>The result is applied to the driver's spec just before the run and is <b>still not hashed</b>:
+ * the spec-hash label is the server's and the mounts label {@link TargetVolumes#mountsHash}'s, so a
+ * running lease is not recreated by the runner when this class arrives or when the edge's VIP
+ * moves. It is <b>reported per lease</b> instead (qits-2091): {@link #choice} answers the same
+ * lookup without a spec, {@link NodeResolvers} asks it from the periodic look, and a lease whose
+ * first resolver is not the node's choice is reported {@code resolversStale}. Only the owner
+ * refreshes such a lease — by raising its {@code LeaseEntry.generation}, which the runner answers
+ * with a recreate that keeps the volume and asks this class again.
  *
  * <p>Neither the environment nor anything else of the spec is logged: it carries the lease's token.
  */
@@ -106,6 +110,23 @@ final class PrivateEdge {
   }
 
   /**
+   * What the node's daemon says of the private edge: its VIP on the overlay and the upstreams to
+   * follow it — or why not, with {@code overlay} saying whether the network is there (the WARN case)
+   * and {@code why} null for the quiet one, a node without it. Asked by {@link #apply} at each
+   * create and by {@link #choice} for the report.
+   */
+  private record Lookup(String vip, List<String> upstreams, boolean overlay, String why) {
+
+    static Lookup none(boolean overlay, String why) {
+      return new Lookup(null, List.of(), overlay, why);
+    }
+
+    boolean found() {
+      return vip != null;
+    }
+  }
+
+  /**
    * {@code spec} on {@code qits-private} with the edge's VIP first among its resolvers, or {@code
    * spec} itself — see the class javadoc. Never throws.
    */
@@ -118,15 +139,36 @@ final class PrivateEdge {
     }
   }
 
+  /**
+   * The resolver this node would put first on a lease created now: the edge's VIP when the overlay,
+   * exactly one edge service, its VIP on the overlay and an upstream are all there — the very
+   * answer {@link #apply} acts on — else empty (qits-2091). No spec is asked and nothing is joined;
+   * logged at DEBUG only, since the periodic look asks it. Never throws.
+   */
+  Optional<String> choice() {
+    try {
+      Lookup lookup = lookup();
+      if (!lookup.found()) {
+        LOG.debugf(
+            "system-runner's node offers no private edge resolver: %s",
+            lookup.why() == null ? "this node has no " + NETWORK + " network" : lookup.why());
+        return Optional.empty();
+      }
+      return Optional.of(lookup.vip());
+    } catch (RuntimeException e) {
+      LOG.debugf("system-runner's node offers no private edge resolver: %s", e.getMessage());
+      return Optional.empty();
+    }
+  }
+
   private ContainerSpec resolve(ContainerSpec spec, String containerName) {
-    RunnerDocker.Result network =
-        docker.run(
-            List.of(docker.binary(), "network", "inspect", "--format", "{{.Id}}", NETWORK));
-    String networkId = network.ok() ? lastLine(network.stdout()) : "";
-    if (!DOCKER_ID.matcher(networkId).matches()) {
-      if (network.timedOut()) {
-        LOG.warnf(
-            "system-runner runs %s off the private edge: %s", containerName, network.detail());
+    Lookup lookup = lookup();
+    if (!lookup.found()) {
+      if (lookup.overlay()) {
+        return off(spec, containerName, lookup.why());
+      }
+      if (lookup.why() != null) {
+        LOG.warnf("system-runner runs %s off the private edge: %s", containerName, lookup.why());
       } else {
         LOG.debugf(
             "system-runner runs %s off the private edge: this node has no %s network",
@@ -134,69 +176,9 @@ final class PrivateEdge {
       }
       return spec;
     }
-
-    RunnerDocker.Result listed =
-        docker.run(
-            List.of(
-                docker.binary(),
-                "service",
-                "ls",
-                "-q",
-                "--filter",
-                "label=" + APP_NAME_LABEL + "=" + APPLICATION));
-    if (!listed.ok()) {
-      return off(spec, containerName, "docker service ls answered " + brief(listed));
-    }
-    List<String> services = lines(listed.stdout());
-    if (services.size() != 1 || !DOCKER_ID.matcher(services.getFirst()).matches()) {
-      return off(
-          spec,
-          containerName,
-          "expected exactly one swarm service labelled "
-              + APP_NAME_LABEL
-              + "="
-              + APPLICATION
-              + ", found "
-              + services.size());
-    }
-
-    String service = services.getFirst();
-    RunnerDocker.Result inspected =
-        docker.run(
-            List.of(docker.binary(), "service", "inspect", "--format", VIPS_FORMAT, service));
-    if (!inspected.ok()) {
-      return off(
-          spec,
-          containerName,
-          "docker service inspect " + service + " answered " + brief(inspected));
-    }
-    Optional<String> vip = vipOn(inspected.stdout(), networkId);
-    if (vip.isEmpty()) {
-      return off(
-          spec,
-          containerName,
-          "the service "
-              + service
-              + " has no single virtual IP on "
-              + NETWORK
-              + " ("
-              + networkId
-              + ")");
-    }
-
-    List<String> upstreams = upstreamsBesides(resolvConf, vip.get());
-    if (upstreams.isEmpty()) {
-      return off(
-          spec,
-          containerName,
-          resolvConf
-              + " names no upstream resolver, and a resolver list holding only the edge's VIP would"
-              + " answer every public name REFUSED");
-    }
-
     List<String> dns = new ArrayList<>();
-    dns.add(vip.get());
-    dns.addAll(upstreams);
+    dns.add(lookup.vip());
+    dns.addAll(lookup.upstreams());
     List<String> extraNetworks = new ArrayList<>(spec.extraNetworks());
     if (!NETWORK.equals(spec.network()) && !extraNetworks.contains(NETWORK)) {
       extraNetworks.add(NETWORK);
@@ -211,6 +193,72 @@ final class PrivateEdge {
         "system-runner puts %s on the private edge: joins %s, resolvers %s",
         containerName, NETWORK, dns);
     return resolved;
+  }
+
+  /** The class javadoc's four steps, read-only; a step that fails says why. */
+  private Lookup lookup() {
+    RunnerDocker.Result network =
+        docker.run(
+            List.of(docker.binary(), "network", "inspect", "--format", "{{.Id}}", NETWORK));
+    String networkId = network.ok() ? lastLine(network.stdout()) : "";
+    if (!DOCKER_ID.matcher(networkId).matches()) {
+      return Lookup.none(false, network.timedOut() ? String.valueOf(network.detail()) : null);
+    }
+
+    RunnerDocker.Result listed =
+        docker.run(
+            List.of(
+                docker.binary(),
+                "service",
+                "ls",
+                "-q",
+                "--filter",
+                "label=" + APP_NAME_LABEL + "=" + APPLICATION));
+    if (!listed.ok()) {
+      return Lookup.none(true, "docker service ls answered " + brief(listed));
+    }
+    List<String> services = lines(listed.stdout());
+    if (services.size() != 1 || !DOCKER_ID.matcher(services.getFirst()).matches()) {
+      return Lookup.none(
+          true,
+          "expected exactly one swarm service labelled "
+              + APP_NAME_LABEL
+              + "="
+              + APPLICATION
+              + ", found "
+              + services.size());
+    }
+
+    String service = services.getFirst();
+    RunnerDocker.Result inspected =
+        docker.run(
+            List.of(docker.binary(), "service", "inspect", "--format", VIPS_FORMAT, service));
+    if (!inspected.ok()) {
+      return Lookup.none(
+          true, "docker service inspect " + service + " answered " + brief(inspected));
+    }
+    Optional<String> vip = vipOn(inspected.stdout(), networkId);
+    if (vip.isEmpty()) {
+      return Lookup.none(
+          true,
+          "the service "
+              + service
+              + " has no single virtual IP on "
+              + NETWORK
+              + " ("
+              + networkId
+              + ")");
+    }
+
+    List<String> upstreams = upstreamsBesides(resolvConf, vip.get());
+    if (upstreams.isEmpty()) {
+      return Lookup.none(
+          true,
+          resolvConf
+              + " names no upstream resolver, and a resolver list holding only the edge's VIP would"
+              + " answer every public name REFUSED");
+    }
+    return new Lookup(vip.get(), upstreams, true, null);
   }
 
   /** The spec unchanged, with the WARN: the overlay is here, so this is the platform host. */

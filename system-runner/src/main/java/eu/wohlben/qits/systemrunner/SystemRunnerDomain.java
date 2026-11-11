@@ -101,6 +101,13 @@ import org.jboss.logging.Logger;
  * <p><b>The {@code inventory}</b> goes out at the {@code Ack}, around every convergence, and when
  * the periodic look sees a change; a listing docker did not answer is never sent — read as empty,
  * it would tell the server every lease is gone.
+ *
+ * <p><b>Each lease's resolvers are reported, never acted on</b> (qits-2091): a lease container's
+ * {@code --dns} servers ride its report, with {@code resolversStale} when the node's resolver
+ * choice ({@link NodeResolvers}, asked from the periodic look off the converge lock and kept a
+ * minute) is not the container's first one — a lease created before the overlay existed, or while
+ * the node tunnel did not answer. One WARN per lease that turns stale, none per look; the runner
+ * never recreates a lease for it. The owner does, by raising the entry's {@code generation}.
  */
 public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessage> {
 
@@ -191,6 +198,15 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /** The last convergence's failure per lease, for {@code inventory}'s FAILED; cleared by success. */
   private final Map<String, String> failures = new ConcurrentHashMap<>();
+
+  /** The node's resolver choice, asked from the look tick and read by {@code inventory}. */
+  private final NodeResolvers nodeResolvers;
+
+  /**
+   * The leases whose stale resolvers were warned of (qits-2091): one WARN when a lease turns stale,
+   * forgotten when it clears or its container goes, so the look never repeats it.
+   */
+  private final Set<String> staleWarned = ConcurrentHashMap.newKeySet();
 
   /** The last convergence's STARTING words per lease for {@code inventory}: the pull it awaits. */
   private final Map<String, String> pullingDetails = new ConcurrentHashMap<>();
@@ -378,6 +394,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             unlessClosing(pullWork), unlessClosing(warmWork), this::reconvergeSoon, clock);
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
+    PrivateEdge privateEdge = new PrivateEdge(docker, resolvConf);
+    NodeTunnel nodeTunnel =
+        new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf);
     this.loginProbe =
         new LoginProbe(
             identity,
@@ -394,10 +413,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             containers,
             () -> buildPlane,
             pulls,
-            new PrivateEdge(docker, resolvConf),
-            new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf),
+            privateEdge,
+            nodeTunnel,
             loginProbe.firstRun(),
             () -> ack.probeImage());
+    this.nodeResolvers = new NodeResolvers(privateEdge, nodeTunnel, clock);
     this.healthChecks = new HealthChecks(docker.deadline().multipliedBy(3));
     TargetHealthChecks.registerDefaults(
         healthChecks, identity, targetId, () -> lastLogin, () -> buildPlane);
@@ -1161,12 +1181,18 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     }
   }
 
-  /** The periodic look; skipped while a convergence holds the node, which reports for itself. */
+  /**
+   * The periodic look; skipped while a convergence holds the node, which reports for itself. The
+   * node's resolver choice is asked first, outside the converge lock — at most once a minute, the
+   * rest of the time {@link NodeResolvers} answers from its cache — so a probe that waits never
+   * holds a convergence up.
+   */
   private void tickOnce() {
     RunnerSession s = session;
     if (s == null || !live || decommissioning || closing) {
       return;
     }
+    nodeResolvers.choice();
     if (!converging.tryLock()) {
       return;
     }
@@ -1244,10 +1270,19 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * <p>A lease with a container carries its memory facts as {@link MemorySampler} last read them
    * — an EXITED one the last values read while it ran, and docker's {@code OOMKilled} — and the
    * frame the node's (qits-1818).
+   *
+   * <p>A lease with a container carries its resolvers, and whether they are stale against the
+   * node's last resolver choice — warned of once when one turns stale (qits-2091).
    */
   Optional<Inventory> inventory(List<LeaseContainers.Seen> now) {
     Map<String, LeaseReport> leases = new HashMap<>();
+    Optional<String> choice = nodeResolvers.last();
+    Set<String> stale = new LinkedHashSet<>();
     for (LeaseContainers.Seen seen : now) {
+      boolean resolversStale = stale(seen.dns(), choice);
+      if (resolversStale) {
+        stale.add(seen.leaseId());
+      }
       LeaseState state =
           seen.running()
               ? LeaseState.RUNNING
@@ -1264,8 +1299,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
               m.oomKills(),
               m.oomEvents(),
               m.memoryPeakBytes(),
-              state == LeaseState.EXITED ? seen.oomKilled() : null));
+              state == LeaseState.EXITED ? seen.oomKilled() : null,
+              seen.dns(),
+              resolversStale));
     }
+    warnStale(stale, choice);
     failures.forEach(
         (leaseId, detail) -> {
           LeaseReport seen = leases.get(leaseId);
@@ -1282,7 +1320,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
                       seen.oomKills(),
                       seen.oomEvents(),
                       seen.memoryPeakBytes(),
-                      null));
+                      null,
+                      seen.resolvers(),
+                      seen.resolversStale()));
         });
     Set<String> volumesHere = new TreeSet<>();
     Estate e = estate;
@@ -1317,6 +1357,35 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     List<LeaseReport> sorted = new ArrayList<>(leases.values());
     sorted.sort(Comparator.comparing(LeaseReport::leaseId));
     return Optional.of(new Inventory(sorted, List.copyOf(volumesHere), memory.node()));
+  }
+
+  /**
+   * Whether a container resolving through {@code dns} is stale against the node's {@code choice}:
+   * the node offers a resolver and it is not the container's first — none at all included.
+   */
+  static boolean stale(List<String> dns, Optional<String> choice) {
+    return choice.isPresent() && (dns.isEmpty() || !dns.getFirst().equals(choice.get()));
+  }
+
+  /**
+   * One WARN for each lease in {@code stale} not warned of yet; every lease warned of that is no
+   * longer stale — cleared, or its container gone — forgotten, so it warns again if it turns stale
+   * again. Never one per look.
+   */
+  private void warnStale(Set<String> stale, Optional<String> choice) {
+    staleWarned.retainAll(stale);
+    if (choice.isEmpty()) {
+      return;
+    }
+    String address = choice.get();
+    String which = NodeTunnel.DNS_ADDRESS.equals(address) ? "node tunnel" : "private edge";
+    for (String leaseId : stale) {
+      if (staleWarned.add(leaseId)) {
+        LOG.warnf(
+            "system-runner's lease %s runs without the %s resolver although %s answers",
+            leaseId, which, address);
+      }
+    }
   }
 
   private RunnerSession session() {

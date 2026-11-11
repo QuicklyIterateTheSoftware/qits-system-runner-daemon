@@ -20,6 +20,11 @@ import java.util.Optional;
  * throws here, so "could not read" never reads as "not there" (the reason {@link OwnResources}
  * lists through the process seam too); and it says {@code --type container}, so a volume of the
  * same name is never answered for a container that is gone.
+ *
+ * <p>The same inspect reads the container's {@code --dns} servers ({@code {{json
+ * .HostConfig.Dns}}}, qits-2091) — docker prints {@code null} or a JSON array of address literals,
+ * read by hand since the native image carries no JSON parser — and its {@code generation} label,
+ * so reporting a lease's resolvers costs no docker call of its own.
  */
 final class LeaseContainers {
 
@@ -32,9 +37,14 @@ final class LeaseContainers {
   /** The suffix of the label a lease container's volumes ({@link TargetVolumes#mountsHash}) ride. */
   static final String MOUNTS_LABEL_SUFFIX = "mounts";
 
+  /** The suffix of the label a lease container's {@code LeaseEntry.generation} rides under. */
+  static final String GENERATION_LABEL_SUFFIX = "generation";
+
   /**
    * One lease container as docker reported it; {@code oomKilled} is docker's {@code
-   * State.OOMKilled}, null when docker did not say (qits-1818).
+   * State.OOMKilled}, null when docker did not say (qits-1818). {@code dns} is its {@code --dns}
+   * servers in order, empty when it has none or docker did not say; {@code generation} its
+   * generation label, {@code 0} when it has none or the label is no number (qits-2091).
    */
   record Seen(
       String id,
@@ -44,7 +54,26 @@ final class LeaseContainers {
       String slotType,
       String specHash,
       String mounts,
-      Boolean oomKilled) {
+      Boolean oomKilled,
+      List<String> dns,
+      long generation) {
+
+    Seen {
+      dns = dns == null ? List.of() : List.copyOf(dns);
+    }
+
+    /** A container read without its resolvers and generation: none, and {@code 0}. */
+    Seen(
+        String id,
+        String leaseId,
+        String status,
+        int exitCode,
+        String slotType,
+        String specHash,
+        String mounts,
+        Boolean oomKilled) {
+      this(id, leaseId, status, exitCode, slotType, specHash, mounts, oomKilled, List.of(), 0);
+    }
 
     boolean running() {
       return "running".equals(status);
@@ -74,7 +103,9 @@ final class LeaseContainers {
             + specHashLabel(identity)
             + "\"}}|{{index .Config.Labels \""
             + mountsLabel(identity)
-            + "\"}}|{{.State.OOMKilled}}";
+            + "\"}}|{{.State.OOMKilled}}|{{json .HostConfig.Dns}}|{{index .Config.Labels \""
+            + generationLabel(identity)
+            + "\"}}";
   }
 
   /** {@code qits.system.runner.slot-type}. */
@@ -90,6 +121,19 @@ final class LeaseContainers {
   /** {@code qits.system.runner.mounts}: the volumes the container was run with, hashed. */
   static String mountsLabel(RunnerIdentity identity) {
     return identity.driverNamespace() + MOUNTS_LABEL_SUFFIX;
+  }
+
+  /**
+   * {@code qits.system.runner.generation}: the owner's {@code LeaseEntry.generation} the container
+   * was run under, written only when it is above {@code 0} (qits-2091).
+   */
+  static String generationLabel(RunnerIdentity identity) {
+    return identity.driverNamespace() + GENERATION_LABEL_SUFFIX;
+  }
+
+  /** The inspect's {@code --format} template, one {@code |}-separated line per container. */
+  String format() {
+    return format;
   }
 
   /** The inspect every read here makes, of a name this runner derived or an id docker listed. */
@@ -194,9 +238,12 @@ final class LeaseContainers {
   }
 
   /**
-   * {@code <id>|<status>|<exitCode>|<leaseId>|<slotType>|<specHash>|<mounts>|<oomKilled>}; empty
-   * when it is not a lease container. A label the container lacks reads as null, and so does an
-   * {@code oomKilled} that is neither {@code true} nor {@code false}.
+   * {@code
+   * <id>|<status>|<exitCode>|<leaseId>|<slotType>|<specHash>|<mounts>|<oomKilled>|<dns>|<generation>};
+   * empty when it is not a lease container. A label the container lacks reads as null, and so does
+   * an {@code oomKilled} that is neither {@code true} nor {@code false}; a {@code dns} that is not
+   * a JSON array of strings reads as none, a generation that is no non-negative number as {@code
+   * 0}. Fields missing at the end — a line of a shorter format — read the same way.
    */
   static Optional<Seen> parse(String line) {
     String[] fields = line.split("\\|", -1);
@@ -216,7 +263,53 @@ final class LeaseContainers {
             nullable(fields, 4),
             nullable(fields, 5),
             nullable(fields, 6),
-            bool(nullable(fields, 7))));
+            bool(nullable(fields, 7)),
+            dns(nullable(fields, 8)),
+            generation(nullable(fields, 9))));
+  }
+
+  /**
+   * {@code {{json .HostConfig.Dns}}} read by hand: {@code null}, {@code []} or {@code ["a","b"]}.
+   * Anything else — a template docker did not fill, an element that is not a plain string — is
+   * none: the report then says the lease has no resolvers of its own, never ones it does not have.
+   */
+  static List<String> dns(String json) {
+    if (json == null) {
+      return List.of();
+    }
+    String s = json.strip();
+    if (!s.startsWith("[") || !s.endsWith("]")) {
+      return List.of();
+    }
+    String inner = s.substring(1, s.length() - 1).strip();
+    if (inner.isEmpty()) {
+      return List.of();
+    }
+    List<String> servers = new ArrayList<>();
+    for (String element : inner.split(",", -1)) {
+      String e = element.strip();
+      if (e.length() < 2 || !e.startsWith("\"") || !e.endsWith("\"")) {
+        return List.of();
+      }
+      String server = e.substring(1, e.length() - 1);
+      if (server.isEmpty() || server.indexOf('"') >= 0 || server.indexOf('\\') >= 0) {
+        return List.of();
+      }
+      servers.add(server);
+    }
+    return List.copyOf(servers);
+  }
+
+  /** The generation label: absent, not a number or negative is {@code 0}. */
+  static long generation(String value) {
+    if (value == null) {
+      return 0;
+    }
+    try {
+      return Math.max(0, Long.parseLong(value.strip()));
+    } catch (NumberFormatException notANumber) {
+      return 0;
+    }
   }
 
   private static Boolean bool(String value) {

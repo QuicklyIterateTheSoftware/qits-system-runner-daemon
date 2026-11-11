@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import org.jboss.logging.Logger;
 
@@ -39,11 +40,15 @@ import org.jboss.logging.Logger;
  *       holding only the tunnel would answer every public name REFUSED.
  * </ol>
  *
- * <p>Like {@link PrivateEdge}, the result is never hashed into the spec-hash or mounts label, and
- * a lease keeps the resolvers it was created with: when the tunnel goes down later, its public
+ * <p>Like {@link PrivateEdge}, the result is still not hashed into the spec-hash or mounts label,
+ * and a lease keeps the resolvers it was created with: when the tunnel goes down later, its public
  * lookups first wait out glibc's timeout on {@value #DNS_ADDRESS} until the tunnel is back or the
- * lease is recreated. Never throws; neither the environment nor anything else of the spec is
- * logged.
+ * lease is recreated; when the tunnel comes up after the create, the lease goes on without it. Both
+ * are <b>reported per lease</b> (qits-2091): {@link #choice} answers steps 2 and 3 without a spec,
+ * {@link NodeResolvers} asks it from the periodic look, and a lease whose first resolver is not the
+ * node's choice is reported {@code resolversStale} — refreshed only by the owner, through the
+ * lease's {@code LeaseEntry.generation}, never by the runner on its own. Never throws; neither the
+ * environment nor anything else of the spec is logged.
  */
 final class NodeTunnel {
 
@@ -102,28 +107,71 @@ final class NodeTunnel {
     }
   }
 
+  /**
+   * The resolver this node would put first on a lease off the overlay created now: {@value
+   * #DNS_ADDRESS} when the probe answers and the runner has an upstream to follow it — the very
+   * answer {@link #apply} acts on — else empty (qits-2091). Asked without a spec, so it does not
+   * know whether {@link PrivateEdge} would have won; {@link NodeResolvers} asks that first. Logged
+   * at DEBUG only, since the periodic look asks it. Never throws.
+   */
+  Optional<String> choice() {
+    try {
+      Lookup lookup = lookup();
+      if (lookup.dns().isEmpty()) {
+        LOG.debugf(
+            "system-runner's node offers no node tunnel resolver: %s",
+            lookup.answers()
+                ? "no upstream resolver in " + resolvConf
+                : DNS_ADDRESS + " does not answer");
+        return Optional.empty();
+      }
+      return Optional.of(lookup.dns().getFirst());
+    } catch (RuntimeException e) {
+      LOG.debugf("system-runner's node offers no node tunnel resolver: %s", e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * Steps 2 and 3 of the class javadoc: whether the tunnel's DNS answers, and the resolvers a lease
+   * gets — {@value #DNS_ADDRESS} and the upstreams — empty unless both hold.
+   */
+  private record Lookup(boolean answers, List<String> dns) {}
+
+  private Lookup lookup() {
+    if (!probe.answers(
+        new InetSocketAddress(DNS_ADDRESS, DNS_PORT), probeHost, PROBE_TIMEOUT)) {
+      return new Lookup(false, List.of());
+    }
+    List<String> upstreams = PrivateEdge.upstreamsBesides(resolvConf, DNS_ADDRESS);
+    if (upstreams.isEmpty()) {
+      return new Lookup(true, List.of());
+    }
+    List<String> dns = new ArrayList<>();
+    dns.add(DNS_ADDRESS);
+    dns.addAll(upstreams);
+    return new Lookup(true, List.copyOf(dns));
+  }
+
   private ContainerSpec resolve(ContainerSpec spec, String containerName) {
     if (!spec.dns().isEmpty()) {
       return spec;
     }
-    if (!probe.answers(
-        new InetSocketAddress(DNS_ADDRESS, DNS_PORT), probeHost, PROBE_TIMEOUT)) {
+    Lookup lookup = lookup();
+    if (!lookup.answers()) {
       LOG.debugf(
           "system-runner runs %s off the node tunnel: %s does not answer",
           containerName, DNS_ADDRESS);
       return spec;
     }
-    List<String> upstreams = PrivateEdge.upstreamsBesides(resolvConf, DNS_ADDRESS);
-    if (upstreams.isEmpty()) {
+    if (lookup.dns().isEmpty()) {
       LOG.warnf(
           "system-runner runs %s off the node tunnel although %s answers: no upstream resolver in"
               + " %s",
           containerName, DNS_ADDRESS, resolvConf);
       return spec;
     }
-    List<String> dns = new ArrayList<>();
-    dns.add(DNS_ADDRESS);
-    dns.addAll(upstreams);
+    List<String> dns = lookup.dns();
     ContainerSpec resolved = PrivateEdge.with(spec, dns, spec.extraNetworks());
     LOG.debugf("system-runner puts %s on the node tunnel: resolvers %s", containerName, dns);
     return resolved;

@@ -107,6 +107,20 @@ class NodeTunnelTest {
   }
 
   @Test
+  void theChoiceIsTheTunnelsAddressOnlyWhereItAnswersAndAnUpstreamIsThere() throws Exception {
+    answers = false;
+    assertEquals(java.util.Optional.empty(), tunnel.choice());
+    answers = true;
+    assertEquals(java.util.Optional.of("100.96.0.1"), tunnel.choice());
+    assertEquals(
+        List.of(new Asked(new InetSocketAddress("100.96.0.1", 53), HOST, Duration.ofSeconds(1))),
+        asked.subList(1, 2),
+        "the same question apply asks");
+    Files.writeString(resolvConf, "nameserver 100.96.0.1\n");
+    assertEquals(java.util.Optional.empty(), tunnel.choice(), "only the tunnel: no choice");
+  }
+
+  @Test
   void aSilentTunnelLeavesTheSpecUnchanged() {
     answers = false;
     ContainerSpec spec = spec();
