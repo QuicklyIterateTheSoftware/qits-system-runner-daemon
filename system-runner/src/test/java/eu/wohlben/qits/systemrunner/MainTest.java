@@ -104,8 +104,10 @@ class MainTest {
             SystemRunnerIdentity.IDENTITY,
             Map.of(
                     "QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME", "  ",
-                    "QITS_SYSTEM_RUNNER_M2_VOLUME", "")
-                ::get));
+                    "QITS_SYSTEM_RUNNER_M2_VOLUME", "",
+                    "QITS_SYSTEM_RUNNER_PNPM_VOLUME", "-")
+                ::get),
+        "unset, blank and - all mean the runner's own");
     assertEquals(
         new ExternalVolumes(
             Optional.of("qits_shared_dot_claude"),

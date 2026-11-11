@@ -80,7 +80,9 @@ Plain records, plain constructors, no annotations; fields are read through `Wire
 **`Main` is the only CDI bean.** Everything below it is a plain class taking its collaborators as
 constructor arguments; nothing reads configuration — the toolkit's `RunnerSettings` parses the
 environment (`QITS_SYSTEM_RUNNER_*`), and `Main` parses the runner's own beside it
-(`ExternalVolumes`: `…_CREDENTIAL_VOLUME`, `…_M2_VOLUME`, `…_PNPM_VOLUME`, exit 2 on a bad name;
+(`ExternalVolumes`: `…_CREDENTIAL_VOLUME`, `…_M2_VOLUME`, `…_PNPM_VOLUME`, exit 2 on a bad name,
+resolved against the state volume's `node-volumes.json` by `NodeVolumeRecord` so a reinstall keeps
+them — unset means recorded, `-` means the runner's own;
 `BuildkitSettings`: `…_BUILDKIT_IMAGE`, `…_BUILDKIT_MAX_PARALLELISM`, `…_BUILDER_CONCURRENT_BUILDS`,
 `…_BUILDKIT_HTTP_REGISTRIES`, `…_BUILDKIT_REGISTRY_MIRRORS`, likewise).
 `…_BUILDKIT_MAX_PARALLELISM` defaults to the runner's own slot total. It only sets how far the

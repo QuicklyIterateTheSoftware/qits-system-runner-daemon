@@ -1295,6 +1295,135 @@ class EstateReconcileTest {
     assertFalse(touched("stop", lease(L1)));
   }
 
+  // ---- the first-run keys before an agent lease (qits-2088) ------------------------------------
+
+  /** The probe reads claude UNKNOWN, so it merges nothing: every first-run run is the launcher's. */
+  private void probeMergesNothing() throws Exception {
+    docker.answerFor("run", "status", 125, "", "docker: Error response from daemon: no space left");
+  }
+
+  @Test
+  void aWorkspaceAndADeskLeaseHaveTheFirstRunKeysMadeSureOfBeforeTheyRun() throws Exception {
+    probeMergesNothing();
+    estateThenAck(workspace(L1, H1), desk(L2, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty() && !runsOf(lease(L2)).isEmpty());
+    List<List<String>> calls = docker.calls();
+    List<List<String>> checks =
+        calls.stream().filter(c -> c.contains("run") && c.getLast().equals("check")).toList();
+    assertEquals(2, checks.size(), "one check per agent lease: " + calls);
+    for (List<String> check : checks) {
+      assertTrue(check.contains(DOT_CLAUDE + ":/claude-home"), check::toString);
+      assertTrue(check.contains(WS_IMAGE), "the probe image, on the node: " + check);
+    }
+    assertTrue(calls.indexOf(checks.get(0)) < calls.indexOf(runOf(lease(L1))), calls::toString);
+    assertTrue(calls.indexOf(checks.get(1)) < calls.indexOf(runOf(lease(L2))), calls::toString);
+  }
+
+  @Test
+  void aFirstRunMergeThatFailsNeverFailsTheLease() throws Exception {
+    probeMergesNothing();
+    docker.answerFor("run", "check", 1, "", "");
+    docker.answerFor("run", "apply", 1, "", "qits-first-run: the first-run keys are still missing");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<List<String>> calls = docker.calls();
+    List<String> apply =
+        calls.stream()
+            .filter(c -> c.contains("run") && c.getLast().equals("apply"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(calls));
+    assertTrue(calls.indexOf(apply) < calls.indexOf(runOf(lease(L1))), "merged, failed, run anyway");
+    assertTrue(
+        host.all(Inventory.class).stream()
+            .noneMatch(i -> leaseOf(i, L1, r -> r.state() == LeaseState.FAILED)),
+        host.all(Inventory.class)::toString);
+  }
+
+  @Test
+  void aCiLeaseNeverRunsTheFirstRunKeys() throws Exception {
+    probeMergesNothing();
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    assertTrue(
+        docker.calls("run").stream().noneMatch(c -> c.contains(ClaudeFirstRun.SCRIPT)),
+        docker.calls()::toString);
+  }
+
+  // ---- a reinstall keeps the node volumes (qits-2088) -------------------------------------------
+
+  /**
+   * qits-2088: a target installed with {@code …_CREDENTIAL_VOLUME} and reinstalled from a
+   * rotate-token line, which names no volume. The second runner, on the same state volume, mounts
+   * what the first recorded: no derived credential volume is made, the hello names the external
+   * one, the running lease is not recreated onto an empty {@code /claude-home}, and the login reads
+   * PRESENT off the external volume.
+   */
+  @Test
+  void aReinstallWithoutTheVolumeVariablesKeepsTheRecordedCredentialVolumeAndItsLease()
+      throws Exception {
+    String ext = "ext-dot-claude";
+    docker.volume(ext, Map.of());
+    docker.answerFor("volume-inspect", ext, 0, ext + "\n", "");
+    String extMounts =
+        new TargetVolumes(
+                IDENTITY,
+                TARGET,
+                new ExternalVolumes(Optional.of(ext), Optional.empty(), Optional.empty()))
+            .mountsHash(work("ws-42"));
+    seen(L1, "running", 0, "WORKSPACE", H1, extMounts);
+    estateThenAck(workspace(L1, H1));
+    extraEnv.put(IDENTITY.env(ExternalVolumes.CREDENTIAL_VOLUME), ext);
+    start();
+    assertEquals(
+        ext,
+        SystemRunnerCapabilities.of(host.await(Hello.class).capabilities()).credentialVolume());
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    assertEquals(ext, host.await(LoginState.class).volume());
+
+    // The reinstall: the old runner goes, the new one starts on the same state dir, no variable.
+    runner.stop(RunnerExit.OK);
+    exit.get(30, TimeUnit.SECONDS);
+    runner = null;
+    domain.close();
+    domain = null;
+    extraEnv.clear();
+    int hellos = host.all(Hello.class).size();
+    int logins = host.all(LoginState.class).size();
+    int inventories = host.all(Inventory.class).size();
+    start();
+
+    Hello again = host.await(Hello.class, hellos + 1);
+    assertEquals(ext, SystemRunnerCapabilities.of(again.capabilities()).credentialVolume());
+    LoginState login = host.await(LoginState.class, logins + 1);
+    assertEquals(ext, login.volume());
+    assertEquals(LoginPresence.PRESENT, login.claude());
+    Predicate<Inventory> running = i -> leaseOf(i, L1, r -> r.state() == LeaseState.RUNNING);
+    awaitTrue(() -> host.all(Inventory.class).stream().skip(inventories).anyMatch(running));
+    Inventory inventory =
+        host.all(Inventory.class).stream().skip(inventories).filter(running).findFirst().get();
+    assertEquals(new LeaseReport(L1, LeaseState.RUNNING, H1, null, null), report(inventory, L1));
+    awaitTrue(() -> runner.session().held().equals(List.of(L1)));
+    for (String verb : List.of("run", "start", "stop", "rm")) {
+      assertFalse(touched(verb, lease(L1)), docker.calls()::toString);
+    }
+    assertFalse(docker.volumes().containsKey(DOT_CLAUDE), "no derived credential volume");
+    assertTrue(
+        docker.calls().stream().noneMatch(c -> c.contains(DOT_CLAUDE + ":/claude-home")),
+        "nothing mounted the derived one: " + docker.calls());
+    assertTrue(docker.volumes().containsKey(M2), "the caches stay the runner's own");
+    assertEquals(
+        "{\n  \"credential\" : \"ext-dot-claude\",\n  \"m2\" : null,\n  \"pnpm\" : null\n}\n",
+        Files.readString(state.resolve(NodeVolumeRecord.FILE)));
+  }
+
   // ---- the runner, the host's scripts and the node -------------------------------------------------
 
   private void start() throws Exception {
@@ -1313,7 +1442,8 @@ class EstateReconcileTest {
     domain =
         new SystemRunnerDomain(
             settings,
-            ExternalVolumes.parse(IDENTITY, env::get),
+            // Main's own resolution: the variables, else the record in the state volume (qits-2088).
+            NodeVolumeRecord.resolve(IDENTITY, settings, env::get),
             BuildkitSettings.DEFAULTS,
             cgroups,
             new SystemRunnerDomain.Timing(

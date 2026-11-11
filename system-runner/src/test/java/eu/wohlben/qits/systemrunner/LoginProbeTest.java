@@ -211,9 +211,31 @@ class LoginProbeTest {
     assertEquals(LoginPresence.UNKNOWN, probe.probe(runnerDocker.driver(), IMAGE, pull).claude());
   }
 
+  /** qits-2088: the onboarding keys are not login state, so a signed-out volume gets them too. */
   @Test
-  void aSignedOutCliNeverHasItsKeysWritten() throws Exception {
+  void aSignedOutCliHasItsKeysMergedInAndStillReadsAbsentWhateverTheMergeDid() throws Exception {
     claudeSays(1, "{\"loggedIn\": false}");
+    kimiExits(1);
+    docker.answerFor("run", "check", 1, "", "");
+    docker.answerFor("run", "apply", 0, "", "");
+
+    assertEquals(
+        new LoginState(LoginPresence.ABSENT, LoginPresence.ABSENT, NOW.toString(), DOT_CLAUDE),
+        probe.probe(runnerDocker.driver(), IMAGE, pull));
+    assertEquals(
+        List.of("status", "check", "apply", LoginProbe.KIMI_CHECK),
+        docker.calls("run").stream().map(List::getLast).toList());
+
+    docker.answerFor("run", "apply", 125, "", "docker: Error response from daemon: no space left");
+    assertEquals(
+        LoginPresence.ABSENT,
+        probe.probe(runnerDocker.driver(), IMAGE, pull).claude(),
+        "a failed merge never turns a signed-out CLI into UNKNOWN");
+  }
+
+  @Test
+  void aCliThatNeverAnsweredHasNoKeysWritten() throws Exception {
+    docker.answerFor("run", "status", 125, "", "docker: Error response from daemon: no space left");
     kimiExits(1);
 
     probe.probe(runnerDocker.driver(), IMAGE, pull);

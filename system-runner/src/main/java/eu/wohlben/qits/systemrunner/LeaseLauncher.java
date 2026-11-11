@@ -32,7 +32,8 @@ import org.jboss.logging.Logger;
  *       converges the estate again. A failed pull is {@code FAILED} with docker's words;
  *   <li><b>RUNNING</b>, no container, the images here → every external node volume asked after, the adopted container stopped and removed and the
  *       adopted volume asked after — or the work volume and the runner's own node volumes made
- *       labelled — then {@code run};
+ *       labelled — then, for a WORKSPACE or DESK lease, Claude Code's first-run keys made sure of
+ *       on the credential volume ({@link ClaudeFirstRun}), then {@code run};
  *   <li><b>RUNNING</b>, a container whose {@code spec-hash} and {@code mounts} labels are the
  *       entry's → nothing: {@code RUNNING}, {@code STARTING} while docker has it {@code created},
  *       or {@code EXITED} with its exit code — an exited lease is the owner's to end, never the
@@ -109,7 +110,14 @@ final class LeaseLauncher {
   private final ImagePulls pulls;
   private final PrivateEdge privateEdge;
   private final NodeTunnel nodeTunnel;
+  private final ClaudeFirstRun firstRun;
+  private final Supplier<String> probeImage;
 
+  /**
+   * @param firstRun the login probe's: the same volume, container name and deadline, one run at a
+   *     time with the probe's own
+   * @param probeImage the latest {@code Ack.probeImage}, null when the host named none
+   */
   LeaseLauncher(
       RunnerIdentity identity,
       RunnerDocker docker,
@@ -119,7 +127,9 @@ final class LeaseLauncher {
       Supplier<BuildPlane> buildPlane,
       ImagePulls pulls,
       PrivateEdge privateEdge,
-      NodeTunnel nodeTunnel) {
+      NodeTunnel nodeTunnel,
+      ClaudeFirstRun firstRun,
+      Supplier<String> probeImage) {
     this.identity = identity;
     this.docker = docker;
     this.names = names;
@@ -129,6 +139,8 @@ final class LeaseLauncher {
     this.pulls = pulls;
     this.privateEdge = privateEdge;
     this.nodeTunnel = nodeTunnel;
+    this.firstRun = firstRun;
+    this.probeImage = probeImage;
   }
 
   /**
@@ -362,6 +374,9 @@ final class LeaseLauncher {
             leaseId, "docker could not create the volume " + node + ": " + brief(made.detail()));
       }
     }
+    if (policy.agentVolumes()) {
+      seedFirstRunKeys(leaseId, entry.spec().image(), driver);
+    }
     Map<String, String> labels = new LinkedHashMap<>(session.own().labels(leaseId));
     labels.put(LeaseContainers.slotTypeLabel(identity), entry.slotType().name());
     labels.put(LeaseContainers.specHashLabel(identity), entry.specHash());
@@ -399,6 +414,35 @@ final class LeaseLauncher {
             ? " on " + PrivateEdge.NETWORK + ", resolvers " + run.dns()
             : NodeTunnel.on(run) ? " via the node tunnel, resolvers " + run.dns() : "");
     return Outcome.of(LeaseState.RUNNING);
+  }
+
+  /**
+   * Claude Code's first-run keys on the credential volume an agent lease is about to mount
+   * (qits-2088): they are not login state, so a volume nobody signed in on yet — a new target, or
+   * one whose probe has not run — gets them before the lease's CLI could stop at its onboarding
+   * screen. {@link ClaudeFirstRun#ensure} checks first, so a seeded volume costs one short {@code
+   * docker run}, under the probe's deadline. Run in the probe image when it is on the node — never
+   * pulled here, under the converge lock — else in the lease's own, which is. A merge that fails
+   * never fails the lease: it is logged, and the next probe tries again.
+   */
+  private void seedFirstRunKeys(String leaseId, String leaseImage, ContainersDriver driver) {
+    try {
+      String probe = probeImage.get();
+      String image =
+          probe != null && !probe.isBlank() && NodeImages.present(docker, probe)
+              ? probe
+              : leaseImage;
+      RunnerDocker.Result keys = firstRun.ensure(driver, image);
+      if (!keys.ok()) {
+        LOG.warnf(
+            "system-runner could not write claude's first-run keys before lease %s (exit %d): %s",
+            leaseId, keys.exitCode(), brief(keys.detail()));
+      }
+    } catch (RuntimeException e) {
+      LOG.warnf(
+          "system-runner could not write claude's first-run keys before lease %s: %s",
+          leaseId, e.getMessage());
+    }
   }
 
   /** A graceful stop, then the removal; either already gone counts as gone. Empty on success. */

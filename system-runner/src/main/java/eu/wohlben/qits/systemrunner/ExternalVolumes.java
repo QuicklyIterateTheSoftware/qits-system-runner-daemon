@@ -17,12 +17,21 @@ import java.util.regex.Pattern;
  * <p><b>An external volume is never the runner's.</b> It is mounted where the runner's own node
  * volume would be — by every WORKSPACE and DESK lease and by the login probe — and nothing else:
  * never created, never labelled, never removed. A lease started while it is missing fails rather
- * than letting {@code docker run -v} make an empty one. Unset or blank means the runner's own
+ * than letting {@code docker run -v} make an empty one. Exactly {@value #OWN} means the runner's own
  * volume.
  *
- * <p>Parsed by {@link Main} beside {@code RunnerSettings} from the same environment; an invalid
- * name is a refusal to start ({@code RunnerExit.MISCONFIGURED}), as any other bad setting is.
- * qits-projects-desk-runner-daemon's {@code ExternalVolumes}, with the credential volume's name.
+ * <p><b>The choice outlives a reinstall</b> (qits-2088): a rotate-token install line carries only
+ * the url, the id, the registration token and the slots, so a reinstalled runner that read these
+ * three from its environment alone would fall back to its own volumes — an empty {@code
+ * /claude-home}, and every running WORKSPACE and DESK lease recreated onto it, because the mounts
+ * hash covers the names. {@link Main} therefore resolves them through {@link NodeVolumeRecord}:
+ * a set variable wins and is recorded in the state volume, {@value #OWN} resets to the runner's
+ * own, and an unset or blank one means what the record says. Removing a volume stays the
+ * decommission's job; neither the record nor a reset ever removes one.
+ *
+ * <p>An invalid name — set or recorded — is a refusal to start ({@code RunnerExit.MISCONFIGURED}),
+ * as any other bad setting is. qits-projects-desk-runner-daemon's {@code ExternalVolumes}, with the
+ * credential volume's name.
  */
 record ExternalVolumes(Optional<String> credential, Optional<String> m2, Optional<String> pnpm) {
 
@@ -35,6 +44,9 @@ record ExternalVolumes(Optional<String> credential, Optional<String> m2, Optiona
   /** {@code <envPrefix>PNPM_VOLUME}: the pnpm store ({@code /caches/pnpm}). */
   static final String PNPM_VOLUME = "PNPM_VOLUME";
 
+  /** A variable's value that means the runner's own volume, whatever the record says. */
+  static final String OWN = "-";
+
   /** Docker's own volume name charset. */
   static final Pattern NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]*");
 
@@ -43,7 +55,8 @@ record ExternalVolumes(Optional<String> credential, Optional<String> m2, Optiona
       new ExternalVolumes(Optional.empty(), Optional.empty(), Optional.empty());
 
   /**
-   * The three out of {@code env}; {@code null} and blank both mean unset.
+   * The three out of {@code env} alone, no record consulted; {@code null}, blank and {@value #OWN}
+   * all mean the runner's own.
    *
    * @throws RunnerSettings.Invalid naming the variable when a value is no docker volume name
    */
@@ -58,14 +71,24 @@ record ExternalVolumes(Optional<String> credential, Optional<String> m2, Optiona
   private static Optional<String> one(String variable, Function<String, String> env)
       throws RunnerSettings.Invalid {
     String raw = env.apply(variable);
-    if (raw == null || raw.isBlank()) {
+    if (raw == null || raw.isBlank() || OWN.equals(raw.strip())) {
       return Optional.empty();
     }
+    return Optional.of(name(variable, raw));
+  }
+
+  /**
+   * {@code raw}, stripped, when it is a docker volume name.
+   *
+   * @param source what named it, for the refusal: the variable, or the record and its key
+   * @throws RunnerSettings.Invalid naming {@code source} when it is not
+   */
+  static String name(String source, String raw) throws RunnerSettings.Invalid {
     String name = raw.strip();
     if (name.length() > 128 || !NAME.matcher(name).matches()) {
       throw new RunnerSettings.Invalid(
-          variable + " is not a docker volume name ([A-Za-z0-9][A-Za-z0-9_.-]*): '" + name + "'");
+          source + " is not a docker volume name ([A-Za-z0-9][A-Za-z0-9_.-]*): '" + name + "'");
     }
-    return Optional.of(name);
+    return name;
   }
 }

@@ -205,6 +205,17 @@ On the **platform host** the line sets
 so the target's one credential volume is the one the admin workspaces and qits-workspaces'
 transcript archive already use. Every other target gets its own derived volumes.
 
+**The choice is recorded and outlives a reinstall** (qits-2088). At every start the runner writes
+the three it resolved to `node-volumes.json` in the state volume — `{"credential": <name or null>,
+"m2": …, "pnpm": …}`, null being its own derived volume — and a variable that is unset or blank
+means what that record holds. So a rotate-token line, which carries only the url, the id, the
+registration token and the slots, keeps the external volumes the first install named, and the
+leases running on them are not recreated. A variable set to a name wins and is recorded; set to
+exactly `-` it switches back to the runner's own volume (recorded as null). A record that cannot be
+read, or that holds something other than a volume name or null, refuses the start (exit 2) naming
+the file. Neither a switch nor a reset removes a volume; that stays the decommission's job. The
+start's log names each volume and where it came from (`env`, `recorded`, `own`).
+
 ### Signing in
 
 `qits targets sign-in` needs no shell on the node (qits-1593): the server sends `signIn`, and the
@@ -218,7 +229,11 @@ After SUCCEEDED the login probe runs and sends `loginState`.
 Claude reads PRESENT only when it is logged in **and** its first-run keys (onboarding, the
 `/workspace` trust dialog, the upsells, `theme`/`tui`) are in `.claude/.claude.json` and
 `.claude/settings.json`; the probe and a successful sign-in merge in the ones that are absent and
-never overwrite one that is set (`ClaudeFirstRun`).
+never overwrite one that is set (`ClaudeFirstRun`). The keys are not login state (qits-2088): the
+probe merges them into a signed-out volume too (it still reads ABSENT), and the runner makes sure of
+them before every WORKSPACE or DESK lease container is created — in the probe image when it is on
+the node, else the lease's own — so no agent lease starts on an unseeded volume. A merge that fails
+there is logged and never fails the lease.
 
 By hand, `loginState.volume` names the credential volume; the targets page renders the login
 command from it, so it can never name another volume:
@@ -297,10 +312,10 @@ fewer than the full 32-bit id space is not unhealthy for it (qits-1576).
 | `QITS_SYSTEM_RUNNER_ID` | The target id the targets page minted. | required |
 | `QITS_SYSTEM_RUNNER_REGISTRATION_TOKEN` | One-time registration token, needed until registered. | required until registered |
 | `QITS_SYSTEM_RUNNER_SLOTS` | How many leases this machine runs. **The server takes it as the target's total.** | `1` |
-| `QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME` | An existing docker volume every WORKSPACE and DESK lease (and the login probe) mounts at `/claude-home`. | unset: `qits-system-runner-dot-claude-<id8>` |
-| `QITS_SYSTEM_RUNNER_M2_VOLUME` | Likewise for `/caches/m2`. | unset: the runner's own |
-| `QITS_SYSTEM_RUNNER_PNPM_VOLUME` | Likewise for `/caches/pnpm`. | unset: the runner's own |
-| `QITS_SYSTEM_RUNNER_STATE_DIR` | Where `client.json` lives — the state volume's mount point. | `/var/lib/qits-system-runner` |
+| `QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME` | An existing docker volume every WORKSPACE and DESK lease (and the login probe) mounts at `/claude-home`; `-` for the runner's own. Recorded in `node-volumes.json`. | unset: the recorded one, else `qits-system-runner-dot-claude-<id8>` |
+| `QITS_SYSTEM_RUNNER_M2_VOLUME` | Likewise for `/caches/m2`. | unset: the recorded one, else the runner's own |
+| `QITS_SYSTEM_RUNNER_PNPM_VOLUME` | Likewise for `/caches/pnpm`. | unset: the recorded one, else the runner's own |
+| `QITS_SYSTEM_RUNNER_STATE_DIR` | Where `client.json` and `node-volumes.json` live — the state volume's mount point. | `/var/lib/qits-system-runner` |
 | `QITS_SYSTEM_RUNNER_DOCKER_BINARY` | The docker CLI. | `docker` |
 | `QITS_SYSTEM_RUNNER_DOCKER_TIMEOUT` | Seconds any one docker call may take. | `120` |
 | `QITS_SYSTEM_RUNNER_ROLLOVER_TIMEOUT` | Seconds a successor has to take over. | `180` |

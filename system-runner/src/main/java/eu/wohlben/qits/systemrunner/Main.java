@@ -34,7 +34,9 @@ import org.jboss.logging.Logger;
  * facts are read ({@link CgroupSettings}: {@code …_HOST_CGROUP}, {@code …_VMSTAT}) — are
  * parsed here from the same environment, in runner mode only, and an invalid one refuses to start
  * with {@link RunnerExit#MISCONFIGURED} and one sentence naming the variable, as the toolkit's own
- * settings do.
+ * settings do. The node volumes are resolved against the record in the state volume ({@link
+ * NodeVolumeRecord}), so a reinstall whose line names none keeps the ones chosen before; a record
+ * that cannot be read refuses the start the same way, naming the file.
  */
 @QuarkusMain
 public class Main {
@@ -78,8 +80,10 @@ public class Main {
   }
 
   /**
-   * The runner: {@link ExternalVolumes} parsed (exit 2 when invalid) unless the toolkit answers
-   * this invocation by itself, then {@link RunnerLauncher} with a domain that mounts them.
+   * The runner: {@link ExternalVolumes} resolved through {@link NodeVolumeRecord} (exit 2 when
+   * invalid) unless the toolkit answers this invocation by itself, then {@link RunnerLauncher} with
+   * a domain that mounts them. The state directory is the toolkit's own reading of the settings —
+   * {@code RunnerSettings.parse}, which the launcher repeats — so its default is never spelled here.
    */
   static int runner(Vertx vertx, String[] args, Function<String, String> env, PrintStream out) {
     var identity = SystemRunnerIdentity.IDENTITY;
@@ -88,7 +92,7 @@ public class Main {
     CgroupSettings cgroups = CgroupSettings.DEFAULTS;
     if (!answersBeforeQuarkus(args, env)) {
       try {
-        external = ExternalVolumes.parse(identity, env);
+        external = NodeVolumeRecord.resolve(identity, RunnerSettings.parse(identity, env), env);
         buildkit = BuildkitSettings.parse(identity, env);
         cgroups = CgroupSettings.parse(identity, env);
       } catch (RunnerSettings.Invalid invalid) {

@@ -378,6 +378,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             unlessClosing(pullWork), unlessClosing(warmWork), this::reconvergeSoon, clock);
     this.dockerWork = daemonPool("system-runner-docker", DOCKER_THREADS);
     this.dockerOps = new DockerOperations(identity, settings.runnerId(), docker);
+    this.loginProbe =
+        new LoginProbe(
+            identity,
+            settings.runnerId(),
+            new RunnerDocker(identity, settings.dockerBinary(), LoginProbe.DEADLINE),
+            volumes,
+            clock);
     this.launcher =
         new LeaseLauncher(
             identity,
@@ -388,14 +395,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             () -> buildPlane,
             pulls,
             new PrivateEdge(docker, resolvConf),
-            new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf));
-    this.loginProbe =
-        new LoginProbe(
-            identity,
-            settings.runnerId(),
-            new RunnerDocker(identity, settings.dockerBinary(), LoginProbe.DEADLINE),
-            volumes,
-            clock);
+            new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf),
+            loginProbe.firstRun(),
+            () -> ack.probeImage());
     this.healthChecks = new HealthChecks(docker.deadline().multipliedBy(3));
     TargetHealthChecks.registerDefaults(
         healthChecks, identity, targetId, () -> lastLogin, () -> buildPlane);

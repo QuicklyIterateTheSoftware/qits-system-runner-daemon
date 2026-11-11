@@ -25,7 +25,9 @@ import org.jboss.logging.Logger;
  *       CLAUDE_CONFIG_DIR=/claude-home/.claude}, read by {@code loggedIn} in the JSON it prints —
  *       and PRESENT only once {@link ClaudeFirstRun}'s keys are there too: a logged-in CLI still
  *       stops a lease at its onboarding screen, so a login without them has them merged in here
- *       and is ABSENT when that fails (UNKNOWN when docker could not run the merge);
+ *       and is ABSENT when that fails (UNKNOWN when docker could not run the merge). A signed-out
+ *       CLI has them merged in as well — they are not login state (qits-2088) — and reads ABSENT
+ *       whatever the merge did;
  *   <li>Kimi Code: the credential file's presence under {@code /claude-home/.kimi-code} — the flat
  *       {@code credentials} file or {@code credentials/kimi-code.json}.
  * </ul>
@@ -120,6 +122,10 @@ final class LoginProbe {
       LoginPresence claude = claudeLogin(driver, image);
       if (claude == LoginPresence.PRESENT) {
         claude = firstRunKeys(driver, image);
+      } else if (claude == LoginPresence.ABSENT) {
+        // The keys are not login state (qits-2088): a volume nobody signed in on yet gets them
+        // too, so the lease that starts on it never stops at the onboarding screen. Still ABSENT.
+        seedFirstRunKeys(driver, image);
       }
       driver.remove(names.loginProbe(), docker.deadline());
       LoginPresence kimi = kimi(docker.run(kimiArgv(image)));
@@ -176,6 +182,22 @@ final class LoginProbe {
             + " could not be written (exit %d), so it reads %s: %s",
         keys.exitCode(), presence, LeaseLauncher.brief(keys.detail()));
     return presence;
+  }
+
+  /** A signed-out Claude Code's first-run keys, merged in; a failure is logged, never read. */
+  private void seedFirstRunKeys(ContainersDriver driver, String image) {
+    try {
+      RunnerDocker.Result keys = firstRun.ensure(driver, image);
+      if (!keys.ok()) {
+        LOG.warnf(
+            "system-runner's login probe could not write claude's first-run keys (exit %d): %s",
+            keys.exitCode(), LeaseLauncher.brief(keys.detail()));
+      }
+    } catch (RuntimeException e) {
+      LOG.warnf(
+          "system-runner's login probe could not write claude's first-run keys: %s",
+          e.getMessage());
+    }
   }
 
   /**
