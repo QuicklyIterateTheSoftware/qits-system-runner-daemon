@@ -36,7 +36,10 @@ import java.util.Set;
  *   restart           no                              no                       unless-stopped
  *   on ENDED          container removed               container removed, work volume kept
  *
+ *   resolvers         the node's (+)                  the node's (+)           the node's (+)
+ *
  *   (*) where the private edge is visible on the node's daemon, its VIP the first resolver
+ *   (+) the edge's VIP first with (*); else 100.96.0.1 first where the node tunnel's DNS answers
  * </pre>
  *
  * <p>A spec env key the policy owns ({@link #OWNED_ENV}) is refused, naming the key: {@code
@@ -52,8 +55,10 @@ import java.util.Set;
  * <p>The {@code qits-private} membership and its resolvers (*) are not this table's to decide:
  * they are a fact of the node's docker daemon, not of the slot type, so {@link PrivateEdge} adds
  * them to the spec this table built, just before the run, wherever the private edge is visible on
- * that daemon (qits-2062) — and off the platform host, nothing. {@link #containerSpec} itself
- * never sets either, and neither enters the spec-hash or mounts label.
+ * that daemon (qits-2062) — and off the platform host, nothing; there {@link NodeTunnel} puts the
+ * node tunnel's {@code 100.96.0.1} first among the resolvers where it answers (qits-2068), on
+ * {@code bridge} alone. {@link #containerSpec} itself never sets either, and neither enters the
+ * spec-hash or mounts label.
  *
  * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
  * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent

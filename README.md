@@ -105,7 +105,7 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | `/workspace` | container filesystem | work volume | work volume |
 | caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
 | networks | `bridge` + the build network, + `qits-private` where the private edge is visible | `bridge`, + `qits-private` where the private edge is visible | as WORKSPACE |
-| resolvers | the node's; the private edge's VIP first where it is visible | as CI | as CI |
+| resolvers | the node's; the private edge's VIP first where it is visible, else `100.96.0.1` first where the node tunnel answers | as CI | as CI |
 | `BUILDKIT_HOST` | injected | never | never |
 | cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no |
 | `--init` | yes | no | yes |
@@ -119,11 +119,32 @@ the `qits-private` overlay exists, exactly one swarm service carries
 `nameserver` lines) — the lease also joins `qits-private` and gets `--dns <vip>` followed by those
 upstreams, so private names resolve to the private edge and every other name still resolves
 (qits-2062, `PrivateEdge`; the same questions qits-containers' `PrivateEdgeResolver` asks). It is
-all or nothing: any piece missing, or docker not answering, runs the lease exactly as before with
-one log line — DEBUG off the platform host, where there is no overlay, WARN on it. It is asked at
-every create and never hashed into the spec-hash or mounts label, so a running lease is not
-recreated when the edge arrives or its VIP moves. The driver joins `qits-private` right after the
-run and removes the container when that join fails, which fails the lease.
+all or nothing: any piece missing, or docker not answering, runs the lease without the private
+edge with one log line — DEBUG off the platform host, where there is no overlay, WARN on it. It is
+asked at every create and never hashed into the spec-hash or mounts label, so a running lease is
+not recreated when the edge arrives or its VIP moves. The driver joins `qits-private` right after
+the run and removes the container when that join fails, which fails the lease.
+
+Off the platform host, a lease the private edge did not take may still resolve private names
+through the **node tunnel** (qits-2068, `NodeTunnel`): where the target's host runs the node
+tunnel, the runner's container — on `bridge` like a lease — reaches the private edge's tunnel and
+DNS address `100.96.0.1`. At every create the runner sends one UDP `A` query for the host of its
+own server URL (`QITS_SYSTEM_RUNNER_URL`) to `100.96.0.1:53`, waiting one second; only a NOERROR
+reply with the query's id counts. Then the lease stays on `bridge` alone, with no extra network,
+and gets `--dns 100.96.0.1` followed by the runner's own upstreams, read exactly as above without
+`100.96.0.1` itself. Silence, REFUSED or any other answer runs the lease with the node's resolvers,
+as before, with a DEBUG line; an answering tunnel and no upstream is the same with a WARN. A lease
+that already got the private edge's VIP is never probed. Nothing of it is hashed. The known limits:
+
+- **A lease keeps the resolvers it was created with.** If the tunnel goes down later, every public
+  lookup first waits glibc's timeout (5 s) on `100.96.0.1` before it asks the next server, until the
+  tunnel is back or the lease is recreated. While the tunnel is up, public names resolve at once:
+  the edge answers them REFUSED and glibc moves on.
+- **A CI lease's builds do not see private names.** buildkitd's `RUN` steps resolve through
+  docker's `127.0.0.11` on the build network, not through the lease's resolvers; the registry, the
+  mirror and the git host stay on their public names.
+- **The tunnel's MTU is 1380**, against `bridge`'s 1500: large packets through it rely on path MTU
+  discovery.
 
 A CI lease gets `BUILDKIT_HOST=tcp://qits-system-runner-buildkitd-<id8>:1234`, mounts the CI caches
 and nothing else — **never the credential volume, the agent caches or a work volume** — and is then
@@ -153,7 +174,8 @@ A target is **one docker container**: the static `qits-system-runner` binary in 
 `registry.qits.<domain>/qits/qits-system-runner:<version>`, started with docker's own restart
 policy (`unless-stopped`) and the host's docker socket mounted so it can start leases. No service
 to install, no binary on the host. It is never on the platform's internal network: it reaches the
-platform only through its public names.
+platform through its public names — or, where the host runs the node tunnel, its leases resolve the
+private names through it (see the node tunnel above).
 
 ### What you need
 

@@ -145,6 +145,9 @@ class EstateReconcileTest {
   /** The runner's own resolv.conf as {@link PrivateEdge} reads it; written where a test needs it. */
   private Path resolvConf;
 
+  /** Whether the node tunnel's DNS answers: not on this node unless a test says so. */
+  private NodeTunnel.Probe tunnelProbe = NodeTunnel.NEVER;
+
   @BeforeEach
   void setUp() throws Exception {
     host = new FakeRunnerHost(vertx, IDENTITY, CODEC);
@@ -729,6 +732,104 @@ class EstateReconcileTest {
         docker.calls()::toString);
   }
 
+  // ---- the node tunnel (qits-2068) --------------------------------------------------------------
+
+  /** What the node tunnel's probe was asked, by name. */
+  private final List<String> tunnelAsked = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+  /** A node whose host runs the node tunnel: its DNS answers, the runner's upstream the LAN's. */
+  private void nodeTunnelUp() throws Exception {
+    tunnelProbe =
+        (server, name, timeout) -> {
+          tunnelAsked.add(server.getHostString() + ":" + server.getPort() + " " + name);
+          return true;
+        };
+    Files.writeString(resolvConf, "nameserver 192.168.188.1\n");
+  }
+
+  @Test
+  void onANodeWithTheTunnelAWorkspaceLeaseRunsOnBridgeAloneWithTheTunnelsDnsFirst()
+      throws Exception {
+    nodeTunnelUp();
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<String> run = runOf(lease(L1));
+    int dns = run.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "100.96.0.1", "--dns", "192.168.188.1"),
+        run.subList(dns, dns + 4),
+        run::toString);
+    assertEquals(2, run.stream().filter("--dns"::equals).count(), run::toString);
+    assertEquals("bridge", run.get(run.indexOf("--network") + 1));
+    assertTrue(
+        docker.calls("network").stream().noneMatch(c -> c.contains("connect")),
+        "no network connect: " + docker.calls());
+    assertEquals(
+        List.of(
+            "qits.system.runner=r1",
+            "qits.system.runner.lease=" + L1,
+            "qits.system.runner.mounts=" + mounts(work("ws-42")),
+            "qits.system.runner.slot-type=WORKSPACE",
+            "qits.system.runner.spec-hash=" + H1),
+        labelsOf(run),
+        "the labels of the same entry without the tunnel");
+    assertEquals(
+        List.of("100.96.0.1:53 " + java.net.URI.create(host.base()).getHost()),
+        tunnelAsked,
+        "the server URL's host, asked at the tunnel's DNS");
+  }
+
+  @Test
+  void onANodeWithTheTunnelACiLeaseKeepsItsBuildNetworkConnect() throws Exception {
+    nodeTunnelUp();
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+    List<String> run = runOf(lease(L1));
+    int dns = run.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "100.96.0.1", "--dns", "192.168.188.1"),
+        run.subList(dns, dns + 4),
+        run::toString);
+    assertFalse(
+        has(docker.calls(), List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
+        docker.calls()::toString);
+  }
+
+  @Test
+  void whereThePrivateEdgeIsVisibleTheTunnelIsNeverAskedAndTheLeaseJoinsQitsPrivate()
+      throws Exception {
+    nodeTunnelUp();
+    privateEdgeVisible();
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitCall(calls -> has(calls, List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))));
+    List<String> run = runOf(lease(L1));
+    int dns = run.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "10.231.0.2", "--dns", "192.168.188.1", "--dns", "1.1.1.1"),
+        run.subList(dns, dns + 6),
+        run::toString);
+    assertFalse(run.contains("100.96.0.1"), run::toString);
+    assertTrue(tunnelAsked.isEmpty(), "never probed: " + tunnelAsked);
+  }
+
+  private static List<String> labelsOf(List<String> run) {
+    List<String> labels = new ArrayList<>();
+    for (int i = 0; i < run.size() - 1; i++) {
+      if (run.get(i).equals("--label")) {
+        labels.add(run.get(i + 1));
+      }
+    }
+    return labels;
+  }
+
   @Test
   void aCiLeaseWhoseBuildPlaneCannotStartFailsAndRunsNothing() throws Exception {
     docker.answerFor("network-inspect", BUILD_NET, 0, "bridge\n", "");
@@ -1219,7 +1320,8 @@ class EstateReconcileTest {
                 Duration.ofMillis(200), Duration.ofSeconds(60), Duration.ofSeconds(60)),
             Clock.systemUTC(),
             SignInProcesses.FORKED,
-            resolvConf);
+            resolvConf,
+            tunnelProbe);
     runner =
         new RunnerRuntime<>(
             vertx,

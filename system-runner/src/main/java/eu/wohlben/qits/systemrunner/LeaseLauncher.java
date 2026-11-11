@@ -47,8 +47,11 @@ import org.jboss.logging.Logger;
  * PrivateEdge}, qits-2062): asked just before each {@code run}, joined by the driver right after
  * it ({@code ContainerSpec.extraNetworks}, {@code --dns}). A join that fails removes the container
  * and fails the lease. Off the platform host there is no overlay and the lease runs on {@code
- * bridge} with the node's resolvers, exactly as before. Neither is hashed: a running lease is not
- * recreated when the edge arrives or moves.
+ * bridge} with the node's resolvers — unless the node runs the node tunnel: where the tunnel's
+ * DNS at {@code 100.96.0.1} answers, the lease stays on {@code bridge} alone and gets that address
+ * as its first resolver, followed by the runner's own ({@link NodeTunnel}, qits-2068), so private
+ * names resolve through the tunnel. Nothing of either is hashed: a running lease is not recreated
+ * when the edge arrives or moves, or the tunnel comes or goes.
  *
  * <p><b>A CI lease</b> starts the target's {@link BuildPlane} first (on the first one, and
  * re-checked on every later one), makes the CI caches labelled, runs with {@code BUILDKIT_HOST}
@@ -105,6 +108,7 @@ final class LeaseLauncher {
   private final Supplier<BuildPlane> buildPlane;
   private final ImagePulls pulls;
   private final PrivateEdge privateEdge;
+  private final NodeTunnel nodeTunnel;
 
   LeaseLauncher(
       RunnerIdentity identity,
@@ -114,7 +118,8 @@ final class LeaseLauncher {
       LeaseContainers containers,
       Supplier<BuildPlane> buildPlane,
       ImagePulls pulls,
-      PrivateEdge privateEdge) {
+      PrivateEdge privateEdge,
+      NodeTunnel nodeTunnel) {
     this.identity = identity;
     this.docker = docker;
     this.names = names;
@@ -123,6 +128,7 @@ final class LeaseLauncher {
     this.buildPlane = buildPlane;
     this.pulls = pulls;
     this.privateEdge = privateEdge;
+    this.nodeTunnel = nodeTunnel;
   }
 
   /**
@@ -360,9 +366,10 @@ final class LeaseLauncher {
     labels.put(LeaseContainers.slotTypeLabel(identity), entry.slotType().name());
     labels.put(LeaseContainers.specHashLabel(identity), entry.specHash());
     labels.put(LeaseContainers.mountsLabel(identity), mounts);
-    // Asked at every create and never hashed: the labels above are the server's spec and the
-    // runner's mounts, so a lease is not recreated when the edge's VIP moves (qits-2062).
-    ContainerSpec run = privateEdge.apply(container, name);
+    // Both asked at every create and never hashed: the labels above are the server's spec and the
+    // runner's mounts, so a lease is not recreated when the edge's VIP moves (qits-2062) or the
+    // node tunnel comes or goes (qits-2068). The tunnel only where the edge added no resolvers.
+    ContainerSpec run = nodeTunnel.apply(privateEdge.apply(container, name), name);
     boolean onEdge = run.extraNetworks().contains(PrivateEdge.NETWORK);
     ContainersDriver.Started started = driver.run(run, name, labels, policy.lifecycle(), deadline);
     if (!started.started()) {
@@ -388,7 +395,9 @@ final class LeaseLauncher {
         entry.slotType(),
         leaseId,
         name,
-        run.dns().isEmpty() ? "" : " on " + PrivateEdge.NETWORK + ", resolvers " + run.dns());
+        onEdge
+            ? " on " + PrivateEdge.NETWORK + ", resolvers " + run.dns()
+            : NodeTunnel.on(run) ? " via the node tunnel, resolvers " + run.dns() : "");
     return Outcome.of(LeaseState.RUNNING);
   }
 

@@ -184,7 +184,7 @@ final class PrivateEdge {
               + ")");
     }
 
-    List<String> upstreams = upstreamsBesides(vip.get());
+    List<String> upstreams = upstreamsBesides(resolvConf, vip.get());
     if (upstreams.isEmpty()) {
       return off(
           spec,
@@ -237,8 +237,13 @@ final class PrivateEdge {
     return found.size() == 1 ? dnsServer(found.getFirst()) : Optional.empty();
   }
 
-  /** The runner's upstream resolvers, without {@code vip}; empty when the file cannot be read. */
-  private List<String> upstreamsBesides(String vip) {
+  /**
+   * The runner's upstream resolvers as {@link #upstreams} reads them from {@code resolvConf},
+   * without {@code first} — the address the caller puts ahead of them, never listed twice; empty
+   * when the file cannot be read. Shared with {@link NodeTunnel}, whose first resolver is the node
+   * tunnel's.
+   */
+  static List<String> upstreamsBesides(Path resolvConf, String first) {
     String text;
     try {
       text = Files.readString(resolvConf, StandardCharsets.UTF_8);
@@ -246,7 +251,7 @@ final class PrivateEdge {
       LOG.debugf("system-runner could not read %s: %s", resolvConf, e.getMessage());
       return List.of();
     }
-    return upstreams(text).stream().filter(s -> !s.equals(vip)).toList();
+    return upstreams(text).stream().filter(s -> !s.equals(first)).toList();
   }
 
   /**
@@ -308,8 +313,11 @@ final class PrivateEdge {
     }
   }
 
-  /** The spec with these two components replaced and every other one as it was. */
-  private static ContainerSpec with(
+  /**
+   * The spec with these two components replaced and every other one as it was — also {@link
+   * NodeTunnel}'s route, so both build the spec the same way.
+   */
+  static ContainerSpec with(
       ContainerSpec spec, List<String> dns, List<String> extraNetworks) {
     return new ContainerSpec(
         spec.image(),

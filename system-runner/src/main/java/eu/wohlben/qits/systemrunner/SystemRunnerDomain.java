@@ -309,13 +309,20 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       Clock clock,
       SignInProcesses processes) {
     this(
-        settings, external, buildkit, cgroups, timing, clock, processes, PrivateEdge.RESOLV_CONF);
+        settings,
+        external,
+        buildkit,
+        cgroups,
+        timing,
+        clock,
+        processes,
+        PrivateEdge.RESOLV_CONF,
+        NodeTunnel.UDP);
   }
 
   /**
-   * Every seam: the root every other constructor ends in. {@code resolvConf} is where {@link
-   * PrivateEdge} reads the upstream resolvers a lease on the private edge gets after its VIP —
-   * another path for the suite only.
+   * The suite's: another resolv.conf, and a node without the node tunnel ({@link
+   * NodeTunnel#NEVER}), so a lease off the private edge runs with the node's resolvers.
    */
   SystemRunnerDomain(
       RunnerSettings settings,
@@ -326,6 +333,34 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       Clock clock,
       SignInProcesses processes,
       Path resolvConf) {
+    this(
+        settings,
+        external,
+        buildkit,
+        cgroups,
+        timing,
+        clock,
+        processes,
+        resolvConf,
+        NodeTunnel.NEVER);
+  }
+
+  /**
+   * Every seam: the root every other constructor ends in. {@code resolvConf} is where {@link
+   * PrivateEdge} and {@link NodeTunnel} read the upstream resolvers a lease gets after the edge's
+   * VIP or the tunnel's address, and {@code tunnelProbe} asks whether the node tunnel's DNS
+   * answers — both another for the suite only.
+   */
+  SystemRunnerDomain(
+      RunnerSettings settings,
+      ExternalVolumes external,
+      BuildkitSettings buildkit,
+      CgroupSettings cgroups,
+      Timing timing,
+      Clock clock,
+      SignInProcesses processes,
+      Path resolvConf,
+      NodeTunnel.Probe tunnelProbe) {
     this.memory = new MemorySampler(cgroups);
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
@@ -352,7 +387,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             containers,
             () -> buildPlane,
             pulls,
-            new PrivateEdge(docker, resolvConf));
+            new PrivateEdge(docker, resolvConf),
+            new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf));
     this.loginProbe =
         new LoginProbe(
             identity,
