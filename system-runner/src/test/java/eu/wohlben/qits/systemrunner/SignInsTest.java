@@ -333,7 +333,9 @@ class SignInsTest {
     login.print("visit: " + CLAUDE_URL + "\n");
 
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-    while (sent.getLast().state() != SignInState.EXPIRED && System.nanoTime() < deadline) {
+    // EXPIRED is sent before the kill lands, so wait for both (qits-2088: a CI flake).
+    while ((sent.getLast().state() != SignInState.EXPIRED || !login.killed)
+        && System.nanoTime() < deadline) {
       Thread.sleep(20);
     }
     assertEquals(SignInState.EXPIRED, sent.getLast().state());
