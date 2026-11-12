@@ -1194,15 +1194,48 @@ class EstateReconcileTest {
           }
         };
     start();
-    awaitTrue(() -> pullsOf(WARM) == 1);
-    // Settled, its failure kept: an Ack ahead of that would clear nothing and find it running.
+    awaitTrue(() -> pullsOf(WARM) >= 1);
+    // Settled, its failure kept until the next estate: the first connection's own Ack, which runs
+    // concurrently with its estate, tries again only a warm pull an earlier connection failed.
     awaitTrue(() -> domain.pullingSince(WARM).isEmpty());
+    Thread.sleep(300);
+    assertEquals(1, pullsOf(WARM), "one pull on the first connection: " + docker.calls());
 
     // The reconnect's Ack warms the kept estate's images, before any estate on the new socket.
     docker.answerFor("pull", WARM, 0, "", "");
     host.closeSocket(1001, "going away");
     awaitTrue(() -> hellos.get() == 2);
     awaitTrue(() -> pullsOf(WARM) == 2);
+  }
+
+  @Test
+  void aWarmPullTheFirstEstateFailedIsNotPulledAgainByThatConnectionsLateAck() throws Exception {
+    missing(WARM);
+    docker.answerFor("pull", WARM, 1, "", "Error response from daemon: connection refused");
+    // The Ack's node volumes take a second each, so the estate's warm pull fails before the Ack
+    // reaches its pre-pulls: the order the runtime's concurrent dispatch may always take.
+    docker.hang("volume-create", 1);
+    host.script =
+        (h, message) -> {
+          if (message instanceof Hello) {
+            h.send(new Ack(IDENTITY.capabilityVersion(), 2, null, ACK.extensions()));
+            h.send(new Estate(List.of(), List.of(), List.of(WARM)));
+          }
+        };
+    start();
+
+    awaitTrue(() -> pullsOf(WARM) >= 1);
+    awaitTrue(() -> domain.pullingSince(WARM).isEmpty());
+    // The Ack has made its node volumes and reached its pre-pulls: its warm of the kept estate
+    // asks whether the image is on the node — the estate's own warm asked first.
+    awaitTrue(
+        () ->
+            docker.calls("image").stream()
+                    .filter(c -> c.contains("inspect") && c.contains(WARM))
+                    .count()
+                >= 2);
+    Thread.sleep(500);
+    assertEquals(1, pullsOf(WARM), "one pull on one connection: " + docker.calls());
   }
 
   @Test

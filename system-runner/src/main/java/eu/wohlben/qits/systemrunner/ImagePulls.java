@@ -89,11 +89,14 @@ final class ImagePulls {
   private static final class Failure {
     private final String detail;
     private final boolean warm;
+    /** The {@link #session} it failed in. */
+    private final long session;
     private boolean reported;
 
-    private Failure(String detail, boolean warm) {
+    private Failure(String detail, boolean warm, long session) {
       this.detail = detail;
       this.warm = warm;
+      this.session = session;
     }
   }
 
@@ -110,6 +113,8 @@ final class ImagePulls {
   private final Set<String> warmOnly = new HashSet<>();
   private final Set<String> pulled = new HashSet<>();
   private final Map<String, Failure> failed = new HashMap<>();
+  /** The connection the pulls settle in now: {@link #newSession} counts them. */
+  private long session;
   /** The warm pull on {@link #warmExecutor} now, or null: one at a time. */
   private String warmInFlight;
   /** The warm pulls waiting for {@link #warmInFlight} to settle, in the order they were named. */
@@ -237,9 +242,23 @@ final class ImagePulls {
     LOG.infof("system-runner warms %s off the convergence", image);
   }
 
-  /** A new connection's {@code Ack}: a failed warm pull is tried again when it is named again. */
+  /**
+   * A new connection, before any of its messages: a pull that fails from here on is this
+   * connection's own ({@link #retryWarm}).
+   */
+  synchronized void newSession() {
+    session++;
+  }
+
+  /**
+   * A new connection's {@code Ack}: a warm pull that failed on an earlier connection is tried again
+   * when it is named again. One this connection's own estate already made fail is kept until the
+   * next {@code estate} — the runtime runs the {@code Ack} and the estate concurrently, so the
+   * estate's warm pull may have failed before the {@code Ack} got here, and clearing it would pull
+   * the image twice on one connection.
+   */
   synchronized void retryWarm() {
-    failed.values().removeIf(f -> f.warm);
+    failed.values().removeIf(f -> f.warm && f.session < session);
   }
 
   /**
@@ -289,7 +308,7 @@ final class ImagePulls {
       since.remove(image);
       warm = warmOnly.remove(image);
       if (outcome.isPresent()) {
-        failed.put(image, new Failure(outcome.get(), warm));
+        failed.put(image, new Failure(outcome.get(), warm, session));
       } else {
         pulled.add(image);
       }
