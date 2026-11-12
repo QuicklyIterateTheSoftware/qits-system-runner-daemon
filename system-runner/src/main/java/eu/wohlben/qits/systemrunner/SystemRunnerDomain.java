@@ -570,6 +570,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.session = session;
     live = false;
     estateThisSession = false;
+    pulls.newSession();
     holdRunning(session, null);
   }
 
@@ -614,7 +615,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * RUNNING lease of the estate kept from the last connection. The {@code Ack} carries the CI slot
    * image's repository prefix only ({@link SlotImages#ci()}), never a pinned reference, so the CI
    * image itself is pulled once a lease names it — off the converge lock, like this. The kept
-   * estate's {@code warmImages} go to the warm pool after them.
+   * estate's {@code warmImages} go to the warm pool after them, a warm pull that failed on an
+   * earlier connection tried again. The kept estate may already be this connection's own: the
+   * runtime runs the {@code Ack} and the estate concurrently, so the estate can arrive, and its warm
+   * pull fail, before this runs — which is why {@link ImagePulls#retryWarm} is per connection, and
+   * keeps a failure this connection's estate made until the next estate.
    */
   private void prePull(RunnerSession session) {
     try {
