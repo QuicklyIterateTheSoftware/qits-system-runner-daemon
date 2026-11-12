@@ -1371,7 +1371,7 @@ class EstateReconcileTest {
     HealthChecked checked = host.await(HealthChecked.class);
     assertEquals("req-1", checked.requestId());
     assertEquals(
-        List.of("docker", "nodeInventory", "login", "session", "buildkit", "network"),
+        List.of("docker", "nodeInventory", "login", "session", "buildkit", "network", "resolvers"),
         checked.checks().stream().map(c -> c.name()).toList());
     assertTrue(checked.checks().get(2).ok(), "login reports, never fails");
     assertEquals(DOT_CLAUDE, checked.checks().get(2).data().get("volume"));

@@ -428,7 +428,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.nodeResolvers = new NodeResolvers(privateEdge, nodeTunnel, clock);
     this.healthChecks = new HealthChecks(docker.deadline().multipliedBy(3));
     TargetHealthChecks.registerDefaults(
-        healthChecks, identity, targetId, () -> lastLogin, () -> buildPlane);
+        healthChecks, identity, targetId, () -> lastLogin, () -> buildPlane, resolvConf);
     this.timing = timing;
     this.clock = clock;
     ScheduledThreadPoolExecutor pool =

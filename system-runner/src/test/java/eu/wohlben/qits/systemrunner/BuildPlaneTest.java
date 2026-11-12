@@ -13,6 +13,7 @@ import eu.wohlben.qits.runner.toolkit.RunnerSettings;
 import eu.wohlben.qits.runner.toolkit.health.RunnerHealthCheck;
 import eu.wohlben.qits.runner.toolkit.testing.FakeDocker;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -391,6 +392,37 @@ class BuildPlaneTest {
     assertFalse(TargetHealthChecks.network(plane).ok());
     docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
     assertTrue(TargetHealthChecks.network(plane).ok());
+  }
+
+  @Test
+  void buildkitDataCarriesThePlanesResolversAndTheirConfiguredStamp() throws Exception {
+    BuildPlane tunnelled = planeWith(() -> TUNNEL);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+
+    RunnerHealthCheck.Result buildkit = TargetHealthChecks.buildkit(tunnelled);
+
+    assertEquals(TUNNEL, buildkit.data().get("resolvers"));
+    assertEquals(tunnelled.configuredStamp(TUNNEL), buildkit.data().get("configuredStamp"));
+  }
+
+  @Test
+  void theResolversCheckListsTheRunnersOwnNameserversInOrder() throws Exception {
+    Path resolvConf = dir.resolve("resolv.conf");
+    Files.writeString(
+        resolvConf, "nameserver 100.96.0.1\nnameserver 192.168.188.1\n# ExtServers: [1.1.1.1]\n");
+
+    RunnerHealthCheck.Result resolvers = TargetHealthChecks.resolvers(resolvConf);
+
+    assertTrue(resolvers.ok(), resolvers.detail());
+    assertEquals(List.of("100.96.0.1", "192.168.188.1"), resolvers.data().get("own"));
+  }
+
+  @Test
+  void theResolversCheckIsOkWithAnEmptyListWhenTheFileCannotBeRead() {
+    RunnerHealthCheck.Result resolvers = TargetHealthChecks.resolvers(dir.resolve("missing"));
+
+    assertTrue(resolvers.ok(), resolvers.detail());
+    assertEquals(List.of(), resolvers.data().get("own"));
   }
 
   // --- settings ----------------------------------------------------------------------------------

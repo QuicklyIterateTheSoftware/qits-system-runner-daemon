@@ -68,8 +68,8 @@ It reports an `inventory` at the greeting, around every convergence and whenever
 sees a change; probes the agent logins on the credential volume (`loginState`) after every
 connection, on request, then every 5 minutes while either is not PRESENT and hourly otherwise; and
 answers a `healthCheck` with the toolkit's `docker`, `nodeInventory` and `session` checks plus
-`login` (reports only — the server decides), `buildkit` and `network` (see "The build plane"). It never asks for work: there is no `reserve`, the
-server allocates.
+`login` (reports only — the server decides), `buildkit`, `network` and `resolvers` (see "The build
+plane"). It never asks for work: there is no `reserve`, the server allocates.
 
 ### Memory and OOM kills
 
@@ -323,9 +323,14 @@ CI step's deadline (qits-1807), and at the default width of one, a build no long
 buildkitd's own per-operation semaphore instead.
 
 Health: `buildkit` fails on a stale stamp, a stopped builder or a foreign container under its name,
-and is ok while no CI lease ever needed one; `network` is ok while missing only when no builder
-exists. Both are read-only. There is no uid/gid range check: a host whose user namespace maps
-fewer than the full 32-bit id space is not unhealthy for it (qits-1576).
+and is ok while no CI lease ever needed one; its `data` carries the builder's own `resolvers`
+alongside `configuredStamp`, so an operator can see whether the node tunnel's is in effect. `network`
+is ok while missing only when no builder exists. Both are read-only. There is no uid/gid range
+check: a host whose user namespace maps fewer than the full 32-bit id space is not unhealthy for it
+(qits-1576). `resolvers` (qits-2090) never probes anything: it is always ok, and its `data.own`
+lists the runner's own `resolv.conf` `nameserver` addresses, in order — the resolvers this runner
+itself, not its builder, uses — so `100.96.0.1` showing there confirms the node tunnel is in effect
+for the runner too.
 
 ### Environment
 

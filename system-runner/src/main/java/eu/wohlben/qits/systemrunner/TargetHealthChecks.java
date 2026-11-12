@@ -6,10 +6,16 @@ import eu.wohlben.qits.runner.toolkit.health.HealthChecks;
 import eu.wohlben.qits.runner.toolkit.health.RunnerHealthCheck;
 import eu.wohlben.qits.systemrunner.protocol.LoginState;
 import eu.wohlben.qits.systemrunner.protocol.SystemRunnerBinary;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Supplier;
+import org.jboss.logging.Logger;
 
 /**
  * The target runner's health checks, all run on every {@code healthCheck}, in this order; the
@@ -28,19 +34,29 @@ import java.util.function.Supplier;
  *   <li>{@code session} — {@link DefaultHealthChecks#session()}: {@code data: {connected,
  *       connectedSince, slots, held}}. Read-only.
  *   <li>{@code buildkit} — the target's builder runs under the stamp the next CI lease would start
- *       it with; {@code data: {container, presence, state, stamp, configuredStamp, address, image,
- *       stateVolume}}. Read-only ({@link BuildPlane#builder()}); never started from here. A builder
- *       never created is <b>ok</b>: it comes up on the first CI lease. A stale stamp, a stopped
- *       builder or a foreign container under its name fails.
+ *       it with; {@code data: {container, presence, state, stamp, configuredStamp, resolvers,
+ *       address, image, stateVolume}}. Read-only ({@link BuildPlane#builder()}); never started from
+ *       here. A builder never created is <b>ok</b>: it comes up on the first CI lease. A stale
+ *       stamp, a stopped builder or a foreign container under its name fails. {@code resolvers} is
+ *       {@link BuildPlane#resolvers()}, the node tunnel's answer the builder is (or would be)
+ *       started with.
  *   <li>{@code network} — the build network exists; {@code data: {network, presence, driver,
  *       builder}}. Missing is ok while no builder was ever created, and fails once one exists: a
  *       builder whose network went is one no CI lease can reach.
+ *   <li>{@code resolvers} (qits-2090) — never probes anything; {@code data: {own}}, the {@code
+ *       nameserver} addresses of the runner's own {@code resolv.conf}, in order. Read-only, and
+ *       <b>always ok</b>: it reports what this runner itself (not its builder) resolves through, so
+ *       an operator can see the node tunnel resolver (100.96.0.1) is in effect. An unreadable file
+ *       answers an empty list.
  * </ol>
  *
- * <p>The last two are qits-ci-runner-daemon's {@code BuildkitCheck} and {@code NetworkCheck}, as
- * closures over what they read rather than beans looked up in the context: nothing here is CDI.
+ * <p>The first two of the last three are qits-ci-runner-daemon's {@code BuildkitCheck} and {@code
+ * NetworkCheck}, as closures over what they read rather than beans looked up in the context:
+ * nothing here is CDI.
  */
 final class TargetHealthChecks {
+
+  private static final Logger LOG = Logger.getLogger(TargetHealthChecks.class);
 
   private TargetHealthChecks() {}
 
@@ -49,7 +65,8 @@ final class TargetHealthChecks {
       RunnerIdentity identity,
       String targetId,
       Supplier<LoginState> lastLogin,
-      Supplier<BuildPlane> buildPlane) {
+      Supplier<BuildPlane> buildPlane,
+      Path resolvConf) {
     checks
         .register(DefaultHealthChecks.docker())
         .register(
@@ -57,19 +74,22 @@ final class TargetHealthChecks {
         .register(RunnerHealthCheck.named("login", null, ctx -> login(lastLogin.get())))
         .register(DefaultHealthChecks.session())
         .register(RunnerHealthCheck.named("buildkit", null, ctx -> buildkit(buildPlane.get())))
-        .register(RunnerHealthCheck.named("network", null, ctx -> network(buildPlane.get())));
+        .register(RunnerHealthCheck.named("network", null, ctx -> network(buildPlane.get())))
+        .register(RunnerHealthCheck.named("resolvers", null, ctx -> resolvers(resolvConf)));
   }
 
   static RunnerHealthCheck.Result buildkit(BuildPlane plane) {
     BuildPlane.Builder builder = plane.builder();
     String container = plane.names().builder();
-    String configured = plane.configuredStamp();
+    List<String> dns = plane.resolvers();
+    String configured = plane.configuredStamp(dns);
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("container", container);
     data.put("presence", builder.presence().name());
     data.put("state", builder.status());
     data.put("stamp", builder.stamp());
     data.put("configuredStamp", configured);
+    data.put("resolvers", dns);
     data.put("address", plane.names().address());
     data.put("image", plane.image());
     data.put("stateVolume", plane.names().stateVolume());
@@ -162,5 +182,41 @@ final class TargetHealthChecks {
             + " at "
             + last.checkedAt(),
         data);
+  }
+
+  /**
+   * (qits-2090) Never probes anything: the {@code nameserver} addresses this runner's own {@code
+   * resolvConf} holds, in order — what this runner itself, not its builder, resolves through.
+   * {@code data: {own}}; always ok.
+   */
+  static RunnerHealthCheck.Result resolvers(Path resolvConf) {
+    List<String> own = ownResolvers(resolvConf);
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("own", own);
+    return RunnerHealthCheck.Result.ok("this runner resolves through " + own, data);
+  }
+
+  /**
+   * The {@code nameserver <addr>} lines of {@code resolvConf}, verbatim and in order — no {@code #
+   * ExtServers} comment, loopback kept, repeats kept: unlike {@link
+   * PrivateEdge#upstreams(String)}, this reports what the file literally says. Empty when it
+   * cannot be read.
+   */
+  private static List<String> ownResolvers(Path resolvConf) {
+    List<String> lines;
+    try {
+      lines = Files.readAllLines(resolvConf, StandardCharsets.UTF_8);
+    } catch (Exception e) {
+      LOG.debugf("system-runner could not read %s: %s", resolvConf, e.getMessage());
+      return List.of();
+    }
+    List<String> nameservers = new ArrayList<>();
+    for (String line : lines) {
+      String[] fields = line.strip().split("\\s+");
+      if (fields.length >= 2 && fields[0].equals("nameserver")) {
+        nameservers.add(fields[1]);
+      }
+    }
+    return List.copyOf(nameservers);
   }
 }
