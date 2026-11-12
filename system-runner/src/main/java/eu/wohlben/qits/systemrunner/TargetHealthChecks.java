@@ -37,7 +37,9 @@ import org.jboss.logging.Logger;
  *       it with; {@code data: {container, presence, state, stamp, configuredStamp, resolvers,
  *       address, image, stateVolume}}. Read-only ({@link BuildPlane#builder()}); never started from
  *       here. A builder never created is <b>ok</b>: it comes up on the first CI lease. A stale
- *       stamp, a stopped builder or a foreign container under its name fails. {@code resolvers} is
+ *       stamp is <b>ok</b> too, with {@code stale: true}: the next CI lease replaces it, and a
+ *       failure would quarantine the target out of the very CI lease that does (qits-2090). A
+ *       stopped builder or a foreign container under its name fails. {@code resolvers} is
  *       {@link BuildPlane#resolvers()}, the node tunnel's answer the builder is (or would be)
  *       started with.
  *   <li>{@code network} — the build network exists; {@code data: {network, presence, driver,
@@ -114,7 +116,11 @@ final class TargetHealthChecks {
               container + " is " + builder.status() + "; the next CI lease starts it", data);
         }
         if (!configured.equals(builder.stamp())) {
-          yield RunnerHealthCheck.Result.failed(
+          // Ok, not failed (qits-2090): the next CI lease replaces it, and a failed check
+          // quarantines the target, which then is granted no CI lease to replace it with. The
+          // stamp moves with an image bump and with the node tunnel coming or going.
+          data.put("stale", true);
+          yield RunnerHealthCheck.Result.ok(
               container
                   + " runs stamp "
                   + builder.stamp()
@@ -123,6 +129,7 @@ final class TargetHealthChecks {
                   + "; the next CI lease replaces it",
               data);
         }
+        data.put("stale", false);
         yield RunnerHealthCheck.Result.ok(container + " is running, stamp " + configured, data);
       }
     };

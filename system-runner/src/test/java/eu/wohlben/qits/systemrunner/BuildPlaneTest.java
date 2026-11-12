@@ -380,13 +380,20 @@ class BuildPlaneTest {
   }
 
   @Test
-  void aStaleOrStoppedBuilderFailsAndAMissingNetworkBesideABuilderFails() throws Exception {
+  void aStoppedBuilderFailsAStaleOneIsOkAndAMissingNetworkBesideABuilderFails() throws Exception {
+    // A stale stamp is reported, not failed: a failure quarantines the target out of the CI
+    // lease that would replace the builder (qits-2090).
     docker.answerFor("inspect", BUILDER, 0, "0123456789abcdef|running\n", "");
-    assertFalse(TargetHealthChecks.buildkit(plane).ok());
+    RunnerHealthCheck.Result stale = TargetHealthChecks.buildkit(plane);
+    assertTrue(stale.ok(), stale.detail());
+    assertEquals(true, stale.data().get("stale"));
+    assertTrue(stale.detail().contains("the next CI lease replaces it"), stale.detail());
     docker.answerFor("inspect", BUILDER, 0, plane.configuredStamp() + "|exited\n", "");
     assertFalse(TargetHealthChecks.buildkit(plane).ok());
     docker.answerFor("inspect", BUILDER, 0, plane.configuredStamp() + "|running\n", "");
-    assertTrue(TargetHealthChecks.buildkit(plane).ok());
+    RunnerHealthCheck.Result current = TargetHealthChecks.buildkit(plane);
+    assertTrue(current.ok());
+    assertEquals(false, current.data().get("stale"));
 
     docker.answerFor("network-inspect", NETWORK, 1, "", "Error: No such network: " + NETWORK);
     assertFalse(TargetHealthChecks.network(plane).ok());

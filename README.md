@@ -322,9 +322,11 @@ CI lease as `QITS_CI_BUILDER_SLOTS`; `1` when unset. Waiting at the gate does no
 CI step's deadline (qits-1807), and at the default width of one, a build no longer waits inside
 buildkitd's own per-operation semaphore instead.
 
-Health: `buildkit` fails on a stale stamp, a stopped builder or a foreign container under its name,
-and is ok while no CI lease ever needed one; its `data` carries the builder's own `resolvers`
-alongside `configuredStamp`, so an operator can see whether the node tunnel's is in effect. `network`
+Health: `buildkit` fails on a stopped builder or a foreign container under its name, and is ok
+while no CI lease ever needed one. A stale stamp is ok too, with `data.stale: true` (qits-2090): the
+next CI lease replaces the builder, and a failure would quarantine the target, so it would never be
+granted that CI lease. The stamp moves with an image bump and whenever the node tunnel comes or goes.
+Its `data` carries the builder's own `resolvers` alongside `configuredStamp`, so an operator can see whether the node tunnel's is in effect. `network`
 is ok while missing only when no builder exists. Both are read-only. There is no uid/gid range
 check: a host whose user namespace maps fewer than the full 32-bit id space is not unhealthy for it
 (qits-1576). `resolvers` (qits-2090) never probes anything: it is always ok, and its `data.own`
