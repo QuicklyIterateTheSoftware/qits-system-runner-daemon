@@ -518,6 +518,146 @@ class BuildPlaneTest {
     }
   }
 
+  // --- a stale builder under running builds (qits-2260) ------------------------------------------
+
+  /** A plane with these resolvers on a docker nothing answers, for a stamp. */
+  static BuildPlane planeOn(Supplier<List<String>> resolvers) {
+    return new BuildPlane(
+        IDENTITY,
+        TARGET,
+        new RunnerDocker(IDENTITY, "docker", Duration.ofSeconds(1)),
+        BuildkitSettings.DEFAULTS,
+        1,
+        resolvers);
+  }
+
+  /** A running builder under {@code stamp}, inspected back with this image, resolvers and toml. */
+  private void runningBuilder(String stamp, String image, List<String> dns, String toml)
+      throws Exception {
+    docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
+    docker.answerFor("inspect", BUILDER, 0, stamp + "|running\n", "");
+    String env =
+        "\"PATH=/usr/bin\"\n\"BUILDKITD_TOML="
+            + toml.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+            + "\"\n";
+    docker.answerFor(
+        "container", BUILDER, 0, image + "\n" + String.join(" ", dns) + " \n" + env, "");
+    docker.volume(STATE, Map.of("qits.system.runner.buildkitd", "state"));
+  }
+
+  private List<String> captureInfo() {
+    List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
+    java.util.logging.Logger logger =
+        java.util.logging.Logger.getLogger(BuildPlane.class.getName());
+    java.util.logging.Handler handler =
+        new java.util.logging.Handler() {
+          @Override
+          public void publish(java.util.logging.LogRecord record) {
+            Object[] params = record.getParameters();
+            String message = record.getMessage();
+            lines.add(
+                params == null || params.length == 0 ? message : String.format(message, params));
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    logger.addHandler(handler);
+    logs.add(() -> logger.removeHandler(handler));
+    return lines;
+  }
+
+  private final List<Runnable> logs = new ArrayList<>();
+
+  @org.junit.jupiter.api.AfterEach
+  void dropLogHandlers() {
+    logs.forEach(Runnable::run);
+  }
+
+  @Test
+  void aStaleBuilderWithACiLeaseOnTheNetworkIsKeptAndTheLeaseMayStart() throws Exception {
+    BuildPlane tunnelled = planeWith(() -> List.of());
+    runningBuilder(tunnelled.configuredStamp(TUNNEL), tunnelled.image(), TUNNEL, tunnelled.toml());
+    docker.answerFor(
+        "ps",
+        "network=" + NETWORK,
+        0,
+        BUILDER + "\nqits-system-runner-lease-l1-r1\n",
+        "");
+    List<String> logged = captureInfo();
+
+    assertEquals(Optional.empty(), tunnelled.ensure());
+    assertEquals(Optional.empty(), tunnelled.ensure());
+
+    assertTrue(docker.calls("rm").isEmpty(), docker.calls()::toString);
+    assertTrue(docker.calls("run").stream().noneMatch(c -> c.contains(BUILDER)));
+    List<String> kept = logged.stream().filter(l -> l.contains("keeps its stale builder")).toList();
+    assertEquals(1, kept.size(), logged::toString);
+    assertTrue(kept.get(0).contains("qits-system-runner-lease-l1-r1"), kept::toString);
+  }
+
+  @Test
+  void aStaleBuilderIsKeptWhenDockerCannotSayWhoUsesIt() throws Exception {
+    BuildPlane tunnelled = planeWith(() -> TUNNEL);
+    runningBuilder(tunnelled.configuredStamp(List.of()), tunnelled.image(), List.of(), "");
+    docker.answerFor("ps", "network=" + NETWORK, 1, "", "Cannot connect to the Docker daemon");
+
+    assertEquals(Optional.empty(), tunnelled.ensure());
+
+    assertTrue(docker.calls("rm").isEmpty(), docker.calls()::toString);
+  }
+
+  @Test
+  void anIdleStaleBuilderIsReplacedAndTheLogNamesTheResolversChange() throws Exception {
+    BuildPlane tunnelled = planeWith(() -> List.of());
+    runningBuilder(tunnelled.configuredStamp(TUNNEL), tunnelled.image(), TUNNEL, tunnelled.toml());
+    docker.answerFor("ps", "network=" + NETWORK, 0, BUILDER + "\n", "");
+    List<String> logged = captureInfo();
+
+    assertEquals(Optional.empty(), tunnelled.ensure());
+
+    assertTrue(has(List.of("rm", "-f", BUILDER)), docker.calls()::toString);
+    String replaced =
+        logged.stream()
+            .filter(l -> l.contains("replaces its builder"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(logged));
+    assertTrue(
+        replaced.endsWith("changed resolvers [100.96.0.1, 192.168.188.1] -> []"), replaced);
+  }
+
+  @Test
+  void theChangesNameTheImageAndTheToml() throws Exception {
+    BuildPlane fresh = planeWith(() -> List.of());
+    runningBuilder("0123456789abcdef", "moby/buildkit:v0.32.0", List.of(), "old toml\n");
+
+    String changes = fresh.changes("0123456789abcdef", List.of());
+
+    assertTrue(changes.contains("image moby/buildkit:v0.32.0 -> moby/buildkit:v0.33.0"), changes);
+    assertTrue(changes.contains("toml"), changes);
+    assertFalse(changes.contains("resolvers"), changes);
+  }
+
+  @Test
+  void theChangesNameTheBootstrapOrVolumeWhenTheReadInputsMissTheStamp() throws Exception {
+    BuildPlane fresh = planeWith(() -> List.of());
+    runningBuilder("0123456789abcdef", fresh.image(), List.of(), fresh.toml());
+
+    assertEquals("bootstrap or state volume", fresh.changes("0123456789abcdef", List.of()));
+    assertEquals(
+        "nothing readable", fresh.changes(fresh.configuredStamp(List.of()), List.of()));
+  }
+
+  @Test
+  void aJsonStringIsUnquoted() {
+    assertEquals("a\n\"b\\<", BuildPlane.unquote("\"a\\n\\\"b\\\\\\u003c\""));
+    assertNull(BuildPlane.unquote("no quotes"));
+    assertNull(BuildPlane.unquote("\"\\u00\""));
+  }
+
   private boolean has(List<String> call) {
     return docker.calls().stream()
         .map(FakeDocker::withoutConfig)

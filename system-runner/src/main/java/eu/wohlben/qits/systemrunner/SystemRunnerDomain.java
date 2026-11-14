@@ -182,7 +182,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * Whether the node tunnel answers, and its resolvers: a lease's at its create ({@link
-   * LeaseLauncher}), the builder's at each {@link BuildPlane#ensure} and the successor's at each
+   * LeaseLauncher}), the builder's at each {@link BuildPlane#ensure} (through {@link
+   * SteadyResolvers}, qits-2260) and the successor's at each
    * rollover ({@link #successorDns()}) — always asked afresh (qits-2068, qits-2090).
    */
   private final NodeTunnel nodeTunnel;
@@ -394,7 +395,12 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.nodeTunnel = new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf);
     this.basePlane =
         new BuildPlane(
-            identity, settings.runnerId(), docker, buildkit, this.slots, nodeTunnel::resolvers);
+            identity,
+            settings.runnerId(),
+            docker,
+            buildkit,
+            this.slots,
+            new SteadyResolvers(nodeTunnel::resolvers, clock));
     this.buildPlane = basePlane;
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);

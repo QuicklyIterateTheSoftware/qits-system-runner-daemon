@@ -63,7 +63,14 @@ import org.jboss.logging.Logger;
  * so such a builder keeps the stamp it had before this seam. The tunnel coming or going changes the
  * stamp, and the next CI lease replaces the builder as a bumped image does; while it is down with
  * the builder still on its resolvers, a lookup first waits out about 4 s in docker's embedded DNS
- * before the public answer.
+ * before the public answer. In production the seam is {@link SteadyResolvers}: a probe that fails
+ * for a short while does not drop the resolvers, so it does not move the stamp (qits-2260).
+ *
+ * <p><b>Never replaced under a running build</b> (qits-2260): a stale builder that is running and
+ * has a CI lease on the build network ({@link #users}) is kept, and the lease starts on it. The
+ * first {@link #ensure} that finds no CI lease on the network replaces it. When docker cannot say
+ * who is on the network, the builder is kept too. Each replacement, and each first deferral, logs
+ * which input changed ({@link #changes}).
  *
  * <p>Departure from the CI runner: no host CA bundle mount. This runner always runs in a container
  * and makes no host-path mount; the builder trusts the image's own bundle (what the CI runner did in
@@ -194,6 +201,9 @@ final class BuildPlane {
   private final Names names;
   private final String toml;
   private final Supplier<List<String>> resolvers;
+
+  /** The last stale stamp pair {@link #ensure} kept the builder for, so it is logged once. */
+  private String deferred;
 
   /**
    * The plane under the environment's settings alone. {@code slots} is the runner's own ({@code
@@ -365,8 +375,12 @@ final class BuildPlane {
    * builder without resolvers is not replaced by this change.
    */
   String configuredStamp(List<String> dns) {
-    String material =
-        settings.image() + "\n" + toml + "\n" + BOOTSTRAP + "\n" + names.stateVolume();
+    return stamp(settings.image(), toml, dns);
+  }
+
+  /** The stamp over these inputs, with this plane's bootstrap and state volume. */
+  private String stamp(String image, String toml, List<String> dns) {
+    String material = image + "\n" + toml + "\n" + BOOTSTRAP + "\n" + names.stateVolume();
     if (!dns.isEmpty()) {
       material += "\n" + String.join(",", dns);
     }
@@ -382,7 +396,8 @@ final class BuildPlane {
   /**
    * The network, the state volume and the builder up under the configured stamp. Empty when a CI
    * lease may start; else why not. Synchronized: two CI leases started at once must not both run
-   * the one name. A stale builder is replaced — the state volume stays.
+   * the one name. A stale builder is replaced — the state volume stays — but only when no CI lease
+   * is on the build network; else it is kept, and the lease starts on it (qits-2260).
    */
   synchronized Optional<String> ensure() {
     Network network = network();
@@ -447,8 +462,32 @@ final class BuildPlane {
           }
           return Optional.empty();
         }
+        if ("running".equals(builder.status())) {
+          List<String> users = users();
+          if (users == null || !users.isEmpty()) {
+            String pair = builder.stamp() + ">" + stamp;
+            if (!pair.equals(deferred)) {
+              deferred = pair;
+              LOG.infof(
+                  "system-runner keeps its stale builder while %s: stamp %s, configured %s,"
+                      + " changed %s; it is replaced once no CI lease is on %s",
+                  users == null
+                      ? "docker cannot say which CI leases use it"
+                      : "CI leases use it " + users,
+                  builder.stamp(),
+                  stamp,
+                  changes(builder.stamp(), dns),
+                  names.network());
+            }
+            return Optional.empty();
+          }
+        }
+        deferred = null;
         LOG.infof(
-            "system-runner replaces its builder: stamp %s, configured %s", builder.stamp(), stamp);
+            "system-runner replaces its builder: stamp %s, configured %s, changed %s",
+            builder.stamp(),
+            stamp,
+            changes(builder.stamp(), dns));
         RunnerDocker.Result gone =
             docker.run(List.of(docker.binary(), "rm", "-f", names.builder()));
         if (!gone.ok() && !TargetVolumes.absent(gone.detail())) {
@@ -476,6 +515,128 @@ final class BuildPlane {
     }
     LOG.infof("system-runner's builder %s is up on %s", names.builder(), image());
     return Optional.empty();
+  }
+
+  /**
+   * The running containers on the build network besides the builder — the CI leases that may have
+   * a build on it. One {@code docker ps}. Null when docker does not answer: the caller then
+   * assumes the builder is in use.
+   */
+  List<String> users() {
+    RunnerDocker.Result listed =
+        docker.run(
+            List.of(
+                docker.binary(),
+                "ps",
+                "--format",
+                "{{.Names}}",
+                "--filter",
+                "network=" + names.network()));
+    if (!listed.ok()) {
+      LOG.warnf(
+          "system-runner cannot list the containers on %s: %s", names.network(), listed.detail());
+      return null;
+    }
+    List<String> users = new ArrayList<>();
+    for (String line : listed.stdout().split("\n")) {
+      String name = line.strip();
+      if (!name.isEmpty() && !name.equals(names.builder())) {
+        users.add(name);
+      }
+    }
+    return users;
+  }
+
+  /**
+   * Which of the stamp's inputs differ between the running builder and the configured one, for the
+   * log: the image and the resolvers with old and new values, the toml by name, and the bootstrap or
+   * state volume when the old inputs read back do not give the running stamp. One {@code docker
+   * container inspect}; never fails the caller.
+   */
+  String changes(String runningStamp, List<String> dns) {
+    RunnerDocker.Result inspected =
+        docker.run(
+            List.of(
+                docker.binary(),
+                "container",
+                "inspect",
+                "--format",
+                "{{.Config.Image}}{{\"\\n\"}}{{range .HostConfig.Dns}}{{.}} {{end}}{{\"\\n\"}}"
+                    + "{{range .Config.Env}}{{json .}}{{\"\\n\"}}{{end}}",
+                names.builder()));
+    if (!inspected.ok()) {
+      return "unknown: " + inspected.detail();
+    }
+    String[] lines = inspected.stdout().split("\n", -1);
+    String oldImage = lines.length > 0 ? lines[0].strip() : "";
+    List<String> oldDns = new ArrayList<>();
+    if (lines.length > 1) {
+      for (String server : lines[1].strip().split(" ")) {
+        if (!server.isEmpty()) {
+          oldDns.add(server);
+        }
+      }
+    }
+    String oldToml = null;
+    for (int i = 2; i < lines.length; i++) {
+      String env = unquote(lines[i].strip());
+      if (env != null && env.startsWith("BUILDKITD_TOML=")) {
+        oldToml = env.substring("BUILDKITD_TOML=".length());
+      }
+    }
+    List<String> changed = new ArrayList<>();
+    if (!oldImage.equals(image())) {
+      changed.add("image " + oldImage + " -> " + image());
+    }
+    if (!oldDns.equals(dns)) {
+      changed.add("resolvers " + oldDns + " -> " + dns);
+    }
+    if (!toml.equals(oldToml)) {
+      changed.add("toml");
+    }
+    if (oldToml != null && !stamp(oldImage, oldToml, oldDns).equals(runningStamp)) {
+      changed.add("bootstrap or state volume");
+    }
+    return changed.isEmpty() ? "nothing readable" : String.join(", ", changed);
+  }
+
+  /** A JSON string literal's value, or null when {@code json} is not one. */
+  static String unquote(String json) {
+    if (json.length() < 2 || json.charAt(0) != '"' || json.charAt(json.length() - 1) != '"') {
+      return null;
+    }
+    StringBuilder out = new StringBuilder();
+    for (int i = 1; i < json.length() - 1; i++) {
+      char c = json.charAt(i);
+      if (c != '\\') {
+        out.append(c);
+        continue;
+      }
+      if (++i >= json.length() - 1) {
+        return null;
+      }
+      char e = json.charAt(i);
+      switch (e) {
+        case 'n' -> out.append('\n');
+        case 't' -> out.append('\t');
+        case 'r' -> out.append('\r');
+        case 'b' -> out.append('\b');
+        case 'f' -> out.append('\f');
+        case 'u' -> {
+          if (i + 4 >= json.length() - 1) {
+            return null;
+          }
+          try {
+            out.append((char) Integer.parseInt(json.substring(i + 1, i + 5), 16));
+          } catch (NumberFormatException notHex) {
+            return null;
+          }
+          i += 4;
+        }
+        default -> out.append(e);
+      }
+    }
+    return out.toString();
   }
 
   /** Whether the builder image is on this node: one {@code docker image inspect}. */
