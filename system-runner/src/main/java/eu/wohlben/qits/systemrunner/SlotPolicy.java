@@ -58,7 +58,7 @@ import java.util.Set;
  *
  * <p>The {@code qits-private} membership and its resolvers (*) are not this table's to decide:
  * they are a fact of the node's docker daemon, not of the slot type, so {@link PrivateEdge} adds
- * them to the spec this table built, just before the run, wherever the private edge is visible on
+ * them to the spec this table built, just before the create, wherever the private edge is visible on
  * that daemon (qits-2062) — and off the platform host, nothing; there {@link NodeTunnel} puts the
  * node tunnel's {@code 100.96.0.1} first among the resolvers where it answers (qits-2068), on
  * {@code bridge} alone. {@link #containerSpec} itself never sets either, and neither enters the
@@ -293,10 +293,10 @@ enum SlotPolicy {
   /**
    * The driver's spec of a lease container under this policy. Only for an entry {@link #refusal}
    * passed. The spec's network is {@code bridge} for every type, with no extra network and no
-   * resolver: a CI lease's build network is {@link #networks}' and joined after the run by the
-   * runner's own connect ({@link BuildPlane#connect}), and {@code qits-private} with the edge's VIP
-   * as first resolver is {@link PrivateEdge}'s, added to this spec just before the run where the
-   * node's daemon has the private edge (qits-2062).
+   * resolver: a CI lease's build network is {@link #networks}' and joined by the runner's own
+   * connect ({@link BuildPlane#connect}) between the create and the start, and {@code qits-private}
+   * with the edge's VIP as first resolver is {@link PrivateEdge}'s, added to this spec just before
+   * the create where the node's daemon has the private edge (qits-2062).
    *
    * @throws IllegalStateException for a policy this runner version does not run, or a CI lease
    *     without its build plane

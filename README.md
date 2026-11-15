@@ -122,8 +122,9 @@ upstreams, so private names resolve to the private edge and every other name sti
 all or nothing: any piece missing, or docker not answering, runs the lease without the private
 edge with one log line — DEBUG off the platform host, where there is no overlay, WARN on it. It is
 asked at every create and never hashed into the spec-hash or mounts label, so a running lease is
-not recreated when the edge arrives or its VIP moves. The driver joins `qits-private` right after
-the run and removes the container when that join fails, which fails the lease.
+not recreated when the edge arrives or its VIP moves. The runner joins `qits-private` after the
+`docker create` and before the `docker start`, and removes the container when that join fails,
+which fails the lease.
 
 Off the platform host, a lease the private edge did not take may still resolve private names
 through the **node tunnel** (qits-2068, `NodeTunnel`): where the target's host runs the node
@@ -169,9 +170,19 @@ The known limits:
   discovery.
 
 A CI lease gets `BUILDKIT_HOST=tcp://qits-system-runner-buildkitd-<id8>:1234`, mounts the CI caches
-and nothing else — **never the credential volume, the agent caches or a work volume** — and is then
+and nothing else — **never the credential volume, the agent caches or a work volume** — and is
 joined to the build network with the runner's own `docker network connect` (`BuildPlane.connect`);
-a connect that fails removes the container again and fails the lease. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
+a connect that fails removes the container again and fails the lease.
+
+**Every network is joined before the lease starts** (qits-2270): the runner makes the container
+with `docker create`, joins `qits-private` and the build network with `docker network connect`,
+and only then runs `docker start`. A container on `bridge` alone has its `--dns` servers in
+`/etc/resolv.conf` as they are; once it is on a user-defined network, it has docker's embedded DNS
+(`127.0.0.11`), which asks them in order. On a tunnel node a CI lease started before the join saw
+the tunnel's resolver and a public one side by side, and musl in the ci-slot image asks both at
+once, so a private app could resolve to the public edge (exit 3, a 421 from the public edge). The
+builder needs no such step: it runs on the build network only, so it has docker's embedded DNS
+from its start. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
 from the policy; a spec env key the policy owns — `BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR` — is
 `FAILED` with a detail naming it. A WORKSPACE lease's work key is `ws-<rowId>`, a DESK lease's
 `desk-<deskId>`.

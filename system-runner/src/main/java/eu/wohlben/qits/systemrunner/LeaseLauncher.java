@@ -1,7 +1,10 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.ContainersDriver;
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.containers.driver.spec.ContainerSpec;
+import eu.wohlben.qits.containers.driver.spec.LabelNamespace;
+import eu.wohlben.qits.containers.driver.spec.LifecyclePolicy;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.RunnerSession;
@@ -11,6 +14,7 @@ import eu.wohlben.qits.systemrunner.protocol.LeaseEntry;
 import eu.wohlben.qits.systemrunner.protocol.LeaseState;
 import eu.wohlben.qits.systemrunner.protocol.SlotImages;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
@@ -33,7 +37,8 @@ import org.jboss.logging.Logger;
  *   <li><b>RUNNING</b>, no container, the images here → every external node volume asked after, the adopted container stopped and removed and the
  *       adopted volume asked after — or the work volume and the runner's own node volumes made
  *       labelled — then, for a WORKSPACE or DESK lease, Claude Code's first-run keys made sure of
- *       on the credential volume ({@link ClaudeFirstRun}), then {@code run};
+ *       on the credential volume ({@link ClaudeFirstRun}), then {@code create}, each network join and
+ *       {@code start} ({@link #launch});
  *   <li><b>RUNNING</b>, a container whose {@code spec-hash}, {@code mounts} and {@code generation}
  *       labels are the entry's — an absent generation label is {@code 0}, an entry's absent
  *       generation too, so a container from before qits-2091 matches — → nothing: {@code
@@ -42,7 +47,7 @@ import org.jboss.logging.Logger;
  *       token may already be gone);
  *   <li><b>RUNNING</b>, a container of another hash, other volumes or another generation → {@code
  *       stop}, {@code rm} the container — <b>never its volume</b>, which holds the work — then
- *       {@code run} the new spec, asking {@link PrivateEdge} and {@link NodeTunnel} again. Another
+ *       create and start the new spec, asking {@link PrivateEdge} and {@link NodeTunnel} again. Another
  *       generation is the owner's refresh (qits-2091): nothing of the spec changed, the lease is
  *       recreated to pick up the resolvers the node offers now;
  *   <li><b>ENDED</b> → {@code stop}, {@code rm}; the work volume stays until a purge names it.
@@ -50,9 +55,10 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Every lease runs on {@code bridge}</b>, and — where the private edge is visible on the
  * node's daemon — also on {@code qits-private} with the edge's VIP as its first resolver ({@link
- * PrivateEdge}, qits-2062): asked just before each {@code run}, joined by the driver right after
- * it ({@code ContainerSpec.extraNetworks}, {@code --dns}). A join that fails removes the container
- * and fails the lease. Off the platform host there is no overlay and the lease runs on {@code
+ * PrivateEdge}, qits-2062): asked just before each create, and joined ({@code
+ * ContainerSpec.extraNetworks}, {@code --dns}) after the {@code docker create} and before the
+ * {@code docker start}, so no process runs before the join (qits-2270). A join that fails removes
+ * the container and fails the lease. Off the platform host there is no overlay and the lease runs on {@code
  * bridge} with the node's resolvers — unless the node runs the node tunnel: where the tunnel's
  * DNS at {@code 100.96.0.1} answers, the lease stays on {@code bridge} alone and gets that address
  * as its first resolver, followed by the runner's own ({@link NodeTunnel}, qits-2068), so private
@@ -64,10 +70,15 @@ import org.jboss.logging.Logger;
  *
  * <p><b>A CI lease</b> starts the target's {@link BuildPlane} first (on the first one, and
  * re-checked on every later one), makes the CI caches labelled, runs with {@code BUILDKIT_HOST}
- * injected, and is then joined to the build network with a {@code docker network connect} of the
+ * injected, and is joined to the build network with a {@code docker network connect} of the
  * runner's own ({@link BuildPlane#connect}) — the build network is the runner's, created and
- * checked by it, so its membership stays beside it. A connect that fails removes the container
- * again and fails the lease, so a CI container never runs without its builder. It mounts no
+ * checked by it, so its membership stays beside it. The join comes after the {@code docker create}
+ * and before the {@code docker start} (qits-2270): on a tunnel node the lease's {@code bridge} alone
+ * would give it the tunnel's resolver and a public one side by side, and musl in the ci-slot image
+ * asks both at once, so a lease started before the join could resolve a private app to the public
+ * edge. Joined first, it only ever sees docker's embedded DNS, which asks them in order. A connect
+ * that fails removes the container again and fails the lease, so a CI container never runs without
+ * its builder. It mounts no
  * external node volume, so none is asked after.
  *
  * <p>The hash is the server's, carried on the frame and written to the label as is: the runner
@@ -410,24 +421,9 @@ final class LeaseLauncher {
     // (qits-2091). The tunnel only where the edge added no resolvers.
     ContainerSpec run = nodeTunnel.apply(privateEdge.apply(container, name), name);
     boolean onEdge = run.extraNetworks().contains(PrivateEdge.NETWORK);
-    ContainersDriver.Started started = driver.run(run, name, labels, policy.lifecycle(), deadline);
-    if (!started.started()) {
-      // The driver joins qits-private after the run and removes the container when that fails,
-      // answering the join's words as the run's.
-      return failed(
-          leaseId,
-          "docker could not run "
-              + name
-              + (onEdge ? " and join it to " + PrivateEdge.NETWORK : "")
-              + ": "
-              + brief(started.detail()));
-    }
-    if (plane != null) {
-      Optional<String> joined = plane.connect(name);
-      if (joined.isPresent()) {
-        stopAndRemove(driver, name, deadline);
-        return failed(leaseId, brief(joined.get()));
-      }
+    Optional<String> notUp = launch(run, name, labels, policy.lifecycle(), plane, driver, deadline);
+    if (notUp.isPresent()) {
+      return failed(leaseId, notUp.get());
     }
     LOG.infof(
         "system-runner runs %s lease %s as %s%s",
@@ -438,6 +434,100 @@ final class LeaseLauncher {
             ? " on " + PrivateEdge.NETWORK + ", resolvers " + run.dns()
             : NodeTunnel.on(run) ? " via the node tunnel, resolvers " + run.dns() : "");
     return Outcome.of(LeaseState.RUNNING);
+  }
+
+  /**
+   * Make the lease's container, join it to each further network, and only then start it
+   * (qits-2270). Empty on success, else the lease's failure detail.
+   *
+   * <p>The order is the fix. A container on {@code bridge} alone has the {@code --dns} servers in
+   * its {@code /etc/resolv.conf} as they are. Once it is on a second, user-defined network, docker
+   * writes {@code 127.0.0.11} there: its embedded DNS, which asks the servers in order. A container
+   * started before the join runs with the raw list for a moment. musl (the ci-slot image) asks all
+   * servers at once and takes the first answer, so a public upstream could answer a private name
+   * with the public edge. Joined before the start, the process only ever sees the embedded DNS.
+   *
+   * <p>So no {@code docker run}: the driver's run starts the container before its {@code
+   * extraNetworks} join. The create argv is the driver's own run argv ({@link #createArgv}), so the
+   * container's shape stays the driver's. The joins are {@code qits-private} first, then the build
+   * network. Any failure removes the container, which never started.
+   */
+  private Optional<String> launch(
+      ContainerSpec run,
+      String name,
+      Map<String, String> labels,
+      LifecyclePolicy lifecycle,
+      BuildPlane plane,
+      ContainersDriver driver,
+      Duration deadline) {
+    List<String> create;
+    try {
+      create =
+          createArgv(docker.binary(), identity.driverNamespace(), name, run, labels, lifecycle);
+    } catch (RuntimeException refused) {
+      return Optional.of("docker could not run " + name + ": " + refused.getMessage());
+    }
+    RunnerDocker.Result created = docker.run(create, deadline);
+    if (!created.ok()) {
+      // A create that failed half way can leave the container behind.
+      discard(driver, name, deadline);
+      return Optional.of("docker could not run " + name + ": " + brief(created.detail()));
+    }
+    for (String network : run.extraNetworks()) {
+      RunnerDocker.Result joined =
+          docker.run(DockerArgv.networkConnect(docker.binary(), network, name), deadline);
+      if (!joined.ok()) {
+        discard(driver, name, deadline);
+        return Optional.of(
+            "docker could not run " + name + " and join it to " + network + ": "
+                + brief(joined.detail()));
+      }
+    }
+    if (plane != null) {
+      Optional<String> joined = plane.connect(name);
+      if (joined.isPresent()) {
+        discard(driver, name, deadline);
+        return Optional.of(brief(joined.get()));
+      }
+    }
+    ContainersDriver.OpResult started = driver.start(name, deadline);
+    if (!started.ok()) {
+      discard(driver, name, deadline);
+      return Optional.of("docker could not start " + name + ": " + brief(started.detail()));
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * The driver's {@code docker run} argv for {@code spec}, as a {@code docker create}: the same
+   * flags, without {@code -d}. Throws when the driver's argv does not start {@code run -d}, or when
+   * the driver refuses the spec.
+   */
+  static List<String> createArgv(
+      String binary,
+      String namespace,
+      String name,
+      ContainerSpec spec,
+      Map<String, String> labels,
+      LifecyclePolicy lifecycle) {
+    List<String> run =
+        DockerArgv.run(binary, new LabelNamespace(namespace), name, spec, labels, lifecycle);
+    if (run.size() < 3 || !"run".equals(run.get(1)) || !"-d".equals(run.get(2))) {
+      throw new IllegalStateException("the driver's run argv does not start with run -d");
+    }
+    List<String> argv = new ArrayList<>(run.size() - 1);
+    argv.add(run.get(0));
+    argv.add("create");
+    argv.addAll(run.subList(3, run.size()));
+    return List.copyOf(argv);
+  }
+
+  /** Remove a container that never started; one already gone counts as gone. */
+  private static void discard(ContainersDriver driver, String name, Duration deadline) {
+    ContainersDriver.OpResult gone = driver.remove(name, deadline);
+    if (!gone.ok() && !TargetVolumes.absent(gone.detail())) {
+      LOG.warnf("system-runner could not remove %s after a failed start: %s", name, gone.detail());
+    }
   }
 
   /**

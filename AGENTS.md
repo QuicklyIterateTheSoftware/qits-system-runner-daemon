@@ -41,13 +41,19 @@ change to that table, reviewed as one, with the test cell beside it.
 
 - **CI never mounts the credential volume, the agent caches or a work volume**, and WORKSPACE and
   DESK never a CI cache or `BUILDKIT_HOST`; `SlotPolicyTest` holds both. A CI lease's build
-  network is a `docker network connect` of the runner's own after the driver's run
-  (`BuildPlane.connect`); a failed connect removes the container again.
+  network is a `docker network connect` of the runner's own (`BuildPlane.connect`); a failed
+  connect removes the container again.
+- **No lease process starts before its networks are joined** (qits-2270): `docker create`, then
+  each `docker network connect` (`qits-private`, then the build network), then `docker start`
+  (`LeaseLauncher.launch`). Never the driver's `run`, which starts the container before it joins
+  `extraNetworks`: a CI lease on a tunnel node would see the tunnel's resolver beside a public one,
+  and musl asks both at once. `EstateReconcileTest` pins the order.
 - **Every lease joins `qits-private` with the private edge's VIP as first resolver where the edge
   is visible on the node's daemon** (`PrivateEdge`, qits-2062), applied to the policy's spec just
-  before the run and never part of the spec-hash or mounts label — a moved VIP or a new rollout
+  before the create and never part of the spec-hash or mounts label — a moved VIP or a new rollout
   never recreates a running lease. All or nothing, read-only, never throws; off the platform host it
-  adds nothing. The driver does the join (`ContainerSpec.extraNetworks`) and `--dns`.
+  adds nothing. The create argv is the driver's run argv (`LeaseLauncher.createArgv`), so `--dns`
+  is the driver's; the runner does the join (`ContainerSpec.extraNetworks`) before the start.
 - **The build plane is the target's own** (`BuildPlane`): every name derived, none configurable,
   never `qits-buildkitd` / `qits-buildkitd-state` (`BuildPlaneNamesTest`). The builder carries the
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled

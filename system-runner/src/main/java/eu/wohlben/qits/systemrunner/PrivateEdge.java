@@ -45,7 +45,7 @@ import org.jboss.logging.Logger;
  * unchanged and one log line: WARN once the network exists, because then the node is the platform
  * host and something is off. Never throws.
  *
- * <p>The result is applied to the driver's spec just before the run and is <b>still not hashed</b>:
+ * <p>The result is applied to the driver's spec just before the create and is <b>still not hashed</b>:
  * the spec-hash label is the server's and the mounts label {@link TargetVolumes#mountsHash}'s, so a
  * running lease is not recreated by the runner when this class arrives or when the edge's VIP
  * moves. It is <b>reported per lease</b> instead (qits-2091): {@link #choice} answers the same

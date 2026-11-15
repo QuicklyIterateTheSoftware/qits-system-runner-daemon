@@ -211,8 +211,7 @@ class EstateReconcileTest {
     List<String> run = runOf(lease(L1));
     assertEquals(
         List.of(
-            "run",
-            "-d",
+            "create",
             "--init",
             "--name",
             lease(L1),
@@ -277,6 +276,7 @@ class EstateReconcileTest {
     }
     // FakeDocker's inspect answers nothing unscripted, so the periodic look reads the new container
     // as gone; say it runs, and the next estate holds it for good.
+    created(lease(L1));
     docker.answerFor(
         "inspect", lease(L1), 0, "c-" + L1 + "|running|0|" + L1 + "|WORKSPACE|" + H1 + "|"
             + mounts(work("ws-42")) + "\n", "");
@@ -292,7 +292,7 @@ class EstateReconcileTest {
 
     awaitTrue(() -> !runsOf(lease(L2)).isEmpty());
     List<String> run = runOf(lease(L2));
-    assertEquals(List.of("run", "-d", "--init", "--name", lease(L2)), run.subList(0, 5));
+    assertEquals(List.of("create", "--init", "--name", lease(L2)), run.subList(0, 4));
     int restart = run.indexOf("--restart");
     assertTrue(restart > 0 && run.get(restart + 1).equals("unless-stopped"), run::toString);
     assertTrue(run.contains(work("desk-" + DESK_ID) + ":/workspace"), run::toString);
@@ -586,7 +586,7 @@ class EstateReconcileTest {
     awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
     awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
     List<String> run = runOf(lease(L1));
-    assertEquals(List.of("run", "-d", "--init", "--name", lease(L1)), run.subList(0, 5));
+    assertEquals(List.of("create", "--init", "--name", lease(L1)), run.subList(0, 4));
     assertEquals("bridge", run.get(run.indexOf("--network") + 1));
     assertTrue(run.contains("--security-opt=no-new-privileges"), run::toString);
     assertTrue(run.contains("--cap-drop=ALL"), run::toString);
@@ -616,6 +616,7 @@ class EstateReconcileTest {
     assertTrue(
         calls.stream().flatMap(List::stream).noneMatch(e -> e.startsWith("qits-buildkitd")),
         "never the platform builder");
+    created(lease(L1));
     docker.answerFor(
         "inspect", lease(L1), 0, "c-" + L1 + "|running|0|" + L1 + "|CI|" + H1 + "|" + ciMounts()
             + "\n", "");
@@ -659,7 +660,7 @@ class EstateReconcileTest {
     estateThenAck(workspace(L1, H1));
     start();
 
-    awaitCall(calls -> has(calls, List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))));
+    awaitCall(calls -> has(calls, List.of("start", lease(L1))));
     List<String> run = runOf(lease(L1));
     int dns = run.indexOf("--dns");
     assertEquals(
@@ -668,10 +669,14 @@ class EstateReconcileTest {
         run::toString);
     assertEquals("bridge", run.get(run.indexOf("--network") + 1), "bridge stays the run's network");
     List<List<String>> calls = docker.calls();
+    int join = calls.indexOf(List.of("network", "connect", PrivateEdge.NETWORK, lease(L1)));
+    int started = calls.indexOf(List.of("start", lease(L1)));
     assertTrue(
-        calls.indexOf(run)
-            < calls.indexOf(List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
-        "joined after the run: " + calls);
+        calls.indexOf(run) < join && join < started,
+        "created, joined, then started (qits-2270): " + calls);
+    assertTrue(
+        calls.subList(0, join).stream().noneMatch(c -> c.contains(lease(L1)) && isStart(c)),
+        "nothing starts it before the join: " + calls);
     assertTrue(
         run.contains("qits.system.runner.spec-hash=" + H1)
             && run.contains("qits.system.runner.mounts=" + mounts(work("ws-42"))),
@@ -686,7 +691,7 @@ class EstateReconcileTest {
     estateThenAck(ci(L1, H1));
     start();
 
-    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+    awaitCall(calls -> has(calls, List.of("start", lease(L1))));
     List<String> run = runOf(lease(L1));
     int dns = run.indexOf("--dns");
     assertEquals(
@@ -696,7 +701,13 @@ class EstateReconcileTest {
     List<List<String>> calls = docker.calls();
     int edge = calls.indexOf(List.of("network", "connect", PrivateEdge.NETWORK, lease(L1)));
     int build = calls.indexOf(List.of("network", "connect", BUILD_NET, lease(L1)));
-    assertTrue(calls.indexOf(run) < edge && edge < build, "run, qits-private, build: " + calls);
+    int started = calls.indexOf(List.of("start", lease(L1)));
+    assertTrue(
+        calls.indexOf(run) < edge && edge < build && build < started,
+        "create, qits-private, build, start (qits-2270): " + calls);
+    assertTrue(
+        calls.subList(0, build).stream().noneMatch(c -> c.contains(lease(L1)) && isStart(c)),
+        "nothing starts it before the joins: " + calls);
   }
 
   @Test
@@ -723,6 +734,52 @@ class EstateReconcileTest {
             && calls.subList(join, calls.size()).stream()
                 .anyMatch(c -> c.getFirst().equals("rm") && c.contains(lease(L1))),
         "the half-joined container is removed: " + calls);
+    assertTrue(
+        calls.stream().noneMatch(c -> c.contains(lease(L1)) && isStart(c)),
+        "a container whose join failed never starts (qits-2270): " + calls);
+  }
+
+  @Test
+  void aFailedJoinToTheBuildNetworkRemovesTheCreatedLeaseBeforeItEverStarts() throws Exception {
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    docker.answerFor("network-connect", lease(L1), 1, "", "Error: No such network: " + BUILD_NET);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    assertTrue(report(inventory, L1).detail().contains("could not connect"), inventory::toString);
+    List<List<String>> calls = docker.calls();
+    int join = calls.indexOf(List.of("network", "connect", BUILD_NET, lease(L1)));
+    assertTrue(join > calls.indexOf(runOf(lease(L1))), "created, then joined: " + calls);
+    assertTrue(
+        calls.subList(join, calls.size()).stream()
+            .anyMatch(c -> c.getFirst().equals("rm") && c.contains(lease(L1))),
+        "the created container is removed: " + calls);
+    assertTrue(
+        calls.stream().noneMatch(c -> c.contains(lease(L1)) && isStart(c)),
+        "and never started: " + calls);
+  }
+
+  @Test
+  void aFailedStartRemovesTheCreatedLeaseAndFailsItSayingSo() throws Exception {
+    docker.answerFor("start", lease(L1), 1, "", "Error response from daemon: cannot start");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    String detail = report(inventory, L1).detail();
+    assertTrue(detail.contains("docker could not start " + lease(L1)), detail);
+    assertTrue(detail.contains("cannot start"), detail);
+    List<List<String>> calls = docker.calls();
+    int started = calls.indexOf(List.of("start", lease(L1)));
+    assertTrue(
+        started > calls.indexOf(runOf(lease(L1)))
+            && calls.subList(started, calls.size()).stream()
+                .anyMatch(c -> c.getFirst().equals("rm") && c.contains(lease(L1))),
+        "create, start, then rm: " + calls);
   }
 
   @Test
@@ -807,6 +864,17 @@ class EstateReconcileTest {
     assertFalse(
         has(docker.calls(), List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
         docker.calls()::toString);
+    // qits-2270: the lease starts only once it is on the build network, so its process never sees
+    // the tunnel's resolver next to the public one in its resolv.conf.
+    awaitCall(calls -> has(calls, List.of("start", lease(L1))));
+    List<List<String>> calls = docker.calls();
+    int created = calls.indexOf(run);
+    int joined = calls.indexOf(List.of("network", "connect", BUILD_NET, lease(L1)));
+    int started = calls.indexOf(List.of("start", lease(L1)));
+    assertTrue(created < joined && joined < started, "create, connect, start: " + calls);
+    assertTrue(
+        calls.subList(0, joined).stream().noneMatch(c -> c.contains(lease(L1)) && isStart(c)),
+        "nothing starts it before the connect: " + calls);
     // qits-2090: the builder the CI lease started resolves through the tunnel too.
     List<String> builder = runOf(BUILDER);
     int network = builder.indexOf("--network");
@@ -881,6 +949,7 @@ class EstateReconcileTest {
     // Created while the tunnel did not answer: the node's own resolvers, and nothing stale.
     awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
     assertFalse(runOf(lease(L1)).contains("--dns"), runOf(lease(L1))::toString);
+    created(lease(L1));
     inspected(L1, H1, "null", "<no value>");
     Inventory before =
         awaitInventory(i -> leaseOf(i, L1, r -> r.state() == LeaseState.RUNNING));
@@ -912,7 +981,7 @@ class EstateReconcileTest {
     assertTrue(
         calls.indexOf(List.of("stop", lease(L1))) >= 0 && removed > 0, "stopped and removed");
     List<String> again = runsOf(lease(L1)).get(1);
-    assertTrue(calls.indexOf(FakeDocker.withoutConfig(again)) > removed, "run after the rm");
+    assertTrue(calls.indexOf(FakeDocker.withoutConfig(again)) > removed, "created after the rm");
     int dns = again.indexOf("--dns");
     assertEquals(
         List.of("--dns", "100.96.0.1", "--dns", "192.168.188.1"),
@@ -922,6 +991,7 @@ class EstateReconcileTest {
     assertTrue(docker.volumes().containsKey(work("ws-42")), "the work volume stays");
     assertTrue(docker.calls("volume").stream().noneMatch(c -> c.contains("rm")), calls::toString);
 
+    created(lease(L1));
     inspected(L1, H1, "[\"100.96.0.1\",\"192.168.188.1\"]", "1");
     Inventory refreshed =
         awaitInventory(
@@ -1783,6 +1853,23 @@ class EstateReconcileTest {
   }
 
   /** The lease's container on the node, as docker's inspect answers it from now on. */
+  /**
+   * FakeDocker models {@code run}, not {@code create}: put the container a lease's create made into
+   * its state, with the create's labels, so a later {@code ps} lists it.
+   */
+  private void created(String name) throws Exception {
+    awaitCall(calls -> has(calls, List.of("start", name)));
+    List<String> create = runsOf(name).getLast();
+    Map<String, String> labels = new HashMap<>();
+    for (int i = 0; i + 1 < create.size(); i++) {
+      if (create.get(i).equals("--label")) {
+        String[] kv = create.get(i + 1).split("=", 2);
+        labels.put(kv[0], kv.length > 1 ? kv[1] : "");
+      }
+    }
+    docker.container(name, labels);
+  }
+
   private void seen(
       String leaseId, String status, int exitCode, String slotType, String specHash, String mounts)
       throws Exception {
@@ -1839,14 +1926,26 @@ class EstateReconcileTest {
         .orElseThrow(() -> new AssertionError("no " + leaseId + " in " + inventory));
   }
 
+  /** The calls that make {@code name}: a lease's {@code create} (qits-2270), else a {@code run}. */
   private List<List<String>> runsOf(String name) {
-    return docker.calls("run").stream().filter(c -> c.contains(name)).toList();
+    return docker.calls().stream()
+        .map(FakeDocker::withoutConfig)
+        .filter(c -> !c.isEmpty() && (c.getFirst().equals("create") || c.getFirst().equals("run")))
+        .filter(c -> c.contains(name))
+        .toList();
   }
 
   private List<String> runOf(String name) {
     List<List<String>> runs = runsOf(name);
     assertFalse(runs.isEmpty(), () -> "no run of " + name + ": " + docker.calls());
     return runs.getFirst();
+  }
+
+  /** A call that starts a container: {@code start}, or {@code run} without {@code --rm}. */
+  private static boolean isStart(List<String> call) {
+    List<String> c = FakeDocker.withoutConfig(call);
+    return !c.isEmpty()
+        && (c.getFirst().equals("start") || (c.getFirst().equals("run") && !c.contains("--rm")));
   }
 
   private boolean touched(String verb, String name) {

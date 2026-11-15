@@ -66,6 +66,13 @@ import org.jboss.logging.Logger;
  * before the public answer. In production the seam is {@link SteadyResolvers}: a probe that fails
  * for a short while does not drop the resolvers, so it does not move the stamp (qits-2260).
  *
+ * <p><b>One {@code docker run}, no join after it</b> (qits-2270). The builder's only network is the
+ * build network, a user-defined one, so docker gives it its embedded DNS from the start: the {@code
+ * --dns} servers never reach its {@code /etc/resolv.conf}, and it has no moment where a public
+ * resolver answers next to the tunnel's. A lease is different: it starts on {@code bridge}, so it is
+ * made with {@code docker create} and started only after its joins ({@link LeaseLauncher}). A second
+ * network on the builder would need the same order.
+ *
  * <p><b>Never replaced under a running build</b> (qits-2260): a stale builder that is running and
  * has a CI lease on the build network ({@link #users}) is kept, and the lease starts on it. The
  * first {@link #ensure} that finds no CI lease on the network replaces it. When docker cannot say
@@ -698,8 +705,10 @@ final class BuildPlane {
 
   /**
    * Join a lease container to the build network: the driver's {@code ContainerSpec} carries one
-   * network, so the second membership is a {@code docker network connect} right after the run. A
-   * second connect answers "already exists", which is the state asked for. Empty on success.
+   * network, so the second membership is a {@code docker network connect}. {@link LeaseLauncher}
+   * calls it after the {@code docker create} and before the {@code docker start}, so the lease never
+   * runs off docker's embedded DNS (qits-2270). A second connect answers "already exists", which is
+   * the state asked for. Empty on success.
    */
   Optional<String> connect(String container) {
     RunnerDocker.Result joined =
