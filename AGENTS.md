@@ -41,20 +41,27 @@ change to that table, reviewed as one, with the test cell beside it.
 
 - **CI never mounts the credential volume, the agent caches or a work volume**, and WORKSPACE and
   DESK never a CI cache or `BUILDKIT_HOST`; `SlotPolicyTest` holds both. A CI lease's build
-  network is a `docker network connect` of the runner's own after the driver's run
-  (`BuildPlane.connect`); a failed connect removes the container again.
+  network is a `docker network connect` of the runner's own (`BuildPlane.connect`); a failed
+  connect removes the container again.
+- **No lease process starts before its networks are joined** (qits-2270): `docker create`, then
+  each `docker network connect` (`qits-private`, then the build network), then `docker start`
+  (`LeaseLauncher.launch`). Never the driver's `run`, which starts the container before it joins
+  `extraNetworks`: a CI lease on a tunnel node would see the tunnel's resolver beside a public one,
+  and musl asks both at once. `EstateReconcileTest` pins the order.
 - **WORKSPACE and DESK run on the runner's lease network, CI on `bridge`** (`LeaseNetwork`,
   qits-2269): `qits-system-runner-leases-<id8>`, owner-labelled, `enable_icc=false`, made by the
-  runner's own `docker network create` when a look says it is absent, at every WORKSPACE or DESK
-  create. One that cannot be made fails the lease — never a fallback to `bridge`, where docker writes
-  the `--dns` servers into resolv.conf and musl asks them all at once. It is the run's network
-  (`SlotPolicy.RunNetwork`), a teardown item after every container, and a WORKSPACE or DESK lease
-  found on other networks is reported `resolversStale`.
+  runner's own `docker network create` when a look says it is absent, before every WORKSPACE or DESK
+  `docker create`, whose `--network` it is — so the lease has docker's embedded `127.0.0.11` from
+  the create on. One that cannot be made fails the lease — never a fallback to `bridge`, where
+  docker writes the `--dns` servers into resolv.conf and musl asks them all at once. It is the
+  create's network (`SlotPolicy.RunNetwork`), a teardown item after every container, and a
+  WORKSPACE or DESK lease found on other networks is reported `resolversStale`.
 - **Every lease joins `qits-private` with the private edge's VIP as first resolver where the edge
   is visible on the node's daemon** (`PrivateEdge`, qits-2062), applied to the policy's spec just
-  before the run and never part of the spec-hash or mounts label — a moved VIP or a new rollout
+  before the create and never part of the spec-hash or mounts label — a moved VIP or a new rollout
   never recreates a running lease. All or nothing, read-only, never throws; off the platform host it
-  adds nothing. The driver does the join (`ContainerSpec.extraNetworks`) and `--dns`.
+  adds nothing. The create argv is the driver's run argv (`LeaseLauncher.createArgv`), so `--dns`
+  is the driver's; the runner does the join (`ContainerSpec.extraNetworks`) before the start.
 - **The build plane is the target's own** (`BuildPlane`): every name derived, none configurable,
   never `qits-buildkitd` / `qits-buildkitd-state` (`BuildPlaneNamesTest`). The builder carries the
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled

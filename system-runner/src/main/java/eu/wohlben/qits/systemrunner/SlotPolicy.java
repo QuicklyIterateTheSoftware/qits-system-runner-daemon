@@ -42,7 +42,7 @@ import java.util.Set;
  *   (+) the edge's VIP first with (*); else 100.96.0.1 first where the node tunnel's DNS answers
  *
  *   The lease network is the runner's own bridge {@code qits-system-runner-leases-<id8>} ({@link
- *   LeaseNetwork}, qits-2269), the network at {@code docker run}.
+ *   LeaseNetwork}, qits-2269), the network at {@code docker create}.
  *
  *   Not a lease's, so not in the table: the builder a CI lease dials ({@link BuildPlane}) and the
  *   runner's own successor ({@link SystemRunnerDomain#successorDns()}) get 100.96.0.1 first where
@@ -61,7 +61,7 @@ import java.util.Set;
  *
  * <p>The {@code qits-private} membership and its resolvers (*) are not this table's to decide:
  * they are a fact of the node's docker daemon, not of the slot type, so {@link PrivateEdge} adds
- * them to the spec this table built, just before the run, wherever the private edge is visible on
+ * them to the spec this table built, just before the create, wherever the private edge is visible on
  * that daemon (qits-2062) — and off the platform host, nothing; there {@link NodeTunnel} puts the
  * node tunnel's {@code 100.96.0.1} first among the resolvers where it answers (qits-2068), on
  * the run's network alone. {@link #containerSpec} itself never sets either, and neither enters the
@@ -73,8 +73,10 @@ import java.util.Set;
  * (qits-2269): on {@code bridge} docker writes the {@code --dns} servers straight into the lease's
  * {@code /etc/resolv.conf}, and musl's resolver asks them all at once, so the LAN's public answer
  * beats the node tunnel's private one; on a user-defined network the lease resolves through
- * docker's embedded {@code 127.0.0.11}, which asks them in order. CI stays on {@code bridge} for
- * now, its build network joined after the run ({@link RunNetwork}).
+ * docker's embedded {@code 127.0.0.11}, which asks them in order — from the {@code docker create}
+ * on, since the lease network is the create's {@code --network}. Only CI is still created on {@code
+ * bridge}; its build network and {@code qits-private} are joined between the create and the start
+ * (qits-2270), so no type's process starts on {@code bridge} alone ({@link RunNetwork}).
  *
  * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
  * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent
@@ -196,9 +198,9 @@ enum SlotPolicy {
   }
 
   /**
-   * The network a type's lease is on at {@code docker run} — the spec's network, before any extra
-   * one is joined. Its own value, not a flag, so CI can move to a network given at run (qits-2270)
-   * without the agent types' cell changing.
+   * The network a type's lease is created on — the spec's network, the {@code docker create}'s
+   * {@code --network}, before any extra one is joined. Its own value, not a flag, so CI can move to
+   * a network given at the create without the agent types' cell changing.
    */
   enum RunNetwork {
     /** Docker's default {@code bridge}, {@link #NETWORK}. */
@@ -324,11 +326,12 @@ enum SlotPolicy {
   /**
    * The driver's spec of a lease container under this policy. Only for an entry {@link #refusal}
    * passed. The spec's network is {@link #runNetwork}'s — the lease network for WORKSPACE and DESK
-   * (qits-2269), {@code bridge} for CI — with no extra network and no resolver: a CI lease's build
-   * network is {@link #networks}' and joined after the run by the runner's own connect ({@link
-   * BuildPlane#connect}), and {@code qits-private} with the edge's VIP as first resolver is {@link
-   * PrivateEdge}'s, added to this spec just before the run where the node's daemon has the private
-   * edge (qits-2062).
+   * (qits-2269), {@code bridge} for CI — the {@code docker create}'s {@code --network}, with no
+   * extra network and no resolver: a CI lease's build network is {@link #networks}' and joined by
+   * the runner's own connect ({@link BuildPlane#connect}) between the create and the start
+   * (qits-2270), and {@code qits-private} with the edge's VIP as first resolver is {@link
+   * PrivateEdge}'s, added to this spec just before the create where the node's daemon has the
+   * private edge (qits-2062).
    *
    * @param leaseNetwork {@link LeaseNetwork#name()}; may be null for a type that does not run on it
    * @throws IllegalStateException for a policy this runner version does not run, a CI lease
@@ -397,7 +400,7 @@ enum SlotPolicy {
   }
 
   /**
-   * The network a lease of this type is on at {@code docker run}: {@code leaseNetwork} for
+   * The network a lease of this type is created on: {@code leaseNetwork} for
    * WORKSPACE and DESK, {@code bridge} for CI.
    *
    * @throws IllegalStateException for a type on the lease network when it is not named
@@ -423,8 +426,8 @@ enum SlotPolicy {
   }
 
   /**
-   * The networks this policy puts a lease of this type on: the run's ({@link #runNetwork}, the
-   * spec's at {@code docker run}) and for CI the build network after it. {@code qits-private},
+   * The networks this policy puts a lease of this type on: the create's ({@link #runNetwork}, the
+   * spec's at {@code docker create}) and for CI the build network joined before the start. {@code qits-private},
    * where the node has the private edge, is {@link PrivateEdge}'s and not listed here.
    */
   List<String> networks(Build build, String leaseNetwork) {

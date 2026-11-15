@@ -90,6 +90,36 @@ class BuildPlaneTest {
         "never the platform builder");
   }
 
+  /**
+   * qits-2270: the builder's only network is the build network, a user-defined one, so docker's
+   * embedded DNS is its resolver from the start. No join follows its run, so it has no moment with
+   * the raw {@code --dns} list in its resolv.conf.
+   */
+  @Test
+  void theBuilderRunsOnTheBuildNetworkAloneAndIsNeverJoinedAfterItsRun() throws Exception {
+    plane =
+        new BuildPlane(
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            BuildkitSettings.DEFAULTS,
+            1,
+            () -> List.of("100.96.0.1", "10.255.255.254"));
+    docker.answerFor("network-inspect", NETWORK, 1, "", "Error: No such network: " + NETWORK);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+
+    assertEquals(Optional.empty(), plane.ensure());
+
+    List<String> run =
+        docker.calls("run").stream().filter(c -> c.contains(BUILDER)).findFirst().orElseThrow();
+    assertEquals(1, run.stream().filter("--network"::equals).count(), run::toString);
+    assertEquals(NETWORK, run.get(run.indexOf("--network") + 1));
+    assertTrue(run.contains("100.96.0.1"), run::toString);
+    assertTrue(
+        docker.calls("network").stream().noneMatch(c -> c.contains("connect")),
+        docker.calls()::toString);
+  }
+
   @Test
   void aRunningBuilderOfTheConfiguredStampIsLeftAlone() throws Exception {
     docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");

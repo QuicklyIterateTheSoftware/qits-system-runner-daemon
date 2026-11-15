@@ -112,14 +112,15 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | restart | no | no | unless-stopped |
 | on ENDED | container removed | container removed, work volume kept | as WORKSPACE |
 
-A CI lease runs on `bridge`; a WORKSPACE or DESK lease on the **lease network**
+Only a CI lease is created on `bridge`; a WORKSPACE or DESK lease is created on the **lease network**
 `qits-system-runner-leases-<id8>` (qits-2269, `LeaseNetwork`), a bridge of the runner's own,
 owner-labelled, with `com.docker.network.bridge.enable_icc=false` so two leases never reach each
 other over it. On docker's default `bridge` a lease's `--dns` servers go straight into its
 `/etc/resolv.conf`, and musl's resolver (the `qits` CLI's) asks them all at once — on a tunnel node
 the LAN upstream's public answer wins and the edge answers 421. On a user-defined network the lease
-gets `nameserver 127.0.0.11`, docker's embedded DNS, which asks the `--dns` servers in order. The
-runner looks the network up at every WORKSPACE or DESK create and makes it only when docker says it
+gets `nameserver 127.0.0.11`, docker's embedded DNS, which asks the `--dns` servers in order — from
+the `docker create` on, since the lease network is its `--network`. The runner looks the network up
+before every WORKSPACE or DESK `docker create` and makes it only when docker says it
 is absent; one docker cannot say about, or cannot make, fails the lease with docker's words — never a
 fallback to `bridge`. A running WORKSPACE or DESK lease not on it (one from before) is reported
 `resolversStale` whatever its resolvers, with one WARN, until its owner refreshes it through the
@@ -135,8 +136,9 @@ upstreams, so private names resolve to the private edge and every other name sti
 all or nothing: any piece missing, or docker not answering, runs the lease without the private
 edge with one log line — DEBUG off the platform host, where there is no overlay, WARN on it. It is
 asked at every create and never hashed into the spec-hash or mounts label, so a running lease is
-not recreated when the edge arrives or its VIP moves. The driver joins `qits-private` right after
-the run and removes the container when that join fails, which fails the lease.
+not recreated when the edge arrives or its VIP moves. The runner joins `qits-private` after the
+`docker create` and before the `docker start`, and removes the container when that join fails,
+which fails the lease.
 
 Off the platform host, a lease the private edge did not take may still resolve private names
 through the **node tunnel** (qits-2068, `NodeTunnel`): where the target's host runs the node
@@ -183,9 +185,20 @@ The known limits:
   discovery.
 
 A CI lease gets `BUILDKIT_HOST=tcp://qits-system-runner-buildkitd-<id8>:1234`, mounts the CI caches
-and nothing else — **never the credential volume, the agent caches or a work volume** — and is then
+and nothing else — **never the credential volume, the agent caches or a work volume** — and is
 joined to the build network with the runner's own `docker network connect` (`BuildPlane.connect`);
-a connect that fails removes the container again and fails the lease. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
+a connect that fails removes the container again and fails the lease.
+
+**Every network is joined before the lease starts** (qits-2270): the runner makes the container
+with `docker create`, joins `qits-private` and the build network with `docker network connect`,
+and only then runs `docker start` — for every type. A WORKSPACE or DESK lease is created on the
+lease network already, so only CI needs the join for its resolvers. A container on `bridge` alone has its `--dns` servers in
+`/etc/resolv.conf` as they are; once it is on a user-defined network, it has docker's embedded DNS
+(`127.0.0.11`), which asks them in order. On a tunnel node a CI lease started before the join saw
+the tunnel's resolver and a public one side by side, and musl in the ci-slot image asks both at
+once, so a private app could resolve to the public edge (exit 3, a 421 from the public edge). The
+builder needs no such step: it runs on the build network only, so it has docker's embedded DNS
+from its start. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
 from the policy; a spec env key the policy owns — `BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR` — is
 `FAILED` with a detail naming it. A WORKSPACE lease's work key is `ws-<rowId>`, a DESK lease's
 `desk-<deskId>`.
@@ -305,7 +318,7 @@ the running leases by their label.
 | the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, `qits-system-runner-ci-daemon-<id8>` (the per-version qits-ci-daemon binary qits-ci's lease bootstrap caches there, qits-1809), created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
 | the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
 | the build network | bridge `qits-system-runner-build-<id8>` | `qits.system.runner=<id>` |
-| the lease network | bridge `qits-system-runner-leases-<id8>` (`enable_icc=false`), every WORKSPACE and DESK lease's at `docker run`; a teardown item, after every container | `qits.system.runner=<id>` |
+| the lease network | bridge `qits-system-runner-leases-<id8>` (`enable_icc=false`), every WORKSPACE and DESK lease's at `docker create`; a teardown item, after every container | `qits.system.runner=<id>` |
 | the builder's state | volume `qits-system-runner-buildkitd-state-<id8>` | `qits.system.runner.buildkitd=state` |
 
 Never `qits-buildkitd` or `qits-buildkitd-state`: those are qits-containers' platform builder and
