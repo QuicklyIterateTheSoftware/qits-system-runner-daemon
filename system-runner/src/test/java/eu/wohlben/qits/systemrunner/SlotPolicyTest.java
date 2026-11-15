@@ -56,6 +56,7 @@ class SlotPolicyTest {
           "qits-system-runner-build-1a2b3c4d",
           "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234",
           1);
+  private static final String LEASES = "qits-system-runner-leases-1a2b3c4d";
 
   // --- the table ---------------------------------------------------------------------------------
 
@@ -79,9 +80,14 @@ class SlotPolicyTest {
     assertFalse(ci.lifecycle().restartsUnlessStopped(), "restart: no");
     assertFalse(ci.agentVolumes(), "no external node volume is ever asked after for CI");
     assertNull(ci.workKeyPrefix);
-    assertEquals(List.of("bridge", BUILD.network()), ci.networks(BUILD));
+    assertEquals(SlotPolicy.RunNetwork.BRIDGE, ci.runNetwork, "CI stays on bridge (qits-2270)");
+    assertFalse(ci.onLeaseNetwork());
+    assertEquals("bridge", ci.runNetwork(LEASES));
+    assertEquals(List.of("bridge", BUILD.network()), ci.networks(BUILD, LEASES));
+    assertEquals(List.of("bridge", BUILD.network()), ci.networks(BUILD, null));
 
-    ContainerSpec c = ci.containerSpec(NAME, spec(CI_IMAGE, env(), "1001"), ALL_MOUNTS, BUILD);
+    ContainerSpec c =
+        ci.containerSpec(NAME, spec(CI_IMAGE, env(), "1001"), ALL_MOUNTS, BUILD, LEASES);
     assertEquals(CI_IMAGE, c.image());
     assertEquals(NAME, c.explicitName());
     assertEquals("1001", c.user());
@@ -127,7 +133,8 @@ class SlotPolicyTest {
                 "qits-system-runner-ci-pnpm-1a2b3c4d",
                 "qits-system-runner-ci-daemon-1a2b3c4d"))) {
       ContainerSpec c =
-          SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, Map.of(), "1001"), mounts, BUILD);
+          SlotPolicy.CI.containerSpec(
+              NAME, spec(CI_IMAGE, Map.of(), "1001"), mounts, BUILD, LEASES);
       List<String> mounted = new java.util.ArrayList<>();
       c.volumeMounts().forEach(m -> mounted.add(m.volumeName()));
       c.sharedMounts().forEach(m -> mounted.add(m.sharedName()));
@@ -149,13 +156,30 @@ class SlotPolicyTest {
   void aWorkspaceOrDeskLeaseNeverMountsACiCacheOrGetsBuildkitHost() {
     for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
       ContainerSpec c =
-          SlotPolicy.of(type).containerSpec(NAME, spec(imageOf(type), env(), "1000"), ALL_MOUNTS, BUILD);
+          SlotPolicy.of(type)
+              .containerSpec(NAME, spec(imageOf(type), env(), "1000"), ALL_MOUNTS, BUILD, LEASES);
       for (ContainerSpec.SharedMount m : c.sharedMounts()) {
         assertFalse(m.sharedName().contains("-ci-"), type + " " + m);
       }
       assertFalse(c.env().containsKey("BUILDKIT_HOST"), type.name());
       assertFalse(c.env().containsKey("QITS_CI_BUILDER_SLOTS"), type.name());
-      assertEquals(List.of("bridge"), SlotPolicy.of(type).networks(BUILD), type.name());
+      assertEquals(List.of(LEASES), SlotPolicy.of(type).networks(BUILD, LEASES), type.name());
+      assertEquals(List.of(LEASES), SlotPolicy.of(type).networks(null, LEASES), type.name());
+      assertEquals(LEASES, c.network(), type.name());
+    }
+  }
+
+  @Test
+  void aWorkspaceOrDeskLeaseWithoutItsLeaseNetworkIsNeverSpecified() {
+    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
+      SlotPolicy policy = SlotPolicy.of(type);
+      for (String none : java.util.Arrays.asList(null, "", " ")) {
+        assertThrows(
+            IllegalStateException.class,
+            () -> policy.containerSpec(NAME, spec(imageOf(type), env(), "1000"), MOUNTS, none),
+            type + " " + none);
+        assertThrows(IllegalStateException.class, () -> policy.networks(null, none), type.name());
+      }
     }
   }
 
@@ -167,7 +191,8 @@ class SlotPolicyTest {
             "tcp://qits-system-runner-buildkitd-1a2b3c4d:1234",
             4);
     ContainerSpec c =
-        SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, env(), "1001"), ALL_MOUNTS, wideGate);
+        SlotPolicy.CI.containerSpec(
+            NAME, spec(CI_IMAGE, env(), "1001"), ALL_MOUNTS, wideGate, LEASES);
     assertEquals("4", c.env().get("QITS_CI_BUILDER_SLOTS"));
   }
 
@@ -175,8 +200,9 @@ class SlotPolicyTest {
   void aCiLeaseWithoutItsBuildPlaneIsNeverSpecified() {
     assertThrows(
         IllegalStateException.class,
-        () -> SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, Map.of(), "1001"), ALL_MOUNTS));
-    assertThrows(IllegalStateException.class, () -> SlotPolicy.CI.networks(null));
+        () ->
+            SlotPolicy.CI.containerSpec(NAME, spec(CI_IMAGE, Map.of(), "1001"), ALL_MOUNTS, LEASES));
+    assertThrows(IllegalStateException.class, () -> SlotPolicy.CI.networks(null, LEASES));
   }
 
   @Test
@@ -194,8 +220,12 @@ class SlotPolicyTest {
     assertFalse(ws.restartUnlessStopped);
     assertFalse(ws.lifecycle().restartsUnlessStopped(), "restart: no");
     assertEquals("ws-", ws.workKeyPrefix);
+    assertEquals(SlotPolicy.RunNetwork.LEASE, ws.runNetwork, "the lease network (qits-2269)");
+    assertTrue(ws.onLeaseNetwork());
+    assertEquals(LEASES, ws.runNetwork(LEASES));
+    assertEquals(List.of(LEASES), ws.networks(null, LEASES));
 
-    ContainerSpec c = ws.containerSpec(NAME, spec(WS_IMAGE, env(), "1000"), MOUNTS);
+    ContainerSpec c = ws.containerSpec(NAME, spec(WS_IMAGE, env(), "1000"), MOUNTS, LEASES);
     assertContainer(c, WS_IMAGE, "1000", true);
   }
 
@@ -214,23 +244,29 @@ class SlotPolicyTest {
     assertTrue(desk.restartUnlessStopped);
     assertTrue(desk.lifecycle().restartsUnlessStopped(), "restart: unless-stopped");
     assertEquals("desk-", desk.workKeyPrefix);
+    assertEquals(SlotPolicy.RunNetwork.LEASE, desk.runNetwork, "the lease network (qits-2269)");
+    assertTrue(desk.onLeaseNetwork());
+    assertEquals(LEASES, desk.runNetwork(LEASES));
+    assertEquals(List.of(LEASES), desk.networks(null, LEASES));
 
-    ContainerSpec c = desk.containerSpec(NAME, spec(DESK_IMAGE, env(), "1234"), MOUNTS);
+    ContainerSpec c = desk.containerSpec(NAME, spec(DESK_IMAGE, env(), "1234"), MOUNTS, LEASES);
     assertContainer(c, DESK_IMAGE, "1234", true);
   }
 
   /**
    * What WORKSPACE and DESK share: the spec's image, user, env and limits; the credential volume
    * at {@code /claude-home} and {@code CLAUDE_CONFIG_DIR} beside it; the work volume at {@code
-   * /workspace}; the agent caches; the bridge alone; no docker socket, no extra host, no alias, and
-   * no sandbox flags.
+   * /workspace}; the agent caches; the lease network alone at the run (qits-2269); no docker
+   * socket, no extra host, no alias, and no sandbox flags.
    */
   private static void assertContainer(ContainerSpec c, String image, String user, boolean init) {
     assertEquals(image, c.image());
     assertEquals(NAME, c.explicitName());
     assertEquals(user, c.user());
     assertEquals(init, c.init());
-    assertEquals("bridge", c.network());
+    assertEquals(LEASES, c.network(), "the lease network, never bridge (qits-2269)");
+    assertTrue(c.extraNetworks().isEmpty(), "qits-private is PrivateEdge's");
+    assertTrue(c.dns().isEmpty(), "the resolvers are PrivateEdge's and NodeTunnel's");
     assertTrue(c.aliases().isEmpty());
     assertTrue(c.addHosts().isEmpty());
     assertFalse(c.hostDockerSocket(), "never the docker socket");
@@ -262,7 +298,8 @@ class SlotPolicyTest {
                 .containerSpec(
                     NAME,
                     spec(type == SlotType.DESK ? DESK_IMAGE : WS_IMAGE, Map.of(), "1000"),
-                    new SlotPolicy.Mounts("w", credential, "m", "p"));
+                    new SlotPolicy.Mounts("w", credential, "m", "p"),
+                    LEASES);
         assertTrue(
             c.sharedMounts().contains(new ContainerSpec.SharedMount(credential, "/claude-home")),
             type + " " + credential);

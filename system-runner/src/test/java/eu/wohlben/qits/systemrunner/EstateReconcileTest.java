@@ -18,6 +18,7 @@ import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.RunnerRuntime;
 import eu.wohlben.qits.runner.toolkit.RunnerSettings;
 import eu.wohlben.qits.runner.toolkit.SelfUpdate;
+import eu.wohlben.qits.runner.toolkit.TeardownItem;
 import eu.wohlben.qits.runner.toolkit.Telemetry;
 import eu.wohlben.qits.runner.toolkit.testing.FakeDocker;
 import eu.wohlben.qits.runner.toolkit.testing.FakeRunnerHost;
@@ -126,6 +127,7 @@ class EstateReconcileTest {
   private static final String CI_DAEMON = "qits-system-runner-ci-daemon-r1";
   private static final String BUILDER = "qits-system-runner-buildkitd-r1";
   private static final String BUILD_NET = "qits-system-runner-build-r1";
+  private static final String LEASE_NET = "qits-system-runner-leases-r1";
 
   private static final String OLD_WS = "qits-workspaces-runner-ws-42-0f0e0d0c";
 
@@ -217,7 +219,7 @@ class EstateReconcileTest {
             "--name",
             lease(L1),
             "--network",
-            "bridge",
+            LEASE_NET,
             "--user",
             "1000",
             "--label",
@@ -256,7 +258,8 @@ class EstateReconcileTest {
             "TZ=UTC",
             WS_IMAGE),
         run,
-        "the bridge, no extra host, no docker socket, --init (qits-1598), no restart, no sandbox flags");
+        "the lease network (qits-2269), no extra host, no docker socket, --init (qits-1598), no"
+            + " restart, no sandbox flags");
     assertTrue(docker.calls("service").isEmpty(), "no qits-private here: no edge asked after");
     assertFalse(
         has(docker.calls(), List.of("network", "connect", PrivateEdge.NETWORK, lease(L1))),
@@ -298,6 +301,7 @@ class EstateReconcileTest {
     assertTrue(run.contains(work("desk-" + DESK_ID) + ":/workspace"), run::toString);
     assertTrue(run.contains(DOT_CLAUDE + ":/claude-home"), run::toString);
     assertTrue(run.contains("qits.system.runner.slot-type=DESK"), run::toString);
+    assertEquals(LEASE_NET, run.get(run.indexOf("--network") + 1), "the lease network (qits-2269)");
   }
 
   @Test
@@ -666,7 +670,8 @@ class EstateReconcileTest {
         List.of("--dns", "10.231.0.2", "--dns", "192.168.188.1", "--dns", "1.1.1.1"),
         run.subList(dns, dns + 6),
         run::toString);
-    assertEquals("bridge", run.get(run.indexOf("--network") + 1), "bridge stays the run's network");
+    assertEquals(
+        LEASE_NET, run.get(run.indexOf("--network") + 1), "the lease network stays the run's");
     List<List<String>> calls = docker.calls();
     assertTrue(
         calls.indexOf(run)
@@ -770,7 +775,7 @@ class EstateReconcileTest {
         run.subList(dns, dns + 4),
         run::toString);
     assertEquals(2, run.stream().filter("--dns"::equals).count(), run::toString);
-    assertEquals("bridge", run.get(run.indexOf("--network") + 1));
+    assertEquals(LEASE_NET, run.get(run.indexOf("--network") + 1));
     assertTrue(
         docker.calls("network").stream().noneMatch(c -> c.contains("connect")),
         "no network connect: " + docker.calls());
@@ -864,6 +869,208 @@ class EstateReconcileTest {
         run::toString);
     assertFalse(run.contains("100.96.0.1"), run::toString);
     assertTrue(tunnelAsked.isEmpty(), "never probed: " + tunnelAsked);
+  }
+
+  // ---- the lease network (qits-2269) -----------------------------------------------------------
+
+  @Test
+  void onANodeWithTheTunnelAWorkspaceLeaseRunsOnTheLeaseNetworkMadeBeforeItsRun()
+      throws Exception {
+    nodeTunnelUp();
+    docker.answerFor("network-inspect", LEASE_NET, 1, "", "Error: No such network: " + LEASE_NET);
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    List<String> run = runOf(lease(L1));
+    assertEquals(LEASE_NET, run.get(run.indexOf("--network") + 1), run::toString);
+    int dns = run.indexOf("--dns");
+    assertEquals(
+        List.of("--dns", "100.96.0.1", "--dns", "192.168.188.1"),
+        run.subList(dns, dns + 4),
+        "the tunnel's resolvers, asked in order by docker's embedded DNS: " + run);
+    List<String> create =
+        List.of(
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--label",
+            "qits.system.runner=r1",
+            "--opt",
+            "com.docker.network.bridge.enable_icc=false",
+            LEASE_NET);
+    List<List<String>> calls = docker.calls().stream().map(FakeDocker::withoutConfig).toList();
+    assertTrue(calls.contains(create), calls::toString);
+    assertTrue(
+        calls.indexOf(create) < calls.indexOf(FakeDocker.withoutConfig(run)),
+        "made before the run: " + calls);
+  }
+
+  @Test
+  void aLeaseNetworkThatCannotBeMadeFailsTheLeaseWithDockersWordsAndNeverFallsBackToBridge()
+      throws Exception {
+    docker.answerFor("network-inspect", LEASE_NET, 1, "", "Error: No such network: " + LEASE_NET);
+    docker.answerFor(
+        "network-create", LEASE_NET, 1, "", "Error response from daemon: all pools are in use");
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    String detail = report(inventory, L1).detail();
+    assertTrue(detail.contains("could not create the lease network " + LEASE_NET), detail);
+    assertTrue(detail.contains("all pools are in use"), detail);
+    assertTrue(runsOf(lease(L1)).isEmpty(), docker.calls()::toString);
+  }
+
+  @Test
+  void aLeaseNetworkDockerCannotSayAboutFailsTheLeaseWithDockersWords() throws Exception {
+    docker.answerFor(
+        "network-inspect", LEASE_NET, 1, "", "Cannot connect to the Docker daemon at unix:///x");
+    estateThenAck(desk(L2, H1));
+    start();
+
+    Inventory inventory =
+        awaitInventory(i -> i.leases().stream().anyMatch(r -> r.state() == LeaseState.FAILED));
+    String detail = report(inventory, L2).detail();
+    assertTrue(detail.contains("docker could not say whether " + LEASE_NET + " exists"), detail);
+    assertTrue(detail.contains("Cannot connect to the Docker daemon"), detail);
+    assertTrue(runsOf(lease(L2)).isEmpty(), docker.calls()::toString);
+    assertTrue(
+        docker.calls("network").stream().noneMatch(c -> c.contains("create")),
+        docker.calls()::toString);
+  }
+
+  @Test
+  void aCiLeaseStaysOnBridgeAndNeverAsksAfterTheLeaseNetwork() throws Exception {
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+
+    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+    List<String> run = runOf(lease(L1));
+    assertEquals("bridge", run.get(run.indexOf("--network") + 1), "CI is qits-2270's");
+    assertTrue(
+        docker.calls().stream().noneMatch(c -> c.contains(LEASE_NET)), docker.calls()::toString);
+  }
+
+  @Test
+  void aWorkspaceLeaseStillOnBridgeIsStaleWhateverItsResolversAndClearsOnTheLeaseNetwork()
+      throws Exception {
+    nodeTunnelUp();
+    List<String> warnings = captureWarnings(" not on the lease network ");
+    estateThenAck(workspace(L1, H1));
+    start();
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
+    String tunnel = "[\"100.96.0.1\",\"192.168.188.1\"]";
+
+    // No resolvers at all on the lease network: stale for the resolvers — the choice is in.
+    inspectedOn(L1, "WORKSPACE", mounts(work("ws-42")), "null", LEASE_NET + " ");
+    awaitInventory(i -> leaseOf(i, L1, LeaseReport::resolversStale));
+    // The tunnel's resolvers on the lease network: nothing stale.
+    int sent = host.all(Inventory.class).size();
+    inspectedOn(L1, "WORKSPACE", mounts(work("ws-42")), tunnel, LEASE_NET + " ");
+    awaitTrue(
+        () ->
+            host.all(Inventory.class).stream()
+                .skip(sent)
+                .anyMatch(
+                    i -> leaseOf(i, L1, r -> !r.resolvers().isEmpty() && !r.resolversStale())));
+    // The same resolvers on bridge, as a lease from before qits-2269: stale, warned once.
+    int fresh = host.all(Inventory.class).size();
+    inspectedOn(L1, "WORKSPACE", mounts(work("ws-42")), tunnel, "bridge ");
+    awaitTrue(
+        () ->
+            host.all(Inventory.class).stream()
+                .skip(fresh)
+                .anyMatch(i -> leaseOf(i, L1, LeaseReport::resolversStale)));
+    Thread.sleep(1_000);
+    assertEquals(
+        List.of(
+            "system-runner's lease "
+                + L1
+                + " runs on [bridge], not on the lease network "
+                + LEASE_NET
+                + ": stale until its owner refreshes it"),
+        warnings);
+    assertEquals(1, runsOf(lease(L1)).size(), "only reported: " + docker.calls());
+  }
+
+  @Test
+  void aCiLeaseOnBridgeIsNotStaleForItsNetwork() throws Exception {
+    nodeTunnelUp();
+    docker.answerFor("network-inspect", BUILD_NET, 1, "", "Error: No such network: " + BUILD_NET);
+    docker.answerFor("inspect", BUILDER, 1, "", "Error: No such object: " + BUILDER);
+    estateThenAck(ci(L1, H1));
+    start();
+    awaitCall(calls -> has(calls, List.of("network", "connect", BUILD_NET, lease(L1))));
+
+    inspectedOn(L1, "CI", ciMounts(), "null", "bridge " + BUILD_NET + " ");
+    awaitInventory(i -> leaseOf(i, L1, LeaseReport::resolversStale));
+    int sent = host.all(Inventory.class).size();
+    inspectedOn(
+        L1, "CI", ciMounts(), "[\"100.96.0.1\",\"192.168.188.1\"]", "bridge " + BUILD_NET + " ");
+    awaitTrue(
+        () ->
+            host.all(Inventory.class).stream()
+                .skip(sent)
+                .anyMatch(
+                    i -> leaseOf(i, L1, r -> !r.resolvers().isEmpty() && !r.resolversStale())));
+  }
+
+  @Test
+  void theLeaseNetworkIsTornDownAfterEveryContainerNamed() throws Exception {
+    estateThenAck();
+    start();
+
+    List<TeardownItem> items = domain.teardown();
+    assertEquals(new TeardownItem(TeardownItem.Type.NETWORK, LEASE_NET), items.getLast());
+    assertEquals(
+        List.of(
+            new TeardownItem(TeardownItem.Type.CONTAINER, BUILDER),
+            new TeardownItem(TeardownItem.Type.NETWORK, BUILD_NET),
+            new TeardownItem(TeardownItem.Type.VOLUME, "qits-system-runner-buildkitd-state-r1")),
+        items.subList(0, 3),
+        "the build plane's, as before");
+    assertTrue(
+        items.subList(3, items.size() - 1).stream()
+            .allMatch(i -> i.type() == TeardownItem.Type.CONTAINER),
+        items::toString);
+  }
+
+  @Test
+  void offTheLeaseNetworkIsOnlyAWorkspaceOrDeskOnOtherNetworksDockerNamed() {
+    for (String type : List.of("WORKSPACE", "DESK")) {
+      assertTrue(SystemRunnerDomain.offLeaseNetwork(on(type, "bridge"), LEASE_NET), type);
+      assertTrue(
+          SystemRunnerDomain.offLeaseNetwork(on(type, "bridge", "qits-private"), LEASE_NET), type);
+      assertFalse(SystemRunnerDomain.offLeaseNetwork(on(type, LEASE_NET), LEASE_NET), type);
+      assertFalse(
+          SystemRunnerDomain.offLeaseNetwork(on(type, LEASE_NET, "qits-private"), LEASE_NET), type);
+      assertFalse(SystemRunnerDomain.offLeaseNetwork(on(type), LEASE_NET), "none said: " + type);
+    }
+    assertFalse(SystemRunnerDomain.offLeaseNetwork(on("CI", "bridge", BUILD_NET), LEASE_NET));
+    assertFalse(SystemRunnerDomain.offLeaseNetwork(on(null, "bridge"), LEASE_NET));
+  }
+
+  private static LeaseContainers.Seen on(String slotType, String... networks) {
+    return new LeaseContainers.Seen(
+        "c1", L1, "running", 0, slotType, H1, "m", false, List.of(), 0, List.of(networks));
+  }
+
+  /** The lease's container as the inspect answers it from now on, its dns and networks said. */
+  private void inspectedOn(
+      String leaseId, String slotType, String mounts, String dnsJson, String networks)
+      throws Exception {
+    docker.answerFor(
+        "inspect",
+        lease(leaseId),
+        0,
+        "c-" + leaseId + "|running|0|" + leaseId + "|" + slotType + "|" + H1 + "|" + mounts
+            + "|false|" + dnsJson + "|<no value>|" + networks + "\n",
+        "");
   }
 
   // ---- stale resolvers, refreshed by the generation (qits-2091) --------------------------------
@@ -969,6 +1176,11 @@ class EstateReconcileTest {
    * test.
    */
   private List<String> captureWarnings() {
+    return captureWarnings(" runs without the ");
+  }
+
+  /** The WARNs {@link SystemRunnerDomain} logs from now on that contain {@code part}. */
+  private List<String> captureWarnings(String part) {
     List<String> warnings = new java.util.concurrent.CopyOnWriteArrayList<>();
     java.util.logging.Logger logger =
         java.util.logging.Logger.getLogger(SystemRunnerDomain.class.getName());
@@ -978,7 +1190,7 @@ class EstateReconcileTest {
           public void publish(java.util.logging.LogRecord record) {
             if (record.getLevel().intValue() == java.util.logging.Level.WARNING.intValue()) {
               String text = formatted(record);
-              if (text.contains(" runs without the ")) {
+              if (text.contains(part)) {
                 warnings.add(text);
               }
             }

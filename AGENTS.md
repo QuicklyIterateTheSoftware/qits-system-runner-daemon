@@ -43,6 +43,13 @@ change to that table, reviewed as one, with the test cell beside it.
   DESK never a CI cache or `BUILDKIT_HOST`; `SlotPolicyTest` holds both. A CI lease's build
   network is a `docker network connect` of the runner's own after the driver's run
   (`BuildPlane.connect`); a failed connect removes the container again.
+- **WORKSPACE and DESK run on the runner's lease network, CI on `bridge`** (`LeaseNetwork`,
+  qits-2269): `qits-system-runner-leases-<id8>`, owner-labelled, `enable_icc=false`, made by the
+  runner's own `docker network create` when a look says it is absent, at every WORKSPACE or DESK
+  create. One that cannot be made fails the lease — never a fallback to `bridge`, where docker writes
+  the `--dns` servers into resolv.conf and musl asks them all at once. It is the run's network
+  (`SlotPolicy.RunNetwork`), a teardown item after every container, and a WORKSPACE or DESK lease
+  found on other networks is reported `resolversStale`.
 - **Every lease joins `qits-private` with the private edge's VIP as first resolver where the edge
   is visible on the node's daemon** (`PrivateEdge`, qits-2062), applied to the policy's spec just
   before the run and never part of the spec-hash or mounts label — a moved VIP or a new rollout

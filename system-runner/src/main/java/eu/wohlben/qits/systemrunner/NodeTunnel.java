@@ -20,7 +20,8 @@ import org.jboss.logging.Logger;
  * <b>A lease resolving through the node tunnel where the node has one</b> (qits-2068): a target off
  * the platform host whose host runs the node tunnel reaches the private edge's tunnel address
  * {@value #DNS_ADDRESS} from {@code bridge}, the runner's own container exactly like a lease. Such
- * a lease keeps {@code bridge} and no other network, and gets {@code --dns 100.96.0.1} followed by
+ * a lease keeps its run network — the lease network for WORKSPACE and DESK ({@link LeaseNetwork},
+ * qits-2269), {@code bridge} for CI — and no other, and gets {@code --dns 100.96.0.1} followed by
  * the runner's own upstreams, so private names resolve to the private edge through the tunnel and
  * every other name still resolves — the edge's DNS answers a public name REFUSED, and glibc then
  * asks the next server.

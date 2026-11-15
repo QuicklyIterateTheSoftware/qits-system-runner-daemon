@@ -760,7 +760,11 @@ final class BuildPlane {
     return new Network(Presence.PRESENT, driver.isEmpty() ? null : driver, null);
   }
 
-  private static boolean absent(RunnerDocker.Result result) {
+  /**
+   * Whether a failed read-only look said "no such object" — never a timeout, which is UNKNOWN.
+   * {@link LeaseNetwork}'s presence check too.
+   */
+  static boolean absent(RunnerDocker.Result result) {
     String detail = result.detail() == null ? "" : result.detail().toLowerCase(Locale.ROOT);
     return !result.timedOut()
         && (detail.contains("no such object")

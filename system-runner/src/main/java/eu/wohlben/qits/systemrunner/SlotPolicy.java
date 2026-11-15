@@ -27,7 +27,7 @@ import java.util.Set;
  *   /workspace        container filesystem            work volume              work volume
  *   caches            ci-git, ci-m2, ci-pnpm,         m2, pnpm                 m2, pnpm
  *                     ci-daemon
- *   networks          bridge + the build network      bridge                   bridge
+ *   networks          bridge + the build network      the lease network        the lease network
  *                     + qits-private (*)              + qits-private (*)       + qits-private (*)
  *   BUILDKIT_HOST     injected                        never                    never
  *   QITS_CI_BUILDER_SLOTS injected                    never                    never
@@ -40,6 +40,9 @@ import java.util.Set;
  *
  *   (*) where the private edge is visible on the node's daemon, its VIP the first resolver
  *   (+) the edge's VIP first with (*); else 100.96.0.1 first where the node tunnel's DNS answers
+ *
+ *   The lease network is the runner's own bridge {@code qits-system-runner-leases-<id8>} ({@link
+ *   LeaseNetwork}, qits-2269), the network at {@code docker run}.
  *
  *   Not a lease's, so not in the table: the builder a CI lease dials ({@link BuildPlane}) and the
  *   runner's own successor ({@link SystemRunnerDomain#successorDns()}) get 100.96.0.1 first where
@@ -61,10 +64,17 @@ import java.util.Set;
  * them to the spec this table built, just before the run, wherever the private edge is visible on
  * that daemon (qits-2062) — and off the platform host, nothing; there {@link NodeTunnel} puts the
  * node tunnel's {@code 100.96.0.1} first among the resolvers where it answers (qits-2068), on
- * {@code bridge} alone. {@link #containerSpec} itself never sets either, and neither enters the
+ * the run's network alone. {@link #containerSpec} itself never sets either, and neither enters the
  * spec-hash or mounts label, still: each lease's resolvers are reported, with whether they are
  * stale against what the node offers now, and refreshed only by the owner through the lease's
  * generation (qits-2091).
+ *
+ * <p>WORKSPACE and DESK run on the lease network, not docker's default {@code bridge}
+ * (qits-2269): on {@code bridge} docker writes the {@code --dns} servers straight into the lease's
+ * {@code /etc/resolv.conf}, and musl's resolver asks them all at once, so the LAN's public answer
+ * beats the node tunnel's private one; on a user-defined network the lease resolves through
+ * docker's embedded {@code 127.0.0.11}, which asks them in order. CI stays on {@code bridge} for
+ * now, its build network joined after the run ({@link RunNetwork}).
  *
  * <p>WORKSPACE runs under {@code --init}, as the DIRECT workspace container always did: without tini
  * the workspace daemon is PID 1 and a session leader, so the first terminal it opens for an agent
@@ -85,6 +95,7 @@ enum SlotPolicy {
       true,
       true,
       false,
+      RunNetwork.BRIDGE,
       null),
   WORKSPACE(
       SlotType.WORKSPACE,
@@ -98,6 +109,7 @@ enum SlotPolicy {
       false,
       true,
       false,
+      RunNetwork.LEASE,
       "ws-"),
   DESK(
       SlotType.DESK,
@@ -111,6 +123,7 @@ enum SlotPolicy {
       false,
       true,
       true,
+      RunNetwork.LEASE,
       "desk-");
 
   /** Where the credential volume lands. */
@@ -122,7 +135,7 @@ enum SlotPolicy {
   /** Where the work volume lands. */
   static final String WORKSPACE_TARGET = "/workspace";
 
-  /** The one network every lease joins first. */
+  /** Docker's default network: the one a CI lease runs on. */
   static final String NETWORK = "bridge";
 
   static final String BUILDKIT_HOST = "BUILDKIT_HOST";
@@ -183,6 +196,18 @@ enum SlotPolicy {
   }
 
   /**
+   * The network a type's lease is on at {@code docker run} — the spec's network, before any extra
+   * one is joined. Its own value, not a flag, so CI can move to a network given at run (qits-2270)
+   * without the agent types' cell changing.
+   */
+  enum RunNetwork {
+    /** Docker's default {@code bridge}, {@link #NETWORK}. */
+    BRIDGE,
+    /** The runner's own lease network ({@link LeaseNetwork}, qits-2269), named by the caller. */
+    LEASE
+  }
+
+  /**
    * The build plane a CI lease joins: its network, the {@code BUILDKIT_HOST} it dials, and the
    * width of the target-wide build gate it is handed as {@code QITS_CI_BUILDER_SLOTS}.
    */
@@ -199,6 +224,7 @@ enum SlotPolicy {
   final boolean noNewPrivileges;
   final boolean init;
   final boolean restartUnlessStopped;
+  final RunNetwork runNetwork;
   final String workKeyPrefix;
 
   SlotPolicy(
@@ -213,6 +239,7 @@ enum SlotPolicy {
       boolean noNewPrivileges,
       boolean init,
       boolean restartUnlessStopped,
+      RunNetwork runNetwork,
       String workKeyPrefix) {
     this.type = type;
     this.enabled = enabled;
@@ -225,6 +252,7 @@ enum SlotPolicy {
     this.noNewPrivileges = noNewPrivileges;
     this.init = init;
     this.restartUnlessStopped = restartUnlessStopped;
+    this.runNetwork = runNetwork;
     this.workKeyPrefix = workKeyPrefix;
   }
 
@@ -285,23 +313,29 @@ enum SlotPolicy {
     return Optional.empty();
   }
 
-  /** {@link #containerSpec(String, LeaseSpec, Mounts, Build)} for a type without a build plane. */
-  ContainerSpec containerSpec(String name, LeaseSpec spec, Mounts mounts) {
-    return containerSpec(name, spec, mounts, null);
+  /**
+   * {@link #containerSpec(String, LeaseSpec, Mounts, Build, String)} for a type without a build
+   * plane.
+   */
+  ContainerSpec containerSpec(String name, LeaseSpec spec, Mounts mounts, String leaseNetwork) {
+    return containerSpec(name, spec, mounts, null, leaseNetwork);
   }
 
   /**
    * The driver's spec of a lease container under this policy. Only for an entry {@link #refusal}
-   * passed. The spec's network is {@code bridge} for every type, with no extra network and no
-   * resolver: a CI lease's build network is {@link #networks}' and joined after the run by the
-   * runner's own connect ({@link BuildPlane#connect}), and {@code qits-private} with the edge's VIP
-   * as first resolver is {@link PrivateEdge}'s, added to this spec just before the run where the
-   * node's daemon has the private edge (qits-2062).
+   * passed. The spec's network is {@link #runNetwork}'s — the lease network for WORKSPACE and DESK
+   * (qits-2269), {@code bridge} for CI — with no extra network and no resolver: a CI lease's build
+   * network is {@link #networks}' and joined after the run by the runner's own connect ({@link
+   * BuildPlane#connect}), and {@code qits-private} with the edge's VIP as first resolver is {@link
+   * PrivateEdge}'s, added to this spec just before the run where the node's daemon has the private
+   * edge (qits-2062).
    *
-   * @throws IllegalStateException for a policy this runner version does not run, or a CI lease
-   *     without its build plane
+   * @param leaseNetwork {@link LeaseNetwork#name()}; may be null for a type that does not run on it
+   * @throws IllegalStateException for a policy this runner version does not run, a CI lease
+   *     without its build plane, or a type on the lease network without its name
    */
-  ContainerSpec containerSpec(String name, LeaseSpec spec, Mounts mounts, Build build) {
+  ContainerSpec containerSpec(
+      String name, LeaseSpec spec, Mounts mounts, Build build, String leaseNetwork) {
     if (!enabled) {
       throw new IllegalStateException(SystemRunnerProtocol.CI_NOT_ENABLED);
     }
@@ -311,7 +345,7 @@ enum SlotPolicy {
     ContainerSpec.Builder b =
         ContainerSpec.builder(spec.image())
             .name(name)
-            .network(NETWORK)
+            .network(runNetwork(leaseNetwork))
             .user(spec.user())
             .init(init)
             .pullPolicy(ContainerSpec.PullPolicy.MISSING)
@@ -363,18 +397,45 @@ enum SlotPolicy {
   }
 
   /**
-   * The networks this policy puts a lease of this type on: {@code bridge} — the spec's, at {@code
-   * docker run} — and for CI the build network after it. {@code qits-private}, where the node has
-   * the private edge, is {@link PrivateEdge}'s and not listed here.
+   * The network a lease of this type is on at {@code docker run}: {@code leaseNetwork} for
+   * WORKSPACE and DESK, {@code bridge} for CI.
+   *
+   * @throws IllegalStateException for a type on the lease network when it is not named
    */
-  List<String> networks(Build build) {
+  String runNetwork(String leaseNetwork) {
+    return switch (runNetwork) {
+      case BRIDGE -> NETWORK;
+      case LEASE -> {
+        if (leaseNetwork == null || leaseNetwork.isBlank()) {
+          throw new IllegalStateException("a " + type + " lease needs its lease network");
+        }
+        yield leaseNetwork;
+      }
+    };
+  }
+
+  /**
+   * Whether this type runs on the lease network: a lease of it found elsewhere — a container from
+   * before qits-2269, on {@code bridge} — is reported stale until the owner refreshes it.
+   */
+  boolean onLeaseNetwork() {
+    return runNetwork == RunNetwork.LEASE;
+  }
+
+  /**
+   * The networks this policy puts a lease of this type on: the run's ({@link #runNetwork}, the
+   * spec's at {@code docker run}) and for CI the build network after it. {@code qits-private},
+   * where the node has the private edge, is {@link PrivateEdge}'s and not listed here.
+   */
+  List<String> networks(Build build, String leaseNetwork) {
+    String run = runNetwork(leaseNetwork);
     if (!buildNetwork) {
-      return List.of(NETWORK);
+      return List.of(run);
     }
     if (build == null || build.network() == null) {
       throw new IllegalStateException("a " + type + " lease needs its build plane");
     }
-    return List.of(NETWORK, build.network());
+    return List.of(run, build.network());
   }
 
   /** {@code 0}, {@code root}, or either with a group: the one user no lease may be. */

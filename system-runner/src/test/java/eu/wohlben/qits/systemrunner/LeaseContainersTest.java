@@ -9,8 +9,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * {@link LeaseContainers}' reading of one inspect line: the container's {@code --dns} servers from
- * {@code {{json .HostConfig.Dns}}} and its generation label (qits-2091), read by hand, and a line
- * of the older, shorter format read with the defaults.
+ * {@code {{json .HostConfig.Dns}}} and its generation label (qits-2091), read by hand, the
+ * networks it is on (qits-2269), and a line of the older, shorter format read with the defaults.
  */
 class LeaseContainersTest {
 
@@ -53,6 +53,18 @@ class LeaseContainersTest {
     LeaseContainers.Seen before = parse(HEAD);
     assertEquals(List.of(), before.dns());
     assertEquals(0, before.generation());
+    assertEquals(List.of(), before.networks());
+    assertEquals(List.of(), parse(HEAD + "|null|3").networks(), "a line from before qits-2269");
+  }
+
+  @Test
+  void theNetworksAreTheSpaceSeparatedNamesDockerPrinted() {
+    assertEquals(List.of("bridge"), parse(HEAD + "|null|0|bridge ").networks());
+    assertEquals(
+        List.of("qits-private", "qits-system-runner-leases-r1"),
+        parse(HEAD + "|null|0|qits-private qits-system-runner-leases-r1 ").networks());
+    assertEquals(List.of(), parse(HEAD + "|null|0|").networks(), "none said");
+    assertEquals(List.of(), parse(HEAD + "|null|0|<no value>").networks());
   }
 
   @Test
@@ -63,7 +75,8 @@ class LeaseContainersTest {
     assertTrue(
         format.endsWith(
             "|{{.State.OOMKilled}}|{{json .HostConfig.Dns}}"
-                + "|{{index .Config.Labels \"qits.system.runner.generation\"}}"),
+                + "|{{index .Config.Labels \"qits.system.runner.generation\"}}"
+                + "|{{range $net, $endpoint := .NetworkSettings.Networks}}{{$net}} {{end}}"),
         format);
   }
 

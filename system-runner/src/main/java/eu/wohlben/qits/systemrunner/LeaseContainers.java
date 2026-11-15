@@ -24,7 +24,9 @@ import java.util.Optional;
  * <p>The same inspect reads the container's {@code --dns} servers ({@code {{json
  * .HostConfig.Dns}}}, qits-2091) — docker prints {@code null} or a JSON array of address literals,
  * read by hand since the native image carries no JSON parser — and its {@code generation} label,
- * so reporting a lease's resolvers costs no docker call of its own.
+ * so reporting a lease's resolvers costs no docker call of its own. It also reads the networks the
+ * container is on ({@code .NetworkSettings.Networks}' names, qits-2269), so a WORKSPACE or DESK
+ * lease still on {@code bridge} is reported stale from the same look.
  */
 final class LeaseContainers {
 
@@ -41,10 +43,18 @@ final class LeaseContainers {
   static final String GENERATION_LABEL_SUFFIX = "generation";
 
   /**
+   * The names of the networks a container is on, each followed by a space: a network name is
+   * {@code [a-zA-Z0-9][a-zA-Z0-9_.-]*}, so it never holds the space or the line's {@code |}.
+   */
+  static final String NETWORKS_FORMAT =
+      "{{range $net, $endpoint := .NetworkSettings.Networks}}{{$net}} {{end}}";
+
+  /**
    * One lease container as docker reported it; {@code oomKilled} is docker's {@code
    * State.OOMKilled}, null when docker did not say (qits-1818). {@code dns} is its {@code --dns}
    * servers in order, empty when it has none or docker did not say; {@code generation} its
-   * generation label, {@code 0} when it has none or the label is no number (qits-2091).
+   * generation label, {@code 0} when it has none or the label is no number (qits-2091). {@code
+   * networks} the names of the networks it is on, empty when docker did not say (qits-2269).
    */
   record Seen(
       String id,
@@ -56,10 +66,29 @@ final class LeaseContainers {
       String mounts,
       Boolean oomKilled,
       List<String> dns,
-      long generation) {
+      long generation,
+      List<String> networks) {
 
     Seen {
       dns = dns == null ? List.of() : List.copyOf(dns);
+      networks = networks == null ? List.of() : List.copyOf(networks);
+    }
+
+    /** A container read without its networks: none said. */
+    Seen(
+        String id,
+        String leaseId,
+        String status,
+        int exitCode,
+        String slotType,
+        String specHash,
+        String mounts,
+        Boolean oomKilled,
+        List<String> dns,
+        long generation) {
+      this(
+          id, leaseId, status, exitCode, slotType, specHash, mounts, oomKilled, dns, generation,
+          List.of());
     }
 
     /** A container read without its resolvers and generation: none, and {@code 0}. */
@@ -72,7 +101,9 @@ final class LeaseContainers {
         String specHash,
         String mounts,
         Boolean oomKilled) {
-      this(id, leaseId, status, exitCode, slotType, specHash, mounts, oomKilled, List.of(), 0);
+      this(
+          id, leaseId, status, exitCode, slotType, specHash, mounts, oomKilled, List.of(), 0,
+          List.of());
     }
 
     boolean running() {
@@ -105,7 +136,8 @@ final class LeaseContainers {
             + mountsLabel(identity)
             + "\"}}|{{.State.OOMKilled}}|{{json .HostConfig.Dns}}|{{index .Config.Labels \""
             + generationLabel(identity)
-            + "\"}}";
+            + "\"}}|"
+            + NETWORKS_FORMAT;
   }
 
   /** {@code qits.system.runner.slot-type}. */
@@ -239,11 +271,12 @@ final class LeaseContainers {
 
   /**
    * {@code
-   * <id>|<status>|<exitCode>|<leaseId>|<slotType>|<specHash>|<mounts>|<oomKilled>|<dns>|<generation>};
+   * <id>|<status>|<exitCode>|<leaseId>|<slotType>|<specHash>|<mounts>|<oomKilled>|<dns>|<generation>|<networks>};
    * empty when it is not a lease container. A label the container lacks reads as null, and so does
    * an {@code oomKilled} that is neither {@code true} nor {@code false}; a {@code dns} that is not
    * a JSON array of strings reads as none, a generation that is no non-negative number as {@code
-   * 0}. Fields missing at the end — a line of a shorter format — read the same way.
+   * 0}, the networks space-separated names. Fields missing at the end — a line of a shorter format
+   * — read the same way, the networks as none said.
    */
   static Optional<Seen> parse(String line) {
     String[] fields = line.split("\\|", -1);
@@ -265,7 +298,8 @@ final class LeaseContainers {
             nullable(fields, 6),
             bool(nullable(fields, 7)),
             dns(nullable(fields, 8)),
-            generation(nullable(fields, 9))));
+            generation(nullable(fields, 9)),
+            networks(nullable(fields, 10))));
   }
 
   /**
@@ -298,6 +332,20 @@ final class LeaseContainers {
       servers.add(server);
     }
     return List.copyOf(servers);
+  }
+
+  /** The space-separated network names of {@link #NETWORKS_FORMAT}; none when docker said none. */
+  static List<String> networks(String names) {
+    if (names == null) {
+      return List.of();
+    }
+    List<String> networks = new ArrayList<>();
+    for (String name : names.strip().split("\\s+")) {
+      if (!name.isEmpty() && !networks.contains(name)) {
+        networks.add(name);
+      }
+    }
+    return List.copyOf(networks);
   }
 
   /** The generation label: absent, not a number or negative is {@code 0}. */

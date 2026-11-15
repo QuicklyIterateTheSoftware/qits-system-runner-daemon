@@ -46,6 +46,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -106,8 +107,11 @@ import org.jboss.logging.Logger;
  * {@code --dns} servers ride its report, with {@code resolversStale} when the node's resolver
  * choice ({@link NodeResolvers}, asked from the periodic look off the converge lock and kept a
  * minute) is not the container's first one — a lease created before the overlay existed, or while
- * the node tunnel did not answer. One WARN per lease that turns stale, none per look; the runner
- * never recreates a lease for it. The owner does, by raising the entry's {@code generation}.
+ * the node tunnel did not answer. A WORKSPACE or DESK lease not on the lease network ({@link
+ * LeaseNetwork}, qits-2269) — one created on {@code bridge} before it — is stale whatever its
+ * resolvers, so the owner's refresh moves it over. One WARN per lease that turns stale, none per
+ * look; the runner never recreates a lease for it. The owner does, by raising the entry's {@code
+ * generation}.
  */
 public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessage> {
 
@@ -191,6 +195,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The build plane with the latest {@code Ack}'s registry mirrors merged in. */
   private volatile BuildPlane buildPlane;
 
+  /** The network WORKSPACE and DESK leases run on (qits-2269). */
+  private final LeaseNetwork leaseNetwork;
+
   private final HealthChecks healthChecks;
   private final Timing timing;
   private final Clock clock;
@@ -215,6 +222,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * forgotten when it clears or its container goes, so the look never repeats it.
    */
   private final Set<String> staleWarned = ConcurrentHashMap.newKeySet();
+
+  /** The same for a WORKSPACE or DESK lease off the lease network, warned in its own words. */
+  private final Set<String> offNetworkWarned = ConcurrentHashMap.newKeySet();
 
   /** The last convergence's STARTING words per lease for {@code inventory}: the pull it awaits. */
   private final Map<String, String> pullingDetails = new ConcurrentHashMap<>();
@@ -402,6 +412,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             this.slots,
             new SteadyResolvers(nodeTunnel::resolvers, clock));
     this.buildPlane = basePlane;
+    this.leaseNetwork = new LeaseNetwork(identity, settings.runnerId(), docker);
     this.pullWork = daemonPool("system-runner-pull", PULL_THREADS);
     this.reconvergeWork = daemonPool("system-runner-reconverge", 1);
     this.warmWork = daemonPool("system-runner-warm", 1);
@@ -429,6 +440,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
             pulls,
             privateEdge,
             nodeTunnel,
+            leaseNetwork,
             loginProbe.firstRun(),
             () -> ack.probeImage());
     this.nodeResolvers = new NodeResolvers(privateEdge, nodeTunnel, clock);
@@ -726,8 +738,8 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /**
    * The build plane's builder, network and state volume, in that order — named, because none of
    * them carries the owner label the helper removes by — then the first-run keys' container and
-   * each harness's sign-in container, which carry none either. The CI caches do carry it, and go
-   * with the labelled volumes.
+   * each harness's sign-in container, which carry none either, then the lease network (qits-2269),
+   * after every container named here. The CI caches do carry it, and go with the labelled volumes.
    */
   @Override
   public List<TeardownItem> teardown() {
@@ -736,7 +748,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     for (String harness : SignIns.HARNESSES) {
       items.add(new TeardownItem(TeardownItem.Type.CONTAINER, names.signIn(harness)));
     }
+    items.add(leaseNetwork.teardown());
     return List.copyOf(items);
+  }
+
+  /** The network WORKSPACE and DESK leases run on. */
+  LeaseNetwork leaseNetwork() {
+    return leaseNetwork;
   }
 
   /** The build plane now: the environment's settings with the latest {@code Ack}'s mirrors. */
@@ -1307,17 +1325,22 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * frame the node's (qits-1818).
    *
    * <p>A lease with a container carries its resolvers, and whether they are stale against the
-   * node's last resolver choice — warned of once when one turns stale (qits-2091).
+   * node's last resolver choice — warned of once when one turns stale (qits-2091) — or, for a
+   * WORKSPACE or DESK lease, because it is not on the lease network (qits-2269).
    */
   Optional<Inventory> inventory(List<LeaseContainers.Seen> now) {
     Map<String, LeaseReport> leases = new HashMap<>();
     Optional<String> choice = nodeResolvers.last();
     Set<String> stale = new LinkedHashSet<>();
+    Map<String, List<String>> offNetwork = new LinkedHashMap<>();
     for (LeaseContainers.Seen seen : now) {
-      boolean resolversStale = stale(seen.dns(), choice);
-      if (resolversStale) {
+      boolean off = offLeaseNetwork(seen, leaseNetwork.name());
+      if (off) {
+        offNetwork.put(seen.leaseId(), seen.networks());
+      } else if (stale(seen.dns(), choice)) {
         stale.add(seen.leaseId());
       }
+      boolean resolversStale = off || stale.contains(seen.leaseId());
       LeaseState state =
           seen.running()
               ? LeaseState.RUNNING
@@ -1339,6 +1362,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
               resolversStale));
     }
     warnStale(stale, choice);
+    warnOffNetwork(offNetwork);
     failures.forEach(
         (leaseId, detail) -> {
           LeaseReport seen = leases.get(leaseId);
@@ -1400,6 +1424,42 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    */
   static boolean stale(List<String> dns, Optional<String> choice) {
     return choice.isPresent() && (dns.isEmpty() || !dns.getFirst().equals(choice.get()));
+  }
+
+  /**
+   * Whether {@code seen} is a lease of a type that runs on the lease network ({@link
+   * SlotPolicy#onLeaseNetwork()}) and is on networks that do not include {@code leaseNetwork}: a
+   * WORKSPACE or DESK container from before qits-2269, on {@code bridge}. A container whose
+   * networks docker did not say is not counted — never a staleness it may not have — and CI never.
+   */
+  static boolean offLeaseNetwork(LeaseContainers.Seen seen, String leaseNetwork) {
+    if (seen.networks().isEmpty()) {
+      return false;
+    }
+    for (SlotPolicy policy : SlotPolicy.values()) {
+      if (policy.type.name().equals(seen.slotType())) {
+        return policy.onLeaseNetwork() && !seen.networks().contains(leaseNetwork);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * One WARN for each lease off the lease network not warned of yet, as {@link #warnStale} does
+   * for resolvers: its own words, since no resolver choice is involved — on the default bridge
+   * docker writes the lease's resolvers into its resolv.conf, whatever they are.
+   */
+  private void warnOffNetwork(Map<String, List<String>> offNetwork) {
+    offNetworkWarned.retainAll(offNetwork.keySet());
+    offNetwork.forEach(
+        (leaseId, networks) -> {
+          if (offNetworkWarned.add(leaseId)) {
+            LOG.warnf(
+                "system-runner's lease %s runs on %s, not on the lease network %s: stale until its"
+                    + " owner refreshes it",
+                leaseId, networks, leaseNetwork.name());
+          }
+        });
   }
 
   /**
