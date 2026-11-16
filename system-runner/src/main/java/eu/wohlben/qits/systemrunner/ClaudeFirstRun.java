@@ -1,7 +1,8 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.ContainersDriver;
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
+import eu.wohlben.qits.containers.driver.docker.HostRunArgv;
+import eu.wohlben.qits.containers.driver.spec.HostRunSpec;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -123,27 +124,17 @@ final class ClaudeFirstRun {
 
   /** The {@code docker run} for {@code mode} — {@link #CHECK} or {@link #APPLY}. */
   List<String> argv(String image, String mode) {
-    return List.of(
+    return HostRunArgv.render(
         docker.binary(),
-        "run",
-        "--rm",
-        "--name",
-        name,
-        "--user",
-        LoginProbe.USER,
-        "--entrypoint",
-        "bash",
-        "-v",
-        volumes.credential() + ":" + LoginProbe.CLAUDE_HOME,
-        "-e",
-        "HOME=" + LoginProbe.CLAUDE_HOME,
-        "-e",
-        "CLAUDE_CONFIG_DIR=" + LoginProbe.CLAUDE_CONFIG_DIR,
-        LifecycleArgv.requireImage(image),
-        "-c",
-        SCRIPT,
-        SCRIPT_NAME,
-        mode);
+        HostRunSpec.removed(image)
+            .name(name)
+            .user(LoginProbe.USER)
+            .entrypoint("bash")
+            .volume(volumes.credential() + ":" + LoginProbe.CLAUDE_HOME)
+            .env("HOME", LoginProbe.CLAUDE_HOME)
+            .env("CLAUDE_CONFIG_DIR", LoginProbe.CLAUDE_CONFIG_DIR)
+            .args("-c", SCRIPT, SCRIPT_NAME, mode)
+            .build());
   }
 
   // --- the script --------------------------------------------------------------------------------

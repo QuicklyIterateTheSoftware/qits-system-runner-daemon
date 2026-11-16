@@ -1,8 +1,11 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.docker.ContainerProcess;
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
+import eu.wohlben.qits.containers.driver.docker.ExecArgv;
+import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
+import eu.wohlben.qits.containers.driver.spec.ContainersIdentifiers;
 import eu.wohlben.qits.runner.toolkit.DockerCommand;
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.systemrunner.protocol.Docker;
@@ -21,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import org.jboss.logging.Logger;
 
@@ -120,7 +124,7 @@ final class DockerOperations {
   private DockerResult listContainers(UUID requestId) {
     return listing(
         requestId,
-        List.of(docker.binary(), "ps", "-a", "--filter", ownerFilter(), "--format", "{{json .}}"));
+        DockerArgv.ps(docker.binary(), true, List.of(ownerFilter()), "{{json .}}"));
   }
 
   /**
@@ -131,15 +135,7 @@ final class DockerOperations {
   private DockerResult listVolumes(UUID requestId) {
     DockerResult labelled =
         listing(
-            requestId,
-            List.of(
-                docker.binary(),
-                "volume",
-                "ls",
-                "--filter",
-                ownerFilter(),
-                "--format",
-                "{{json .}}"));
+            requestId, DockerArgv.volumeLs(docker.binary(), List.of(ownerFilter()), "{{json .}}"));
     if (labelled.status() != DockerStatus.OK) {
       return labelled;
     }
@@ -159,7 +155,7 @@ final class DockerOperations {
     boolean truncated = labelled.truncated();
     if (!unlisted.isEmpty()) {
       DockerResult all =
-          listing(requestId, List.of(docker.binary(), "volume", "ls", "--format", "{{json .}}"));
+          listing(requestId, DockerArgv.volumeLs(docker.binary(), "{{json .}}"));
       if (all.status() != DockerStatus.OK) {
         return all;
       }
@@ -181,7 +177,8 @@ final class DockerOperations {
   }
 
   private String ownerFilter() {
-    return "label=" + identity.ownerLabel() + "=" + LifecycleArgv.requireRunnerId(targetId);
+    return SwarmArgv.labelFilter(
+        identity.ownerLabel(), ContainersIdentifiers.requireReference("runner", targetId));
   }
 
   /** One JSON object per line, answered as one array; a line cut by the cap is left out. */
@@ -226,17 +223,10 @@ final class DockerOperations {
     if (found.answer != null) {
       return found.answer;
     }
-    List<String> argv = new ArrayList<>();
-    argv.add(docker.binary());
-    argv.add("logs");
-    argv.add("--tail");
-    argv.add(Integer.toString(tail(request.tail())));
-    if (since != null) {
-      argv.add("--since");
-      argv.add(since);
-    }
-    argv.add(request.name());
-    RunnerDocker.Result logs = docker.run(argv);
+    RunnerDocker.Result logs =
+        docker.run(
+            DockerArgv.logsTailSince(
+                docker.binary(), request.name(), tail(request.tail()), since));
     if (!logs.ok()) {
       return missingOrFailed(request, logs);
     }
@@ -269,11 +259,13 @@ final class DockerOperations {
       return ownProcess(request);
     }
     int seconds = execSeconds(request.timeoutSeconds());
-    List<String> argv = new ArrayList<>();
-    argv.add(docker.binary());
-    argv.add("exec");
-    argv.add(request.name());
-    argv.addAll(command);
+    List<String> argv;
+    try {
+      argv = ExecArgv.exec(docker.binary(), request.name(), command);
+    } catch (IllegalArgumentException refused) {
+      // A program docker would read as an exec option, or an argument no argv can carry.
+      return refused(request.requestId(), "an exec needs a command: " + refused.getMessage());
+    }
     RunnerDocker.Result ran = docker.run(argv, Duration.ofSeconds(seconds));
     if (ran.timedOut()) {
       return failed(request.requestId(), "the exec did not finish within " + seconds + "s");
@@ -296,16 +288,21 @@ final class DockerOperations {
   private DockerResult stop(Docker request) {
     return lifecycle(
         request,
-        List.of("stop", "-t", Integer.toString(STOP_SECONDS)),
+        name -> DockerArgv.stopByReference(docker.binary(), name, STOP_SECONDS),
         docker.deadline().plusSeconds(STOP_SECONDS));
   }
 
   private DockerResult remove(Docker request) {
-    return lifecycle(request, List.of("rm", "-f"), docker.deadline());
+    return lifecycle(
+        request, name -> DockerArgv.rm(docker.binary(), List.of(name)), docker.deadline());
   }
 
-  /** {@code docker <verb…> <name>}, once the name is this target's and not the runner's own. */
-  private DockerResult lifecycle(Docker request, List<String> verb, Duration deadline) {
+  /**
+   * {@code argv} of the name, once the name is this target's and not the runner's own — so the
+   * builder's belt only ever sees a name {@link #container} already found.
+   */
+  private DockerResult lifecycle(
+      Docker request, Function<String, List<String>> argv, Duration deadline) {
     Lookup found = container(request);
     if (found.answer != null) {
       return found.answer;
@@ -313,11 +310,7 @@ final class DockerOperations {
     if (found.process) {
       return ownProcess(request);
     }
-    List<String> argv = new ArrayList<>();
-    argv.add(docker.binary());
-    argv.addAll(verb);
-    argv.add(request.name());
-    RunnerDocker.Result done = docker.run(argv, deadline);
+    RunnerDocker.Result done = docker.run(argv.apply(request.name()), deadline);
     if (!done.ok()) {
       return missingOrFailed(request, done);
     }
@@ -345,7 +338,7 @@ final class DockerOperations {
       return Lookup.answered(notFound(id, "container", name));
     }
     RunnerDocker.Result inspected =
-        docker.run(List.of(docker.binary(), "inspect", "--type", "container", name));
+        docker.run(DockerArgv.inspectTypeContainer(docker.binary(), List.of(name)));
     if (!inspected.ok()) {
       return Lookup.answered(missingOrFailed(request, inspected));
     }
@@ -395,7 +388,7 @@ final class DockerOperations {
         return notFound(id, "volume", name);
       }
     }
-    RunnerDocker.Result inspected = docker.run(List.of(docker.binary(), "volume", "inspect", name));
+    RunnerDocker.Result inspected = docker.run(DockerArgv.volumeInspect(docker.binary(), name));
     if (!inspected.ok()) {
       return missingOrFailed(request, inspected);
     }
@@ -427,23 +420,23 @@ final class DockerOperations {
    */
   private Mounted mountedVolumes() {
     RunnerDocker.Result ids =
-        docker.run(
-            List.of(docker.binary(), "ps", "-a", "-q", "--no-trunc", "--filter", ownerFilter()));
+        docker.run(DockerArgv.psAllQuietSeparate(docker.binary(), true, List.of(ownerFilter())));
     if (!ids.ok()) {
       return new Mounted(Set.of(), ids.detail());
     }
-    List<String> argv = new ArrayList<>(List.of(docker.binary(), "inspect", "--type", "container"));
+    List<String> containerIds = new ArrayList<>();
     for (String line : ids.stdout().split("\n")) {
       String containerId = line.strip();
       if (!containerId.isEmpty() && safeName(containerId)) {
-        argv.add(containerId);
+        containerIds.add(containerId);
       }
     }
     Set<String> names = new LinkedHashSet<>();
-    if (argv.size() == 4) {
+    if (containerIds.isEmpty()) {
       return new Mounted(names, null);
     }
-    RunnerDocker.Result inspected = docker.run(argv);
+    RunnerDocker.Result inspected =
+        docker.run(DockerArgv.inspectTypeContainer(docker.binary(), containerIds));
     if (!inspected.ok() && inspected.stdout().isBlank()) {
       // A container removed between the two calls fails the inspect but docker still prints the
       // others; only when nothing is printed is it every one of them, or docker not answering.
@@ -483,7 +476,7 @@ final class DockerOperations {
   /** A docker name, and nothing docker could read as an option. */
   private static boolean safeName(String name) {
     try {
-      LifecycleArgv.requireWorkId(name);
+      ContainersIdentifiers.requireReference(name);
       return true;
     } catch (IllegalArgumentException notAName) {
       return false;

@@ -1,8 +1,11 @@
 package eu.wohlben.qits.systemrunner;
 
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
+import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.TeardownItem;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 
@@ -22,8 +25,9 @@ import java.util.Optional;
  * inspect} first, and a {@code network create --driver bridge}, owner-labelled, only when docker
  * says there is none; an "already exists" answer is the state asked for. {@code enable_icc=false}:
  * two leases on one node do not reach each other over it — on {@code bridge} they could, by
- * address. Every call goes through {@link RunnerDocker} under its deadline; the driver has no
- * network create. Asked at every WORKSPACE or DESK create, never
+ * address. Every call goes through {@link RunnerDocker} under its deadline; the driver's {@code
+ * ContainersDriver} has no network create, so the argv is {@link DockerArgv#bridgeNetworkCreate},
+ * the bridge an embedder makes by its own decision. Asked at every WORKSPACE or DESK create, never
  * cached, so a network somebody removed by hand is made again by the next lease. It is the domain's
  * {@link TeardownItem}, after every container that may still be on it.
  */
@@ -32,8 +36,11 @@ final class LeaseNetwork {
   /** The network's purpose in {@code <namePrefix>-<purpose>-<id8>}. */
   static final String PURPOSE = "leases";
 
-  /** Docker's bridge option that cuts traffic between two containers on the network. */
-  static final String NO_ICC = "com.docker.network.bridge.enable_icc=false";
+  /** Docker's bridge option that, {@code false}, cuts traffic between two containers on it. */
+  static final String ICC_OPTION = "com.docker.network.bridge.enable_icc";
+
+  /** {@link #ICC_OPTION} off, as the create's {@code --opt} spells it. */
+  static final String NO_ICC = ICC_OPTION + "=false";
 
   private final RunnerIdentity identity;
   private final String targetId;
@@ -91,24 +98,17 @@ final class LeaseNetwork {
 
   /** The one create: a bridge, owner-labelled, with inter-container traffic off. */
   List<String> createArgv() {
-    return List.of(
-        docker.binary(),
-        "network",
-        "create",
-        "--driver",
-        "bridge",
-        "--label",
-        identity.ownerLabel() + "=" + targetId,
-        "--opt",
-        NO_ICC,
-        name);
+    LinkedHashMap<String, String> labels = new LinkedHashMap<>();
+    labels.put(identity.ownerLabel(), targetId);
+    LinkedHashMap<String, String> options = new LinkedHashMap<>();
+    options.put(ICC_OPTION, "false");
+    return DockerArgv.bridgeNetworkCreate(docker.binary(), labels, options, name);
   }
 
   /** The network's presence and driver — read-only, one {@code docker network inspect}. */
   BuildPlane.Network network() {
     RunnerDocker.Result inspected =
-        docker.run(
-            List.of(docker.binary(), "network", "inspect", "--format", "{{.Driver}}", name));
+        docker.run(SwarmArgv.networkInspect(docker.binary(), name, "{{.Driver}}"));
     if (!inspected.ok()) {
       return BuildPlane.absent(inspected)
           ? new BuildPlane.Network(BuildPlane.Presence.ABSENT, null, null)

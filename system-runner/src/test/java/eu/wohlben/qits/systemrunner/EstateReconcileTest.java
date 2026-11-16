@@ -1743,7 +1743,9 @@ class EstateReconcileTest {
     assertEquals("s-1", done.signInId());
     host.await(LoginState.class, 2);
     List<String> login = runOf("qits-system-runner-sign-in-kimi-r1");
-    assertEquals(List.of("run", "--rm", "-i", "--name"), login.subList(0, 4));
+    assertEquals(
+        List.of("run", "--rm", "--name", "qits-system-runner-sign-in-kimi-r1", "-i"),
+        login.subList(0, 5));
     assertFalse(login.contains("--label"), "the reconcile must never take a sign-in");
   }
 

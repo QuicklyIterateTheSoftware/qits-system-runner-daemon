@@ -1,7 +1,8 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.ContainersDriver;
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
+import eu.wohlben.qits.containers.driver.docker.HostRunArgv;
+import eu.wohlben.qits.containers.driver.spec.HostRunSpec;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.systemrunner.protocol.LoginPresence;
 import eu.wohlben.qits.systemrunner.protocol.SignIn;
@@ -203,44 +204,27 @@ final class SignIns {
   }
 
   /**
-   * {@code docker run --rm -i --name <sign-in-<harness>> --user 1000 --entrypoint <harness> -v
-   * <credential>:/claude-home <env> <image> <args>}.
+   * {@code docker run --rm --name <sign-in-<harness>> -i --user 1000 --entrypoint <harness> -v
+   * <credential>:/claude-home <env> <image> <args>} — the driver's {@link HostRunArgv}, which puts
+   * {@code --name} right after {@code --rm}, so {@code -i} follows it: the same docker command as
+   * the {@code -i --name} order this spelled by hand before qits-2289.
    */
   List<String> argv(String harness, String image) {
-    List<String> argv = new ArrayList<>();
-    argv.addAll(
-        List.of(
-            docker.binary(),
-            "run",
-            "--rm",
-            "-i",
-            "--name",
-            names.signIn(harness),
-            "--user",
-            LoginProbe.USER,
-            "--entrypoint",
-            harness,
-            "-v",
-            volumes.credential() + ":" + LoginProbe.CLAUDE_HOME));
+    HostRunSpec.Builder run =
+        HostRunSpec.removed(image)
+            .name(names.signIn(harness))
+            .interactive()
+            .user(LoginProbe.USER)
+            .entrypoint(harness)
+            .volume(volumes.credential() + ":" + LoginProbe.CLAUDE_HOME);
     if (harness.equals(CLAUDE)) {
-      argv.addAll(
-          List.of(
-              "-e",
-              "HOME=" + LoginProbe.CLAUDE_HOME,
-              "-e",
-              "CLAUDE_CONFIG_DIR=" + LoginProbe.CLAUDE_CONFIG_DIR,
-              LifecycleArgv.requireImage(image),
-              "auth",
-              "login"));
+      run.env("HOME", LoginProbe.CLAUDE_HOME)
+          .env("CLAUDE_CONFIG_DIR", LoginProbe.CLAUDE_CONFIG_DIR)
+          .args("auth", "login");
     } else {
-      argv.addAll(
-          List.of(
-              "-e",
-              "KIMI_CODE_HOME=" + LoginProbe.KIMI_HOME,
-              LifecycleArgv.requireImage(image),
-              "login"));
+      run.env("KIMI_CODE_HOME", LoginProbe.KIMI_HOME).args("login");
     }
-    return List.copyOf(argv);
+    return HostRunArgv.render(docker.binary(), run.build());
   }
 
   private synchronized Attempt find(String signInId) {

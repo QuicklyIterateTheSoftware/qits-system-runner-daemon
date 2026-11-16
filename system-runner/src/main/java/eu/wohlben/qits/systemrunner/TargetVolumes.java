@@ -1,6 +1,7 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.ContainersDriver;
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.containers.driver.spec.VolumeSpec;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
@@ -264,7 +265,7 @@ final class TargetVolumes {
 
   private static RunnerDocker.Result inspect(RunnerDocker docker, String name) {
     return docker.run(
-        List.of(docker.binary(), "volume", "inspect", "--format", "{{.Name}}", name));
+        DockerArgv.volumeInspect(docker.binary(), name, "{{.Name}}"));
   }
 
   /** A work volume, labelled with the owner label and its work key; idempotent. */

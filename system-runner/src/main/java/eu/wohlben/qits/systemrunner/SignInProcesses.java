@@ -15,6 +15,13 @@ import java.util.function.Consumer;
  * under a deadline and gives a command no stdin, which is right for every other docker call and
  * wrong for a login that prints a url, then waits minutes for a code on its stdin — so this seam is
  * the runner's own, and {@link SignIns}'s suite drives a fake of it rather than docker.
+ *
+ * <p><b>The fork stays the runner's after qits-2289</b>, which moved every docker argv onto
+ * qits-containers-driver: the library has no process seam that keeps stdin open for a later write
+ * and delivers output in chunks — its {@code ContainerProcess.stream} and {@code runSeparate} take
+ * a fixed stdin up front and deliver whole lines. Only the argv is the library's ({@link
+ * SignIns#argv}, {@code HostRunArgv}); qits-system-service's PTY host stayed out of the library
+ * for the same reason (qits-2211).
  */
 interface SignInProcesses {
 

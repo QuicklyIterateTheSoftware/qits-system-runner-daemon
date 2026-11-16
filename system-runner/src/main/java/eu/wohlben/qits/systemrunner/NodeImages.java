@@ -1,6 +1,6 @@
 package eu.wohlben.qits.systemrunner;
 
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import java.util.Optional;
 import java.util.function.Function;
@@ -33,7 +33,7 @@ final class NodeImages {
   /** Whether {@code image} is on this node; a reference the belt refuses is not. */
   static boolean present(RunnerDocker docker, String image) {
     try {
-      return docker.run(LifecycleArgv.imageInspect(docker.binary(), image)).ok();
+      return docker.run(DockerArgv.imageInspectFormat(docker.binary(), image, "{{.Id}}")).ok();
     } catch (IllegalArgumentException refused) {
       return false;
     }

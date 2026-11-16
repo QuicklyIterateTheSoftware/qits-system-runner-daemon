@@ -14,7 +14,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * qits-2270: a lease is made with {@code docker create}, from the driver's own run argv, so it can
- * join every network before it starts.
+ * join every network before it starts. Since qits-2289 that create is the driver's own builder
+ * ({@link DockerArgv#create}, which {@link LeaseLauncher} calls), held here to the list the
+ * runner's rewrite of {@link DockerArgv#run} produced.
  */
 class LeaseLauncherCreateArgvTest {
 
@@ -34,7 +36,8 @@ class LeaseLauncherCreateArgvTest {
     LifecyclePolicy lifecycle = LifecyclePolicy.explicitLifetime();
 
     List<String> create =
-        LeaseLauncher.createArgv("docker", NAMESPACE, NAME, spec, labels, lifecycle);
+        DockerArgv.create(
+            "docker", new LabelNamespace(NAMESPACE), NAME, spec, labels, lifecycle);
 
     List<String> run =
         new ArrayList<>(

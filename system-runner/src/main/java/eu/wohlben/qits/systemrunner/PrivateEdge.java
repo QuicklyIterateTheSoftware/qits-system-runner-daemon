@@ -1,5 +1,6 @@
 package eu.wohlben.qits.systemrunner;
 
+import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
 import eu.wohlben.qits.containers.driver.spec.ContainerSpec;
 import eu.wohlben.qits.containers.driver.spec.ContainersIdentifiers;
 import eu.wohlben.qits.runner.toolkit.DockerCommand;
@@ -198,8 +199,7 @@ final class PrivateEdge {
   /** The class javadoc's four steps, read-only; a step that fails says why. */
   private Lookup lookup() {
     RunnerDocker.Result network =
-        docker.run(
-            List.of(docker.binary(), "network", "inspect", "--format", "{{.Id}}", NETWORK));
+        docker.run(SwarmArgv.networkInspect(docker.binary(), NETWORK, "{{.Id}}"));
     String networkId = network.ok() ? lastLine(network.stdout()) : "";
     if (!DOCKER_ID.matcher(networkId).matches()) {
       return Lookup.none(false, network.timedOut() ? String.valueOf(network.detail()) : null);
@@ -207,13 +207,8 @@ final class PrivateEdge {
 
     RunnerDocker.Result listed =
         docker.run(
-            List.of(
-                docker.binary(),
-                "service",
-                "ls",
-                "-q",
-                "--filter",
-                "label=" + APP_NAME_LABEL + "=" + APPLICATION));
+            SwarmArgv.serviceLsQuiet(
+                docker.binary(), List.of(SwarmArgv.labelFilter(APP_NAME_LABEL, APPLICATION))));
     if (!listed.ok()) {
       return Lookup.none(true, "docker service ls answered " + brief(listed));
     }
@@ -231,8 +226,7 @@ final class PrivateEdge {
 
     String service = services.getFirst();
     RunnerDocker.Result inspected =
-        docker.run(
-            List.of(docker.binary(), "service", "inspect", "--format", VIPS_FORMAT, service));
+        docker.run(SwarmArgv.serviceInspect(docker.binary(), service, VIPS_FORMAT));
     if (!inspected.ok()) {
       return Lookup.none(
           true, "docker service inspect " + service + " answered " + brief(inspected));

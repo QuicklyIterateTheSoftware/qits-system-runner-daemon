@@ -1,5 +1,11 @@
 package eu.wohlben.qits.systemrunner;
 
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
+import eu.wohlben.qits.containers.driver.docker.HostRunArgv;
+import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
+import eu.wohlben.qits.containers.driver.spec.HostRunSpec;
+import eu.wohlben.qits.containers.driver.spec.LabelNamespace;
+import eu.wohlben.qits.containers.driver.spec.VolumeSpec;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.runner.toolkit.TeardownItem;
@@ -415,14 +421,10 @@ final class BuildPlane {
     if (network.presence() == Presence.ABSENT) {
       RunnerDocker.Result created =
           docker.run(
-              List.of(
+              DockerArgv.bridgeNetworkCreate(
                   docker.binary(),
-                  "network",
-                  "create",
-                  "--driver",
-                  "bridge",
-                  "--label",
-                  identity.ownerLabel() + "=" + targetId,
+                  new LinkedHashMap<>(Map.of(identity.ownerLabel(), targetId)),
+                  null,
                   names.network()));
       if (!created.ok() && !created.detail().contains("already exists")) {
         return Optional.of(
@@ -433,13 +435,11 @@ final class BuildPlane {
     // removes it as a teardown item, after the builder that mounts it.
     RunnerDocker.Result volume =
         docker.run(
-            List.of(
+            DockerArgv.volumeCreate(
                 docker.binary(),
-                "volume",
-                "create",
-                "--label",
-                stampLabel() + "=state",
-                names.stateVolume()));
+                new LabelNamespace(identity.driverNamespace()),
+                new VolumeSpec(names.stateVolume()),
+                Map.of(stampLabel(), "state")));
     if (!volume.ok()) {
       return Optional.of("could not create " + names.stateVolume() + ": " + volume.detail());
     }
@@ -462,7 +462,7 @@ final class BuildPlane {
         if (stamp.equals(builder.stamp())) {
           if (!"running".equals(builder.status())) {
             RunnerDocker.Result started =
-                docker.run(List.of(docker.binary(), "start", names.builder()));
+                docker.run(DockerArgv.startByReference(docker.binary(), names.builder()));
             if (!started.ok()) {
               return Optional.of("could not start " + names.builder() + ": " + started.detail());
             }
@@ -496,7 +496,7 @@ final class BuildPlane {
             stamp,
             changes(builder.stamp(), dns));
         RunnerDocker.Result gone =
-            docker.run(List.of(docker.binary(), "rm", "-f", names.builder()));
+            docker.run(DockerArgv.rm(docker.binary(), List.of(names.builder())));
         if (!gone.ok() && !TargetVolumes.absent(gone.detail())) {
           return Optional.of("could not replace " + names.builder() + ": " + gone.detail());
         }
@@ -513,7 +513,13 @@ final class BuildPlane {
         return pulled;
       }
     }
-    RunnerDocker.Result started = docker.run(runArgv(stamp, dns));
+    List<String> run;
+    try {
+      run = runArgv(stamp, dns);
+    } catch (IllegalArgumentException refused) {
+      return Optional.of("could not run the builder: " + refused.getMessage());
+    }
+    RunnerDocker.Result started = docker.run(run);
     if (!started.ok()) {
       return Optional.of("could not run the builder: " + started.detail());
     }
@@ -532,13 +538,8 @@ final class BuildPlane {
   List<String> users() {
     RunnerDocker.Result listed =
         docker.run(
-            List.of(
-                docker.binary(),
-                "ps",
-                "--format",
-                "{{.Names}}",
-                "--filter",
-                "network=" + names.network()));
+            DockerArgv.psFormatFirst(
+                docker.binary(), false, "{{.Names}}", List.of("network=" + names.network())));
     if (!listed.ok()) {
       LOG.warnf(
           "system-runner cannot list the containers on %s: %s", names.network(), listed.detail());
@@ -563,14 +564,11 @@ final class BuildPlane {
   String changes(String runningStamp, List<String> dns) {
     RunnerDocker.Result inspected =
         docker.run(
-            List.of(
+            DockerArgv.containerInspect(
                 docker.binary(),
-                "container",
-                "inspect",
-                "--format",
+                names.builder(),
                 "{{.Config.Image}}{{\"\\n\"}}{{range .HostConfig.Dns}}{{.}} {{end}}{{\"\\n\"}}"
-                    + "{{range .Config.Env}}{{json .}}{{\"\\n\"}}{{end}}",
-                names.builder()));
+                    + "{{range .Config.Env}}{{json .}}{{\"\\n\"}}{{end}}"));
     if (!inspected.ok()) {
       return "unknown: " + inspected.detail();
     }
@@ -649,7 +647,7 @@ final class BuildPlane {
   /** Whether the builder image is on this node: one {@code docker image inspect}. */
   boolean imagePresent() {
     return docker
-        .run(List.of(docker.binary(), "image", "inspect", "--format", "{{.Id}}", image()))
+        .run(DockerArgv.imageInspectFormat(docker.binary(), image(), "{{.Id}}"))
         .ok();
   }
 
@@ -659,7 +657,7 @@ final class BuildPlane {
    */
   Optional<String> pullImage() {
     RunnerDocker.Result pulled =
-        docker.run(List.of(docker.binary(), "pull", image()), docker.pullDeadline());
+        docker.run(DockerArgv.pull(docker.binary(), image()), docker.pullDeadline());
     if (!pulled.ok()) {
       return Optional.of("could not pull the builder image " + image() + ": " + pulled.detail());
     }
@@ -674,33 +672,27 @@ final class BuildPlane {
     return runArgv(stamp, List.of());
   }
 
-  /** The same, with one {@code --dns} per resolver right after {@code --network}. */
+  /**
+   * The same, with one {@code --dns} per resolver right after {@code --network} — rendered by the
+   * driver's {@link HostRunArgv}, whose options keep the order they are added in. Throws when a
+   * value fails the driver's belts (a resolver that is not an address literal).
+   */
   List<String> runArgv(String stamp, List<String> dns) {
-    List<String> argv = new ArrayList<>();
-    argv.addAll(
-        List.of(
-            docker.binary(), "run", "-d", "--name", names.builder(), "--network", names.network()));
+    HostRunSpec.Builder run =
+        HostRunSpec.detached(names.builder(), image()).network(names.network());
     for (String server : dns) {
-      argv.add("--dns");
-      argv.add(server);
+      run.dns(server);
     }
-    argv.addAll(
-        List.of(
-            "--label",
-            stampLabel() + "=" + stamp,
-            "--privileged",
-            "--restart",
-            "unless-stopped",
-            "-v",
-            names.stateVolume() + ":/var/lib/buildkit",
-            "-e",
-            "BUILDKITD_TOML=" + toml,
-            "--entrypoint",
-            "/bin/sh",
-            image(),
-            "-c",
-            BOOTSTRAP));
-    return List.copyOf(argv);
+    return HostRunArgv.render(
+        docker.binary(),
+        run.label(stampLabel(), stamp)
+            .privileged()
+            .restart("unless-stopped")
+            .volume(names.stateVolume() + ":/var/lib/buildkit")
+            .env("BUILDKITD_TOML", toml)
+            .entrypoint("/bin/sh")
+            .args("-c", BOOTSTRAP)
+            .build());
   }
 
   /**
@@ -712,7 +704,7 @@ final class BuildPlane {
    */
   Optional<String> connect(String container) {
     RunnerDocker.Result joined =
-        docker.run(List.of(docker.binary(), "network", "connect", names.network(), container));
+        docker.run(DockerArgv.networkConnect(docker.binary(), names.network(), container));
     if (!joined.ok() && !joined.detail().contains("already exists")) {
       return Optional.of(
           "could not connect " + container + " to " + names.network() + ": " + joined.detail());
@@ -728,14 +720,10 @@ final class BuildPlane {
   Builder builder() {
     RunnerDocker.Result inspected =
         docker.run(
-            List.of(
+            DockerArgv.inspectTypeContainerFormat(
                 docker.binary(),
-                "inspect",
-                "--type",
-                "container",
-                "--format",
-                "{{index .Config.Labels \"" + stampLabel() + "\"}}|{{.State.Status}}",
-                names.builder()));
+                names.builder(),
+                "{{index .Config.Labels \"" + stampLabel() + "\"}}|{{.State.Status}}"));
     if (!inspected.ok()) {
       return absent(inspected)
           ? new Builder(Presence.ABSENT, null, null, null)
@@ -757,9 +745,7 @@ final class BuildPlane {
   /** The build network's presence and driver — read-only, one {@code docker network inspect}. */
   Network network() {
     RunnerDocker.Result inspected =
-        docker.run(
-            List.of(
-                docker.binary(), "network", "inspect", "--format", "{{.Driver}}", names.network()));
+        docker.run(SwarmArgv.networkInspect(docker.binary(), names.network(), "{{.Driver}}"));
     if (!inspected.ok()) {
       return absent(inspected)
           ? new Network(Presence.ABSENT, null, null)

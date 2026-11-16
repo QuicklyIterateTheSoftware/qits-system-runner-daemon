@@ -1,6 +1,8 @@
 package eu.wohlben.qits.systemrunner;
 
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
+import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
+import eu.wohlben.qits.containers.driver.spec.ContainersIdentifiers;
 import eu.wohlben.qits.runner.toolkit.OwnResources;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
@@ -15,11 +17,12 @@ import java.util.Optional;
  * held list and the periodic look — one argv for all of them, so they can never disagree. A copy
  * of qits-projects-desk-runner-daemon's {@code DeskContainers}, keyed on the lease id.
  *
- * <p><b>Its own inspect, not the driver's</b>, for that class's three reasons: the driver's carries
- * no labels, and the convergence needs the spec-hash and mounts labels; a docker that did not answer
- * throws here, so "could not read" never reads as "not there" (the reason {@link OwnResources}
- * lists through the process seam too); and it says {@code --type container}, so a volume of the
- * same name is never answered for a container that is gone.
+ * <p><b>Its own inspect, not {@code ContainersDriver}'s</b> (the argv is still the driver's
+ * builder, {@link DockerArgv#inspectTypeContainerFormat}), for that class's three reasons: the
+ * driver's carries no labels, and the convergence needs the spec-hash and mounts labels; a docker
+ * that did not answer throws here, so "could not read" never reads as "not there" (the reason
+ * {@link OwnResources} lists through the process seam too); and it says {@code --type container},
+ * so a volume of the same name is never answered for a container that is gone.
  *
  * <p>The same inspect reads the container's {@code --dns} servers ({@code {{json
  * .HostConfig.Dns}}}, qits-2091) — docker prints {@code null} or a JSON array of address literals,
@@ -170,14 +173,7 @@ final class LeaseContainers {
 
   /** The inspect every read here makes, of a name this runner derived or an id docker listed. */
   List<String> inspectArgv(String nameOrId) {
-    return List.of(
-        docker.binary(),
-        "inspect",
-        "--type",
-        "container",
-        "--format",
-        format,
-        LifecycleArgv.requireWorkId(nameOrId));
+    return DockerArgv.inspectTypeContainerFormat(docker.binary(), nameOrId, format);
   }
 
   /**
@@ -210,15 +206,7 @@ final class LeaseContainers {
    */
   boolean exists(String name) {
     RunnerDocker.Result answered =
-        docker.run(
-            List.of(
-                docker.binary(),
-                "inspect",
-                "--type",
-                "container",
-                "--format",
-                "{{.Id}}",
-                LifecycleArgv.requireWorkId(name)));
+        docker.run(DockerArgv.inspectTypeContainerFormat(docker.binary(), name, "{{.Id}}"));
     if (answered.ok()) {
       return !answered.stdout().isBlank();
     }
@@ -240,14 +228,13 @@ final class LeaseContainers {
   List<Seen> list() {
     RunnerDocker.Result listed =
         docker.run(
-            List.of(
+            DockerArgv.psAllQuiet(
                 docker.binary(),
-                "ps",
-                "-aq",
-                "--filter",
-                "label=" + identity.ownerLabel() + "=" + LifecycleArgv.requireRunnerId(targetId),
-                "--filter",
-                "label=" + identity.workLabel()));
+                List.of(
+                    SwarmArgv.labelFilter(
+                        identity.ownerLabel(),
+                        ContainersIdentifiers.requireReference("runner", targetId)),
+                    SwarmArgv.labelFilter(identity.workLabel()))));
     if (!listed.ok()) {
       throw new IllegalStateException("could not list the lease containers: " + listed.detail());
     }

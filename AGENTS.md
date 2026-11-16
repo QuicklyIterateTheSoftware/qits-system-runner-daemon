@@ -24,7 +24,11 @@ No docker, no prior `mvn install` elsewhere, no credentials. `./mvnw verify` is 
 
 **It compiles to a fully static musl GraalVM native image** (`docker/Dockerfile.musl-builder`, a
 copy). No Jackson, no REST client, no docker SDK; every docker call goes through the toolkit's
-process seam (`RunnerDocker`, `qits-containers-driver`), under a deadline.
+process seam (`RunnerDocker`, `qits-containers-driver`), under a deadline. **Every docker argv is a
+`qits-containers-driver` builder** (`DockerArgv`, `SwarmArgv`, `HostRunArgv`, `ExecArgv`;
+qits-2289): the binary is only ever a builder's first argument, never the head of a hand-built
+list. A spelling the library lacks is added there and released, never spelled here. The one fork
+of its own is the sign-in's (`SignInProcesses`), whose argv is still `HostRunArgv`'s.
 
 **A healthy runner never exits**, and **a rollover never drains**: `quiescent()` is "no convergence
 in flight", never "holds nothing". Lease containers are node state that outlives the process.
@@ -60,8 +64,9 @@ change to that table, reviewed as one, with the test cell beside it.
   is visible on the node's daemon** (`PrivateEdge`, qits-2062), applied to the policy's spec just
   before the create and never part of the spec-hash or mounts label — a moved VIP or a new rollout
   never recreates a running lease. All or nothing, read-only, never throws; off the platform host it
-  adds nothing. The create argv is the driver's run argv (`LeaseLauncher.createArgv`), so `--dns`
-  is the driver's; the runner does the join (`ContainerSpec.extraNetworks`) before the start.
+  adds nothing. The create argv is the driver's (`DockerArgv.create`, its run argv as a `docker
+  create`), so `--dns` is the driver's; the runner does the join (`ContainerSpec.extraNetworks`)
+  before the start.
 - **The build plane is the target's own** (`BuildPlane`): every name derived, none configurable,
   never `qits-buildkitd` / `qits-buildkitd-state` (`BuildPlaneNamesTest`). The builder carries the
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled

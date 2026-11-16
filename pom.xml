@@ -40,6 +40,14 @@
              version it was released against. -->
         <qits.runner.version>2026.1116.93527</qits.runner.version>
 
+        <!-- qits-containers-driver (qits-2289): the platform's docker layer, declared here rather than
+             left to arrive through the toolkit, because every docker argv this runner spells is now
+             one of its builders (DockerArgv, SwarmArgv, HostRunArgv, ExecArgv) — the owner's ruling
+             of 2026-11-13 that every component talking to docker runs on it. Published by
+             qits-containers-javalib; plain Java, so native-image neutral. A first adoption, so this
+             pin was set by hand; the maintenance bump moves it from here on. -->
+        <qits.containers-driver.version>2026.1116.235702</qits.containers-driver.version>
+
         <!-- qits-observability's LOG_EXPORT row needs "an empty telemetry buffer" recorded, which
              lands only at this version (qits-1163) — newer than the one qits-runner-toolkit-contracts
              brings transitively. Pinned here, overriding the kit's, and added as an explicit test
@@ -96,6 +104,13 @@
                 <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-runner-toolkit</artifactId>
                 <version>${qits.runner.version}</version>
+            </dependency>
+            <!-- The docker argv builders; see the property above. Wins over the version the
+                 toolkit brings transitively. -->
+            <dependency>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-containers-driver</artifactId>
+                <version>${qits.containers-driver.version}</version>
             </dependency>
             <!-- The consumer pacts of the toolkit's own REST calls (qits-1163), at the SAME version
                  as the toolkit: the kit refuses a classpath where they differ. -->

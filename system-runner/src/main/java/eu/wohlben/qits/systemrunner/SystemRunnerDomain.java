@@ -1,6 +1,7 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.ContainersDriver;
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.runner.protocol.Ack;
 import eu.wohlben.qits.runner.protocol.DomainCodec;
 import eu.wohlben.qits.runner.protocol.RunnerCapabilities;
@@ -561,8 +562,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     try {
       RunnerDocker.Result info =
           docker.run(
-              List.of(
-                  docker.binary(), "info", "--format", "{{.ID}}|{{.Name}}|{{.CgroupDriver}}"));
+              DockerArgv.info(docker.binary(), "{{.ID}}|{{.Name}}|{{.CgroupDriver}}"));
       if (!info.ok()) {
         LOG.warnf("system-runner could not read the docker engine's id: %s", info.detail());
         return;

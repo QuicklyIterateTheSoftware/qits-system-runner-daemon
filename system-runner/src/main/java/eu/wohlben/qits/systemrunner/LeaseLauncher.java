@@ -14,7 +14,6 @@ import eu.wohlben.qits.systemrunner.protocol.LeaseEntry;
 import eu.wohlben.qits.systemrunner.protocol.LeaseState;
 import eu.wohlben.qits.systemrunner.protocol.SlotImages;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
@@ -467,9 +466,10 @@ final class LeaseLauncher {
    * with the public edge. Joined before the start, the process only ever sees the embedded DNS.
    *
    * <p>So no {@code docker run}: the driver's run starts the container before its {@code
-   * extraNetworks} join. The create argv is the driver's own run argv ({@link #createArgv}), so the
-   * container's shape stays the driver's. The joins are {@code qits-private} first, then the build
-   * network. Any failure removes the container, which never started.
+   * extraNetworks} join. The create argv is the driver's own ({@link DockerArgv#create}: its run
+   * argv, flag for flag, as a {@code docker create}), so the container's shape stays the driver's.
+   * The joins are {@code qits-private} first, then the build network. Any failure removes the
+   * container, which never started.
    */
   private Optional<String> launch(
       ContainerSpec run,
@@ -482,7 +482,13 @@ final class LeaseLauncher {
     List<String> create;
     try {
       create =
-          createArgv(docker.binary(), identity.driverNamespace(), name, run, labels, lifecycle);
+          DockerArgv.create(
+              docker.binary(),
+              new LabelNamespace(identity.driverNamespace()),
+              name,
+              run,
+              labels,
+              lifecycle);
     } catch (RuntimeException refused) {
       return Optional.of("docker could not run " + name + ": " + refused.getMessage());
     }
@@ -515,30 +521,6 @@ final class LeaseLauncher {
       return Optional.of("docker could not start " + name + ": " + brief(started.detail()));
     }
     return Optional.empty();
-  }
-
-  /**
-   * The driver's {@code docker run} argv for {@code spec}, as a {@code docker create}: the same
-   * flags, without {@code -d}. Throws when the driver's argv does not start {@code run -d}, or when
-   * the driver refuses the spec.
-   */
-  static List<String> createArgv(
-      String binary,
-      String namespace,
-      String name,
-      ContainerSpec spec,
-      Map<String, String> labels,
-      LifecyclePolicy lifecycle) {
-    List<String> run =
-        DockerArgv.run(binary, new LabelNamespace(namespace), name, spec, labels, lifecycle);
-    if (run.size() < 3 || !"run".equals(run.get(1)) || !"-d".equals(run.get(2))) {
-      throw new IllegalStateException("the driver's run argv does not start with run -d");
-    }
-    List<String> argv = new ArrayList<>(run.size() - 1);
-    argv.add(run.get(0));
-    argv.add("create");
-    argv.addAll(run.subList(3, run.size()));
-    return List.copyOf(argv);
   }
 
   /** Remove a container that never started; one already gone counts as gone. */

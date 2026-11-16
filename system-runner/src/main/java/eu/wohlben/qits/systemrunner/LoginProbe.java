@@ -1,7 +1,9 @@
 package eu.wohlben.qits.systemrunner;
 
 import eu.wohlben.qits.containers.driver.ContainersDriver;
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
+import eu.wohlben.qits.containers.driver.docker.HostRunArgv;
+import eu.wohlben.qits.containers.driver.spec.ContainersIdentifiers;
+import eu.wohlben.qits.containers.driver.spec.HostRunSpec;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import eu.wohlben.qits.runner.toolkit.RunnerIdentity;
 import eu.wohlben.qits.systemrunner.protocol.LoginPresence;
@@ -206,27 +208,18 @@ final class LoginProbe {
    * <image> auth status}.
    */
   List<String> claudeArgv(String image) {
-    return List.of(
+    return HostRunArgv.render(
         docker.binary(),
-        "run",
-        "--rm",
-        "--name",
-        names.loginProbe(),
-        "--label",
-        ownership(),
-        "--user",
-        USER,
-        "--entrypoint",
-        "claude",
-        "-v",
-        volumes.credential() + ":" + CLAUDE_HOME,
-        "-e",
-        "HOME=" + CLAUDE_HOME,
-        "-e",
-        "CLAUDE_CONFIG_DIR=" + CLAUDE_CONFIG_DIR,
-        LifecycleArgv.requireImage(image),
-        "auth",
-        "status");
+        HostRunSpec.removed(image)
+            .name(names.loginProbe())
+            .label(identity.ownerLabel(), owner())
+            .user(USER)
+            .entrypoint("claude")
+            .volume(volumes.credential() + ":" + CLAUDE_HOME)
+            .env("HOME", CLAUDE_HOME)
+            .env("CLAUDE_CONFIG_DIR", CLAUDE_CONFIG_DIR)
+            .args("auth", "status")
+            .build());
   }
 
   /**
@@ -234,25 +227,17 @@ final class LoginProbe {
    * <credential>:/claude-home -e KIMI_CODE_HOME=/claude-home/.kimi-code <image> -c <KIMI_CHECK>}.
    */
   List<String> kimiArgv(String image) {
-    return List.of(
+    return HostRunArgv.render(
         docker.binary(),
-        "run",
-        "--rm",
-        "--name",
-        names.loginProbe(),
-        "--label",
-        ownership(),
-        "--user",
-        USER,
-        "--entrypoint",
-        "bash",
-        "-v",
-        volumes.credential() + ":" + CLAUDE_HOME,
-        "-e",
-        "KIMI_CODE_HOME=" + KIMI_HOME,
-        LifecycleArgv.requireImage(image),
-        "-c",
-        KIMI_CHECK);
+        HostRunSpec.removed(image)
+            .name(names.loginProbe())
+            .label(identity.ownerLabel(), owner())
+            .user(USER)
+            .entrypoint("bash")
+            .volume(volumes.credential() + ":" + CLAUDE_HOME)
+            .env("KIMI_CODE_HOME", KIMI_HOME)
+            .args("-c", KIMI_CHECK)
+            .build());
   }
 
   /**
@@ -291,7 +276,8 @@ final class LoginProbe {
     return new LoginState(LoginPresence.UNKNOWN, LoginPresence.UNKNOWN, checkedAt, volume);
   }
 
-  private String ownership() {
-    return identity.ownerLabel() + "=" + LifecycleArgv.requireRunnerId(targetId);
+  /** The owner label's value: this target's id, belted as a docker reference. */
+  private String owner() {
+    return ContainersIdentifiers.requireReference("runner", targetId);
   }
 }

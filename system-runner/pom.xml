@@ -27,8 +27,9 @@
 
          The dependency set is qits-projects-desk-runner-daemon's: quarkus-arc for CDI + command
          mode, quarkus-vertx for the managed Vertx the toolkit's socket and HTTP calls run on, and
-         the wire contract. The toolkit brings vertx-core (managed here by the quarkus-bom),
-         jboss-logging and qits-containers-driver. No Jackson, no REST client, no docker SDK. -->
+         the wire contract, plus qits-containers-driver declared directly (qits-2289) for its docker
+         argv builders. The toolkit brings vertx-core (managed here by the quarkus-bom) and
+         jboss-logging. No Jackson, no REST client, no docker SDK. -->
 
     <dependencies>
         <!-- The wire contract, under its PUBLISHED coordinate; version-less so it always resolves
@@ -40,6 +41,12 @@
         <dependency>
             <groupId>eu.wohlben.qits</groupId>
             <artifactId>qits-runner-toolkit</artifactId>
+        </dependency>
+        <dependency>
+            <!-- qits-2289: every docker argv the runner spells is one of the driver's builders, so
+                 the driver is a dependency of its own, at the root pom's pin. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-containers-driver</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

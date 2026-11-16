@@ -116,7 +116,7 @@ class SignInsTest {
     assertEquals(List.of(state(S1, "claude", SignInState.STARTING)), sent);
     assertEquals(
         List.of(
-            runnerDocker.binary(), "run", "--rm", "-i", "--name", CLAUDE_BOX, "--user", "1000",
+            runnerDocker.binary(), "run", "--rm", "--name", CLAUDE_BOX, "-i", "--user", "1000",
             "--entrypoint", "claude", "-v", DOT_CLAUDE + ":/claude-home", "-e",
             "HOME=/claude-home", "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude", IMAGE, "auth",
             "login"),
@@ -217,7 +217,7 @@ class SignInsTest {
 
     assertEquals(
         List.of(
-            runnerDocker.binary(), "run", "--rm", "-i", "--name", KIMI_BOX, "--user", "1000",
+            runnerDocker.binary(), "run", "--rm", "--name", KIMI_BOX, "-i", "--user", "1000",
             "--entrypoint", "kimi", "-v", DOT_CLAUDE + ":/claude-home", "-e",
             "KIMI_CODE_HOME=/claude-home/.kimi-code", IMAGE, "login"),
         processes.argv());

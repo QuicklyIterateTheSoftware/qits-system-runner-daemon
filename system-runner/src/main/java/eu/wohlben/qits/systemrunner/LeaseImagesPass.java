@@ -1,11 +1,12 @@
 package eu.wohlben.qits.systemrunner;
 
+import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.runner.toolkit.HousekeepingContext;
 import eu.wohlben.qits.runner.toolkit.HousekeepingPass;
-import eu.wohlben.qits.runner.toolkit.LifecycleArgv;
 import eu.wohlben.qits.runner.toolkit.RunnerDocker;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -53,12 +54,14 @@ final class LeaseImagesPass implements HousekeepingPass {
     Set<String> keepIds = new HashSet<>();
     for (String image : current) {
       repositories.add(repository(image));
-      RunnerDocker.Result id = docker.run(LifecycleArgv.imageInspect(docker.binary(), image));
+      RunnerDocker.Result id =
+          docker.run(DockerArgv.imageInspectFormat(docker.binary(), image, "{{.Id}}"));
       if (id.ok() && !id.stdout().isBlank()) {
         keepIds.add(id.stdout().strip());
       }
     }
-    RunnerDocker.Result listed = docker.run(LifecycleArgv.imageList(docker.binary()));
+    RunnerDocker.Result listed =
+        docker.run(DockerArgv.imageLs(docker.binary(), "{{.Repository}}:{{.Tag}}|{{.ID}}"));
     if (!listed.ok() || listed.stdoutTruncated()) {
       context.log().warnf("system-runner could not list the node's images: %s", listed.detail());
       return;
@@ -91,7 +94,7 @@ final class LeaseImagesPass implements HousekeepingPass {
 
   private boolean remove(HousekeepingContext context, String ref, String id) {
     try {
-      RunnerDocker.Result users = docker.run(LifecycleArgv.psAncestor(docker.binary(), id));
+      RunnerDocker.Result users = docker.run(DockerArgv.psAncestor(docker.binary(), id));
       if (!users.ok()) {
         context.log().warnf("system-runner left %s: could not ask which containers use it", ref);
         return false;
@@ -99,7 +102,7 @@ final class LeaseImagesPass implements HousekeepingPass {
       if (!users.stdout().isBlank()) {
         return false;
       }
-      RunnerDocker.Result gone = docker.run(LifecycleArgv.imageRm(docker.binary(), ref));
+      RunnerDocker.Result gone = docker.run(DockerArgv.imageRmRefs(docker.binary(), List.of(ref)));
       if (!gone.ok()) {
         context.log().warnf("system-runner could not remove %s: %s", ref, gone.detail());
         return false;
