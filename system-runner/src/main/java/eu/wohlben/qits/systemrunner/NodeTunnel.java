@@ -23,8 +23,9 @@ import org.jboss.logging.Logger;
  * a lease keeps its run network — the lease network for WORKSPACE and DESK ({@link LeaseNetwork},
  * qits-2269), {@code bridge} for CI — and no other, and gets {@code --dns 100.96.0.1} followed by
  * the runner's own upstreams, so private names resolve to the private edge through the tunnel and
- * every other name still resolves — the edge's DNS answers a public name REFUSED, and glibc then
- * asks the next server.
+ * every other name resolves there too: since qits-2262 the tunnel resolver forwards it to its own
+ * upstream and relays the answer unchanged. The runner's own upstreams that follow are the
+ * fallback for when the tunnel or the edge is down, answering with silence or SERVFAIL.
  *
  * <p>Asked at every create, after {@link PrivateEdge} and never cached:
  *
@@ -38,7 +39,8 @@ import org.jboss.logging.Logger;
  *       before with a DEBUG line;
  *   <li>the upstreams from the runner's {@code /etc/resolv.conf}, read as {@link PrivateEdge}
  *       reads them, without {@value #DNS_ADDRESS}. None is the spec unchanged with a WARN: a list
- *       holding only the tunnel would answer every public name REFUSED.
+ *       holding only the tunnel would leave the lease with no resolver at all whenever the tunnel
+ *       or the edge is down.
  * </ol>
  *
  * <p>Like {@link PrivateEdge}, the result is still not hashed into the spec-hash or mounts label,

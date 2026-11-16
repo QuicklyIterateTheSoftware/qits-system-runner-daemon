@@ -173,8 +173,9 @@ The known limits:
 
 - **A lease keeps the resolvers it was created with.** If the tunnel goes down later, every public
   lookup first waits glibc's timeout (5 s) on `100.96.0.1` before it asks the next server, until the
-  tunnel is back or the lease is recreated. While the tunnel is up, public names resolve at once:
-  the edge answers them REFUSED and glibc moves on.
+  tunnel is back or the lease is recreated. While the tunnel is up, public names resolve at once
+  through the tunnel resolver, which forwards them to its own upstream and relays the answer
+  unchanged; glibc never falls through to the node's own resolvers.
 - **The install script's first container has no tunnel resolvers** until its first rollover: it
   is started by the script, not by a predecessor, so it resolves the platform publicly until then.
 - **While the tunnel is down**, the runner's own container and a builder started with the tunnel's
