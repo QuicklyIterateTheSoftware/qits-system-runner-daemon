@@ -104,8 +104,8 @@ fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 | `/claude-home` | never | credential volume, rw | credential volume, rw |
 | `/workspace` | container filesystem | work volume | work volume |
 | caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
-| networks | `bridge` + the build network, + `qits-private` where the private edge is visible | the lease network, + `qits-private` where the private edge is visible | as WORKSPACE |
-| resolvers | the node's; the private edge's VIP first where it is visible, else `100.96.0.1` first where the node tunnel answers — and the builder the CI lease dials gets `100.96.0.1` first too where the node tunnel answers | as CI, without the builder | as WORKSPACE |
+| networks | `bridge` + the build network, + `qits-private` where a resolver edge is visible | the lease network, + `qits-private` where a resolver edge is visible | as WORKSPACE |
+| resolvers | the node's; the preferred resolver edge's VIP first where one is visible, else `100.96.0.1` first where the node tunnel answers — and the builder the CI lease dials gets `100.96.0.1` first too where the node tunnel answers | as CI, without the builder | as WORKSPACE |
 | `BUILDKIT_HOST` | injected | never | never |
 | cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no |
 | `--init` | yes | no | yes |
@@ -126,21 +126,28 @@ fallback to `bridge`. A running WORKSPACE or DESK lease not on it (one from befo
 `resolversStale` whatever its resolvers, with one WARN, until its owner refreshes it through the
 generation.
 
-Where the private edge is visible on the node's own docker daemon —
-the `qits-private` overlay exists, exactly one swarm service carries
-`qits.platform.deployments.app-name=qits-edge-private` with a VIP on it, and the runner's
-`/etc/resolv.conf` names at least one non-loopback upstream (its `# ExtServers:` line, else its
-`nameserver` lines) — the lease also joins `qits-private` and gets `--dns <vip>` followed by those
-upstreams, so private names resolve to the private edge and every other name still resolves
-(qits-2062, `PrivateEdge`; the same questions qits-containers' `PrivateEdgeResolver` asks). It is
-all or nothing: any piece missing, or docker not answering, runs the lease without the private
-edge with one log line — DEBUG off the platform host, where there is no overlay, WARN on it. It is
-asked at every create and never hashed into the spec-hash or mounts label, so a running lease is
-not recreated when the edge arrives or its VIP moves. The runner joins `qits-private` after the
+Where a resolver edge is visible on the node's own docker daemon — the `qits-private` overlay
+exists, and one of `PrivateEdge.APPLICATIONS` (qits-2304: `qits-edge-overlay`, the start-first edge
+on `qits-private`, then `qits-edge-private`, the WireGuard tunnel edge, tried in that order) has
+exactly one swarm service with a VIP on it — and the runner's `/etc/resolv.conf` names at least one
+non-loopback upstream (its `# ExtServers:` line, else its `nameserver` lines) — the lease also joins
+`qits-private` and gets `--dns <vip>` followed by those upstreams, so private names resolve to that
+edge and every other name still resolves (qits-2062, `PrivateEdge`; the same questions
+qits-containers' `PrivateEdgeResolver` and qits-deployments' `SwarmDeploymentDriver.resolverVip`
+ask, in the same order). An application with no swarm service at all is skipped in favour of the
+next preference — `qits-edge-overlay` before it is ever deployed, the ordinary case today, so the
+lease falls through to `qits-edge-private` exactly as qits-2062 shipped; any other answer for an
+application stops the walk with no resolver rather than trying the next one, so a passing docker
+hiccup never flips a lease onto the fallback edge and back. It is all or nothing: any piece missing,
+or docker not answering, runs the lease without a resolver edge with one log line — DEBUG off the
+platform host, where there is no overlay, WARN on it. It is asked at every create and never hashed
+into the spec-hash or mounts label, so a running lease is not recreated when a preferred edge
+arrives, or its VIP moves — including when `qits-edge-overlay`'s first deployment takes over from
+`qits-edge-private` as every lease's first resolver. The runner joins `qits-private` after the
 `docker create` and before the `docker start`, and removes the container when that join fails,
 which fails the lease.
 
-Off the platform host, a lease the private edge did not take may still resolve private names
+Off the platform host, a lease no resolver edge took may still resolve private names
 through the **node tunnel** (qits-2068, `NodeTunnel`): where the target's host runs the node
 tunnel, the runner's container — on `bridge`, like a CI lease — reaches the private edge's tunnel and
 DNS address `100.96.0.1`. At every create the runner sends one UDP `A` query for the host of its
@@ -150,7 +157,7 @@ or `bridge` for CI), with no extra network, and gets `--dns 100.96.0.1` followed
 upstreams, read exactly as above without
 `100.96.0.1` itself. Silence, REFUSED or any other answer runs the lease with the node's resolvers,
 as before, with a DEBUG line; an answering tunnel and no upstream is the same with a WARN. A lease
-that already got the private edge's VIP is never probed. Nothing of it is hashed into a lease.
+that already got a resolver edge's VIP is never probed. Nothing of it is hashed into a lease.
 
 The same answer (`NodeTunnel.resolvers()`, qits-2090) is given to the runner's own two
 containers, each time asked afresh:

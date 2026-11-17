@@ -637,12 +637,17 @@ class EstateReconcileTest {
   private static final String EDGE_NET_ID = "0a1b2c3d4e5f";
   private static final String EDGE_SERVICE = "svc9edge";
 
-  /** The platform host as the runner's own daemon answers it: the overlay, the edge, its VIP. */
+  /**
+   * The platform host as the runner's own daemon answers it: the overlay, the tunnel edge, its
+   * VIP — qits-edge-overlay left unscripted, which {@code service ls} answers empty and absent
+   * (qits-2304), so the walk falls through to qits-edge-private exactly as it did before the
+   * preference existed.
+   */
   private void privateEdgeVisible() throws Exception {
     docker.answerFor("network-inspect", PrivateEdge.NETWORK, 0, EDGE_NET_ID + "\n", "");
     docker.answerFor(
         "service",
-        "label=" + PrivateEdge.APP_NAME_LABEL + "=" + PrivateEdge.APPLICATION,
+        "label=" + PrivateEdge.APP_NAME_LABEL + "=" + PrivateEdge.APPLICATIONS.getLast(),
         0,
         EDGE_SERVICE + "\n",
         "");

@@ -16,26 +16,42 @@ import java.util.regex.Pattern;
 import org.jboss.logging.Logger;
 
 /**
- * <b>A lease on the private edge where the node's daemon has one</b> (qits-2062): a membership of
- * the {@code qits-private} overlay, and the private edge's VIP on it as the first resolver,
- * followed by the runner's own upstreams. qits-containers' {@code PrivateEdgeResolver} (qits-1991)
- * does the same for the platform's own flagged containers; this is that logic for every runner
- * lease, asked of the runner's own docker daemon at each lease create, read-only and under its
- * deadline:
+ * <b>A lease on a resolver edge where the node's daemon has one</b> (qits-2062, qits-2304): a
+ * membership of the {@code qits-private} overlay, and a resolver edge's VIP on it as the first
+ * resolver, followed by the runner's own upstreams. qits-containers' {@code PrivateEdgeResolver}
+ * (qits-1991) does the same for the platform's own flagged containers; this is that logic for every
+ * runner lease, asked of the runner's own docker daemon at each lease create, read-only and under
+ * its deadline:
  *
  * <ol>
- *   <li>{@code docker network inspect --format {{.Id}} qits-private} — the overlay's id. Absent
- *       is every off-host target, and the lease runs exactly as before, with a DEBUG line;
- *   <li>{@code docker service ls -q --filter label=<APP_NAME_LABEL>=qits-edge-private} — exactly
- *       one swarm service;
- *   <li>{@code docker service inspect --format} over {@code .Endpoint.VirtualIPs}, one {@code
- *       <NetworkID> <Addr>} line each — the line on the overlay, its {@code /prefix} stripped, is
- *       the VIP. Read by hand: the native image carries no JSON parser;
+ *   <li>{@code docker network inspect --format {{.Id}} qits-private} — the overlay's id, asked
+ *       once. Absent is every off-host target, and the lease runs exactly as before, with a DEBUG
+ *       line;
+ *   <li>{@link #APPLICATIONS} walked in order — {@code qits-edge-overlay} then {@code
+ *       qits-edge-private} shipped: {@code docker service ls -q --filter
+ *       label=<APP_NAME_LABEL>=<application>}, exactly one swarm service, then {@code docker
+ *       service inspect --format} over {@code .Endpoint.VirtualIPs}, one {@code <NetworkID>
+ *       <Addr>} line each — the line on the overlay, its {@code /prefix} stripped, is the VIP. An
+ *       application with <em>no</em> swarm service at all is skipped in favour of the next
+ *       preference — the ordinary state of {@code qits-edge-overlay} before qits-deployments ever
+ *       deploys it, so a lease falls through to {@code qits-edge-private} exactly as qits-2062
+ *       shipped. Any other answer for an application — several services, no VIP of it on the
+ *       overlay, the lookup itself refused — stops the walk with no resolver rather than trying the
+ *       next preference: a passing docker hiccup must never flip a lease onto the fallback edge
+ *       only to flip it back at its next create. Read by hand: the native image carries no JSON
+ *       parser;
  *   <li>the upstreams from the runner's own {@code /etc/resolv.conf}: the first {@code #
  *       ExtServers: [a b host(c)]} line when docker wrote one, else the {@code nameserver} lines in
  *       order — loopback dropped (a lease's own loopback is not the runner's), de-duplicated, the
  *       VIP dropped if listed.
  * </ol>
+ *
+ * <p>Why {@code qits-edge-overlay} is preferred at all: it is start-first on {@code qits-private},
+ * so unlike {@code qits-edge-private} — the WireGuard tunnel edge, which redeploys stop-first — it
+ * never leaves a 90-180s window where a lease's lookup falls through to an unroutable public
+ * answer while the edge it resolves through is being replaced. qits-containers'
+ * {@code PrivateEdgeResolver.applications()} and qits-deployments'
+ * {@code SwarmDeploymentDriver.resolverApplications()} must walk the same order.
  *
  * <p><b>All or nothing</b>, stricter than {@code PrivateEdgeResolver}, which keeps a join without
  * a resolver: only the overlay, exactly one VIP <em>and</em> at least one upstream put the lease on
@@ -62,17 +78,23 @@ final class PrivateEdge {
   private static final Logger LOG = Logger.getLogger(PrivateEdge.class);
 
   /**
-   * The attachable overlay the private edge serves on — qits-containers' {@code
+   * The attachable overlay a resolver edge serves on — qits-containers' {@code
    * PrivateEdgeResolver} network ({@code qits.containers.private-edge.network}), created by
    * qits-deployments. Restated: neither jar is on this classpath.
    */
   static final String NETWORK = "qits-private";
 
   /**
-   * The private edge's application name, as {@code PrivateEdgeResolver}'s {@code
-   * qits.containers.private-edge.application} names it.
+   * The resolver preference, in order (qits-2304) — {@code qits-edge-overlay}, the start-first edge
+   * on {@code qits-private}, ahead of {@code qits-edge-private}, the WireGuard tunnel edge, which
+   * leaves a 90-180s gap on every redeploy. Mirrors qits-containers' {@code
+   * PrivateEdgeResolver.applications()} shipped default and qits-deployments' {@code
+   * SwarmDeploymentDriver.resolverApplications()} — all three must walk the same order. Unlike
+   * those two, this is a bare constant and not a config key: this daemon has no configuration
+   * framework to read one from, and changing the preference here is a code change in lock-step with
+   * the other two, never an install-time choice.
    */
-  static final String APPLICATION = "qits-edge-private";
+  static final List<String> APPLICATIONS = List.of("qits-edge-overlay", "qits-edge-private");
 
   /**
    * qits-deployments' {@code DeploymentDriver.APP_NAME_LABEL}, as {@code
@@ -196,7 +218,23 @@ final class PrivateEdge {
     return resolved;
   }
 
-  /** The class javadoc's four steps, read-only; a step that fails says why. */
+  /**
+   * One preference's VIP on the overlay, or {@code absent} when it has no swarm service at all —
+   * the one answer {@link #lookup}'s walk is entitled to skip past; any other empty answer carries
+   * why and stops the walk.
+   */
+  private record VipLookup(String vip, boolean absent, String why) {
+
+    static VipLookup noServiceAtAll() {
+      return new VipLookup(null, true, null);
+    }
+
+    static VipLookup none(String why) {
+      return new VipLookup(null, false, why);
+    }
+  }
+
+  /** The class javadoc's steps, read-only; a step that fails says why. */
   private Lookup lookup() {
     RunnerDocker.Result network =
         docker.run(SwarmArgv.networkInspect(docker.binary(), NETWORK, "{{.Id}}"));
@@ -205,21 +243,52 @@ final class PrivateEdge {
       return Lookup.none(false, network.timedOut() ? String.valueOf(network.detail()) : null);
     }
 
+    List<String> absentFrom = new ArrayList<>();
+    for (String application : APPLICATIONS) {
+      VipLookup found = vipOf(application, networkId);
+      if (found.vip() != null) {
+        List<String> upstreams = upstreamsBesides(resolvConf, found.vip());
+        if (upstreams.isEmpty()) {
+          return Lookup.none(
+              true,
+              resolvConf
+                  + " names no upstream resolver, and a resolver list holding only the edge's VIP"
+                  + " would answer every public name REFUSED");
+        }
+        return new Lookup(found.vip(), upstreams, true, null);
+      }
+      if (!found.absent()) {
+        return Lookup.none(true, found.why());
+      }
+      absentFrom.add(application);
+    }
+    return Lookup.none(
+        true,
+        "no swarm service labelled "
+            + APP_NAME_LABEL
+            + "=<application> for any of "
+            + absentFrom);
+  }
+
+  /** One preference's address on the overlay, after {@link #lookup} read the overlay's id once. */
+  private VipLookup vipOf(String application, String networkId) {
     RunnerDocker.Result listed =
         docker.run(
             SwarmArgv.serviceLsQuiet(
-                docker.binary(), List.of(SwarmArgv.labelFilter(APP_NAME_LABEL, APPLICATION))));
+                docker.binary(), List.of(SwarmArgv.labelFilter(APP_NAME_LABEL, application))));
     if (!listed.ok()) {
-      return Lookup.none(true, "docker service ls answered " + brief(listed));
+      return VipLookup.none("docker service ls answered " + brief(listed));
     }
     List<String> services = lines(listed.stdout());
+    if (services.isEmpty()) {
+      return VipLookup.noServiceAtAll();
+    }
     if (services.size() != 1 || !DOCKER_ID.matcher(services.getFirst()).matches()) {
-      return Lookup.none(
-          true,
+      return VipLookup.none(
           "expected exactly one swarm service labelled "
               + APP_NAME_LABEL
               + "="
-              + APPLICATION
+              + application
               + ", found "
               + services.size());
     }
@@ -228,13 +297,12 @@ final class PrivateEdge {
     RunnerDocker.Result inspected =
         docker.run(SwarmArgv.serviceInspect(docker.binary(), service, VIPS_FORMAT));
     if (!inspected.ok()) {
-      return Lookup.none(
-          true, "docker service inspect " + service + " answered " + brief(inspected));
+      return VipLookup.none(
+          "docker service inspect " + service + " answered " + brief(inspected));
     }
     Optional<String> vip = vipOn(inspected.stdout(), networkId);
     if (vip.isEmpty()) {
-      return Lookup.none(
-          true,
+      return VipLookup.none(
           "the service "
               + service
               + " has no single virtual IP on "
@@ -243,16 +311,7 @@ final class PrivateEdge {
               + networkId
               + ")");
     }
-
-    List<String> upstreams = upstreamsBesides(resolvConf, vip.get());
-    if (upstreams.isEmpty()) {
-      return Lookup.none(
-          true,
-          resolvConf
-              + " names no upstream resolver, and a resolver list holding only the edge's VIP would"
-              + " answer every public name REFUSED");
-    }
-    return new Lookup(vip.get(), upstreams, true, null);
+    return new VipLookup(vip.get(), false, null);
   }
 
   /** The spec unchanged, with the WARN: the overlay is here, so this is the platform host. */

@@ -34,6 +34,8 @@ class PrivateEdgeTest {
 
   private static final String NETWORK_INSPECT =
       "docker network inspect --format {{.Id}} qits-private";
+  private static final String OVERLAY_LS =
+      "docker service ls -q --filter label=qits.platform.deployments.app-name=qits-edge-overlay";
   private static final String SERVICE_LS =
       "docker service ls -q --filter label=qits.platform.deployments.app-name=qits-edge-private";
   private static final String SERVICE_INSPECT = "docker service inspect --format ";
@@ -69,6 +71,10 @@ class PrivateEdgeTest {
                       1, "", "Error response from daemon: No such object", false, false);
                 }),
             resolvConf);
+    // The shipped preference (qits-2304): the overlay edge first, the tunnel edge as fallback. No
+    // test scripts the overlay edge unless it is about it, so its `service ls` answers nothing —
+    // absent, not refused — and every lookup falls through to qits-edge-private exactly as before.
+    answer(OVERLAY_LS, "");
   }
 
   private void answer(String argvPrefix, String stdout) {
@@ -134,6 +140,13 @@ class PrivateEdgeTest {
                 "ls",
                 "-q",
                 "--filter",
+                "label=qits.platform.deployments.app-name=qits-edge-overlay"),
+            List.of(
+                "docker",
+                "service",
+                "ls",
+                "-q",
+                "--filter",
                 "label=qits.platform.deployments.app-name=qits-edge-private"),
             List.of(
                 "docker",
@@ -143,8 +156,9 @@ class PrivateEdgeTest {
                 "{{range .Endpoint.VirtualIPs}}{{.NetworkID}} {{.Addr}}{{\"\\n\"}}{{end}}",
                 SERVICE)),
         calls,
-        "three read-only questions, the template one argv element");
-    assertEquals(List.of(DEADLINE, DEADLINE, DEADLINE), deadlines, "under the runner's deadline");
+        "the overlay edge is tried first and found absent, then the tunnel edge answers");
+    assertEquals(
+        List.of(DEADLINE, DEADLINE, DEADLINE, DEADLINE), deadlines, "under the runner's deadline");
   }
 
   @Test
@@ -280,6 +294,105 @@ class PrivateEdgeTest {
     ContainerSpec spec = spec();
 
     assertSame(spec, throwing.apply(spec, LEASE));
+  }
+
+  // ---- qits-2304: qits-edge-overlay is the preferred resolver, qits-edge-private the fallback ---
+
+  private static final String OVERLAY_SERVICE = "svc8overlay";
+  private static final String OVERLAY_NET_ID = "9f8e7d6c5b4a";
+
+  /** The overlay edge's own service and VIP, distinct from the tunnel edge's. */
+  private void overlayEdge(String vip) {
+    answer(OVERLAY_LS, OVERLAY_SERVICE + "\n");
+    answer(SERVICE_INSPECT, OVERLAY_NET_ID + " " + vip + "/16\n");
+  }
+
+  @Test
+  void anOverlayEdgePresentIsTheFirstResolverAndTheTunnelEdgeIsNeverAsked() {
+    answer(NETWORK_INSPECT, OVERLAY_NET_ID + "\n");
+    overlayEdge("10.231.0.9");
+    ContainerSpec spec = spec();
+
+    ContainerSpec resolved = edge.apply(spec, LEASE);
+
+    assertEquals(List.of("qits-private"), resolved.extraNetworks());
+    assertEquals(
+        List.of("10.231.0.9", "192.168.188.1"),
+        resolved.dns(),
+        "the overlay edge's VIP, not the tunnel edge's");
+    assertTrue(
+        calls.stream().noneMatch(c -> String.join(" ", c).startsWith(SERVICE_LS)),
+        "the tunnel edge is not even asked once the overlay edge answered: " + calls);
+  }
+
+  @Test
+  void noOverlayEdgeServiceYetFallsBackToTheTunnelEdge() {
+    platformHost();
+    // @BeforeEach already scripts the overlay edge's `service ls` as empty (absent).
+    ContainerSpec spec = spec();
+
+    ContainerSpec resolved = edge.apply(spec, LEASE);
+
+    assertEquals(
+        List.of("10.231.0.2", "192.168.188.1"),
+        resolved.dns(),
+        "the tunnel edge's VIP once the overlay edge has no service at all");
+    assertTrue(
+        calls.stream().anyMatch(c -> String.join(" ", c).startsWith(OVERLAY_LS)),
+        "the preferred edge was asked first: " + calls);
+    assertTrue(calls.stream().anyMatch(c -> String.join(" ", c).startsWith(SERVICE_LS)));
+  }
+
+  @Test
+  void anOverlayEdgeLookupThatFailsNeverFallsThroughToTheTunnelEdge() {
+    // Absent (no service) is skipped; a refused lookup is a different answer and must stop the
+    // walk, or a passing docker hiccup would flip a live lease onto the fallback edge and then
+    // back again at its next create.
+    platformHost();
+    answers.put(
+        OVERLAY_LS,
+        new RunnerDocker.Result(
+            1, "", "Error response from daemon: This node is not a swarm manager", false, false));
+    ContainerSpec spec = spec();
+
+    ContainerSpec resolved = edge.apply(spec, LEASE);
+
+    assertEquals(List.of(), resolved.dns(), "no resolver, never the tunnel edge's as a fallback");
+    assertTrue(calls.stream().anyMatch(c -> String.join(" ", c).startsWith(OVERLAY_LS)));
+    assertTrue(
+        calls.stream().noneMatch(c -> String.join(" ", c).startsWith(SERVICE_LS)),
+        "a refused lookup stops the walk: " + calls);
+  }
+
+  @Test
+  void twoOverlayEdgeServicesAlsoStopsTheWalkWithNoResolver() {
+    platformHost();
+    answer(OVERLAY_LS, OVERLAY_SERVICE + "\nsvc2other\n");
+    ContainerSpec spec = spec();
+
+    ContainerSpec resolved = edge.apply(spec, LEASE);
+
+    assertEquals(List.of(), resolved.dns());
+    assertTrue(
+        calls.stream().noneMatch(c -> String.join(" ", c).startsWith(SERVICE_LS)), calls::toString);
+  }
+
+  @Test
+  void theChoiceIsTheOverlayEdgesVipOnceItExists() {
+    // The node's resolver choice (qits-2091), which NodeResolvers reports resolversStale against,
+    // follows the same preference: the overlay edge's VIP once it is deployed, not the tunnel
+    // edge's, exactly as `apply` would put it first on a lease created now.
+    platformHost();
+    assertEquals(Optional.of("10.231.0.2"), edge.choice(), "the tunnel edge, before the overlay");
+
+    calls.clear();
+    answer(NETWORK_INSPECT, OVERLAY_NET_ID + "\n");
+    overlayEdge("10.231.0.9");
+
+    assertEquals(Optional.of("10.231.0.9"), edge.choice(), "the overlay edge, now that it exists");
+    assertTrue(
+        calls.stream().noneMatch(c -> String.join(" ", c).startsWith(SERVICE_LS)),
+        "the tunnel edge is not asked once the overlay edge answered: " + calls);
   }
 
   // ---- the resolv.conf --------------------------------------------------------------------------

@@ -55,14 +55,15 @@ import org.jboss.logging.Logger;
  * <p><b>A WORKSPACE or DESK lease runs on the lease network</b> ({@link LeaseNetwork}, qits-2269),
  * made sure of before each of their {@code docker create}s and named as the create's {@code
  * --network} — one that cannot be made fails the lease with docker's words, never falling back to
- * {@code bridge}; <b>only a CI lease is on {@code bridge}</b>. Where the private edge is visible on
- * the node's daemon, a lease is also on {@code qits-private} with the edge's VIP as its first
- * resolver ({@link PrivateEdge}, qits-2062): asked just before each create, and joined ({@code
- * ContainerSpec.extraNetworks}, {@code --dns}) after the {@code docker create} and before the
- * {@code docker start}, so no process runs before the join (qits-2270). A join that fails removes
- * the container and fails the lease. Off the platform host there is no overlay and the lease runs
- * on its create's network with the node's resolvers — unless the node runs the node tunnel: where
- * the tunnel's DNS at {@code 100.96.0.1} answers, the lease stays on that network alone and gets
+ * {@code bridge}; <b>only a CI lease is on {@code bridge}</b>. Where a preferred resolver edge is
+ * visible on the node's daemon (qits-2062, qits-2304), a lease is also on {@code qits-private} with
+ * that edge's VIP as its first resolver ({@link PrivateEdge}): asked just before each create, and
+ * joined ({@code ContainerSpec.extraNetworks}, {@code --dns}) after the {@code docker create} and
+ * before the {@code docker start}, so no process runs before the join (qits-2270). A join that
+ * fails removes the container and fails the lease. Off the platform host there is no overlay and
+ * the lease runs on its create's network with the node's resolvers — unless the node runs the node
+ * tunnel: where the tunnel's DNS at {@code 100.96.0.1} answers, the lease stays on that network
+ * alone and gets
  * that address as its first resolver, followed by the runner's own ({@link NodeTunnel},
  * qits-2068), so private names resolve through the tunnel — on the lease network through docker's
  * embedded DNS, which asks them in that order. Nothing of either is hashed, still: the runner does

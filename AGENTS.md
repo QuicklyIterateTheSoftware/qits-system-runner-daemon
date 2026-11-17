@@ -60,13 +60,18 @@ change to that table, reviewed as one, with the test cell beside it.
   docker writes the `--dns` servers into resolv.conf and musl asks them all at once. It is the
   create's network (`SlotPolicy.RunNetwork`), a teardown item after every container, and a
   WORKSPACE or DESK lease found on other networks is reported `resolversStale`.
-- **Every lease joins `qits-private` with the private edge's VIP as first resolver where the edge
-  is visible on the node's daemon** (`PrivateEdge`, qits-2062), applied to the policy's spec just
-  before the create and never part of the spec-hash or mounts label — a moved VIP or a new rollout
-  never recreates a running lease. All or nothing, read-only, never throws; off the platform host it
-  adds nothing. The create argv is the driver's (`DockerArgv.create`, its run argv as a `docker
-  create`), so `--dns` is the driver's; the runner does the join (`ContainerSpec.extraNetworks`)
-  before the start.
+- **Every lease joins `qits-private` with a resolver edge's VIP as first resolver where one of
+  `PrivateEdge.APPLICATIONS` is visible on the node's daemon** (`PrivateEdge`, qits-2062,
+  qits-2304): `qits-edge-overlay` first, `qits-edge-private` as fallback — the same preference
+  qits-containers' `PrivateEdgeResolver` and qits-deployments' `SwarmDeploymentDriver` walk. An
+  application with no swarm service at all is skipped in favour of the next one; any other failure
+  for an application stops the walk with no resolver rather than trying the next, so a passing
+  docker hiccup never flips a lease onto the fallback edge and back. Applied to the policy's spec
+  just before the create and never part of the spec-hash or mounts label — a moved VIP, or a more
+  preferred edge arriving, never recreates a running lease. All or nothing, read-only, never
+  throws; off the platform host it adds nothing. The create argv is the driver's (`DockerArgv.create`,
+  its run argv as a `docker create`), so `--dns` is the driver's; the runner does the join
+  (`ContainerSpec.extraNetworks`) before the start.
 - **The build plane is the target's own** (`BuildPlane`): every name derived, none configurable,
   never `qits-buildkitd` / `qits-buildkitd-state` (`BuildPlaneNamesTest`). The builder carries the
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled
