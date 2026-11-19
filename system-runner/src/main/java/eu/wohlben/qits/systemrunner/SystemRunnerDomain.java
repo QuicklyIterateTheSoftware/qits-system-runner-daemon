@@ -193,6 +193,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    */
   private final NodeTunnel nodeTunnel;
 
+  /** Keeps the node's {@code qits-node-tunnel} at the served one (qits-2385). */
+  private final NodeTunnelUpdate nodeTunnelUpdate;
+
   /** The build plane with the latest {@code Ack}'s registry mirrors merged in. */
   private volatile BuildPlane buildPlane;
 
@@ -404,6 +407,13 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     this.volumes = new TargetVolumes(identity, settings.runnerId(), external);
     this.containers = new LeaseContainers(identity, settings.runnerId(), docker);
     this.nodeTunnel = new NodeTunnel(tunnelProbe, NodeTunnel.hostOf(settings.url()), resolvConf);
+    this.nodeTunnelUpdate =
+        new NodeTunnelUpdate(
+            NodeTunnelUpdate.networkAccessUrl(settings.url()),
+            settings.stateDir(),
+            NodeTunnelUpdate.dockerHost(identity, settings.runnerId(), docker),
+            NodeTunnelUpdate.http(),
+            () -> session.bearer());
     this.basePlane =
         new BuildPlane(
             identity,
@@ -625,6 +635,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     startTick();
     scheduleProbe(Duration.ZERO);
     prePull(session);
+    nodeTunnelUpdate.start();
   }
 
   /**
@@ -810,6 +821,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    */
   void close() {
     closing = true;
+    nodeTunnelUpdate.close();
     signIns.stopAll("the runner stops");
     synchronized (timer) {
       if (tick != null) {

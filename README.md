@@ -147,6 +147,22 @@ arrives, or its VIP moves — including when `qits-edge-overlay`'s first deploym
 `docker create` and before the `docker start`, and removes the container when that join fails,
 which fails the lease.
 
+**The node tunnel's binary follows the release** (qits-2385, `NodeTunnelUpdate`). The install line
+downloads `/usr/local/bin/qits-node-tunnel` once, at the join; the runner keeps it current. One
+minute after its first `Ack` and then every five minutes it asks
+`https://network-access.<rest of its server URL's host>/network-access/api/nodes/qits-node-tunnel`
+with its own bearer and `If-None-Match` naming the host binary's SHA-256: 304 is current. A 200
+whose body matches its `ETag` is staged in the state volume and installed by one helper,
+`qits-system-runner-node-tunnel-<id8>` (`docker run --rm --privileged --pid=host --network none`,
+the runner's own image): it reaches the host's files through `/proc/1/root`, keeps the old binary as
+`.old`, swaps by rename and runs `systemctl restart qits-node-tunnel` through `nsenter -t 1`. The
+new binary counts as started when the unit is active with one main PID 3 s and 10 s after the
+restart; otherwise the old one goes back, the unit is restarted again, and that digest is not
+tried again by this process. The log names both digests and the served release:
+`system-runner updated qits-node-tunnel from sha256:<old> to sha256:<new> (qits-network-access
+<version>)`. A host without the binary and its unit has not joined: one INFO line, and no more
+checks. The restart drops the tunnel for a few seconds.
+
 Off the platform host, a lease no resolver edge took may still resolve private names
 through the **node tunnel** (qits-2068, `NodeTunnel`): where the target's host runs the node
 tunnel, the runner's container — on `bridge`, like a CI lease — reaches the private edge's tunnel and
