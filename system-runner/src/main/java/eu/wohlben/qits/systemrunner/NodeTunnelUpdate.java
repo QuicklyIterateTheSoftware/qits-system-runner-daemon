@@ -43,7 +43,8 @@ import org.jboss.logging.Logger;
  *       {@code If-None-Match} naming that digest (and one the node refused before). 304 is
  *       "current". The network-access base is derived from the runner's server URL the way the
  *       edge names every application ({@link #networkAccessUrl});
- *   <li>200: the body's SHA-256 must be the {@code ETag}. It is staged in the state volume, and
+ *   <li>200: the body's SHA-256 must be the {@code ETag}, which must be there; anything else is
+ *       refused before anything is staged. It is staged in the state volume, and
  *       the helper (mode {@code install}) copies it next to the host's binary, checks the digest,
  *       keeps the old one as {@code .old}, swaps them by rename — the running process keeps its
  *       inode — and restarts the unit. The new one counts as started when the unit is active with
@@ -172,7 +173,9 @@ final class NodeTunnelUpdate {
     }
     started = true;
     if (url == null) {
-      LOG.debugf("system-runner does not follow qits-node-tunnel: no network-access URL derives");
+      LOG.infof(
+          "system-runner does not follow qits-node-tunnel: its server URL is not"
+              + " https://system.<platform domain>, so no network-access URL derives");
       return;
     }
     try {
@@ -241,7 +244,11 @@ final class NodeTunnelUpdate {
     }
     String served = sha256(answer.body());
     String etag = unquote(answer.etag());
-    if (etag != null && !etag.equals(served)) {
+    if (etag == null || !etag.matches("[0-9a-f]{64}")) {
+      LOG.warnf("system-runner refuses a qits-node-tunnel download that states no SHA-256 ETag");
+      return true;
+    }
+    if (!etag.equals(served)) {
       LOG.warnf(
           "system-runner refuses a qits-node-tunnel download whose digest %s is not its ETag %s",
           brief(served), brief(etag));
@@ -325,10 +332,10 @@ final class NodeTunnelUpdate {
 
   /**
    * qits-network-access's base, derived from the runner's server URL the way the edge names every
-   * application: its first host label replaced by {@code network-access}, and the service's root
-   * path — {@code https://system.qits.example.eu} → {@code
-   * https://network-access.qits.example.eu/network-access}. Null when the host has one label or is
-   * an address, as {@code RunnerSettings.telemetryUrl} derives nothing then.
+   * application: {@code https://system.qits.example.eu} → {@code
+   * https://network-access.qits.example.eu/network-access}. Null — and so no request, and no
+   * bearer sent — unless the URL is https and its host is {@code system.} followed by a parent of
+   * at least three DNS labels: a shorter parent could be a public suffix the platform does not own.
    */
   static String networkAccessUrl(String hostUrl) {
     if (hostUrl == null) {
@@ -341,16 +348,25 @@ final class NodeTunnelUpdate {
       return null;
     }
     String host = uri.getHost();
-    if (uri.getScheme() == null || host == null || host.matches("[0-9.]+|.*:.*|\\[.*\\]")) {
+    if (!"https".equalsIgnoreCase(uri.getScheme()) || host == null) {
       return null;
     }
-    int dot = host.indexOf('.');
-    if (dot <= 0 || dot == host.length() - 1) {
+    String[] labels = host.toLowerCase(Locale.ROOT).split("\\.", -1);
+    // system.<parent>, and a parent of three labels or more (qits.<domain>.<tld>): the bearer goes
+    // to the platform's own network-access host or nowhere.
+    if (labels.length < 4 || !labels[0].equals("system")) {
       return null;
     }
-    return uri.getScheme().toLowerCase(Locale.ROOT)
-        + "://network-access"
-        + host.substring(dot).toLowerCase(Locale.ROOT)
+    for (String label : labels) {
+      if (!label.matches("[a-z0-9]([a-z0-9-]*[a-z0-9])?")) {
+        return null;
+      }
+    }
+    if (labels[labels.length - 1].matches("[0-9]+")) {
+      return null;
+    }
+    return "https://network-access"
+        + host.substring(host.indexOf('.')).toLowerCase(Locale.ROOT)
         + (uri.getPort() == -1 ? "" : ":" + uri.getPort())
         + "/network-access";
   }
@@ -447,6 +463,9 @@ final class NodeTunnelUpdate {
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
     return (target, token, known) -> {
+      if (!target.startsWith("https://")) {
+        throw new IllegalArgumentException("refuses to send its bearer to a non-https URL");
+      }
       HttpRequest.Builder request =
           HttpRequest.newBuilder(URI.create(target))
               .timeout(Duration.ofMinutes(2))

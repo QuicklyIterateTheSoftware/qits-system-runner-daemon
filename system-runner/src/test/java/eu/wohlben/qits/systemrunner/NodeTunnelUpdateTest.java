@@ -52,9 +52,14 @@ class NodeTunnelUpdateTest {
         "https://network-access.qits.example.eu/network-access",
         NodeTunnelUpdate.networkAccessUrl("https://system.qits.example.eu"));
     assertEquals(
-        "http://network-access.qits.example.eu:8443/network-access",
-        NodeTunnelUpdate.networkAccessUrl("http://System.qits.example.eu:8443/"));
-    assertNull(NodeTunnelUpdate.networkAccessUrl("http://127.0.0.1:8080"));
+        "https://network-access.qits.example.eu:8443/network-access",
+        NodeTunnelUpdate.networkAccessUrl("https://System.qits.example.eu:8443/"));
+    assertNull(NodeTunnelUpdate.networkAccessUrl("http://system.qits.example.eu"), "http");
+    assertNull(NodeTunnelUpdate.networkAccessUrl("https://qits.example.eu"), "two-label parent");
+    assertNull(NodeTunnelUpdate.networkAccessUrl("https://system.example.eu"), "two-label parent");
+    assertNull(NodeTunnelUpdate.networkAccessUrl("https://ci.qits.example.eu"), "not system");
+    assertNull(NodeTunnelUpdate.networkAccessUrl("https://system.1.2.3"), "an address");
+    assertNull(NodeTunnelUpdate.networkAccessUrl("https://127.0.0.1:8080"));
     assertNull(NodeTunnelUpdate.networkAccessUrl("http://localhost:8080"));
     assertNull(NodeTunnelUpdate.networkAccessUrl(null));
   }
@@ -169,6 +174,56 @@ class NodeTunnelUpdateTest {
             new NodeTunnelUpdate.Answer(200, NEW, "\"" + OLD_SHA.replace('a', 'b') + "\"", null));
     u.check();
     assertEquals(List.of(), installs);
+  }
+
+  @Test
+  void aBodyWithoutAnEtagIsRefused() {
+    NodeTunnelUpdate u =
+        update(Optional.of(OLD_SHA), 0, new NodeTunnelUpdate.Answer(200, NEW, null, null));
+    u.check();
+    assertEquals(List.of(), installs);
+    assertFalse(Files.exists(dir.resolve(NodeTunnelUpdate.STAGED)));
+  }
+
+  @Test
+  void aServerUrlThatDerivesNoHostSendsNoRequest() throws Exception {
+    List<String> sent = new ArrayList<>();
+    update =
+        new NodeTunnelUpdate(
+            NodeTunnelUpdate.networkAccessUrl("https://qits.example.eu"),
+            dir,
+            new NodeTunnelUpdate.Host() {
+              @Override
+              public Optional<String> digest() {
+                sent.add("digest");
+                return Optional.of(OLD_SHA);
+              }
+
+              @Override
+              public RunnerDocker.Result install(String sha256) {
+                sent.add("install");
+                return new RunnerDocker.Result(0, "", "", false, false);
+              }
+            },
+            (url, bearer, known) -> {
+              sent.add(url);
+              return served(NEW);
+            },
+            () -> () -> CompletableFuture.completedFuture("the-bearer"));
+    update.start();
+    assertTrue(update.executor().getQueue().isEmpty(), "nothing scheduled");
+    assertEquals(List.of(), sent);
+  }
+
+  @Test
+  void theDownloadRefusesAnHttpUrl() {
+    var thrown =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                NodeTunnelUpdate.http()
+                    .get("http://network-access.qits.example.eu/x", "the-bearer", List.of()));
+    assertTrue(thrown.getMessage().contains("non-https"));
   }
 
   @Test

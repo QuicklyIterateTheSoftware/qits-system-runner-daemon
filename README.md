@@ -150,9 +150,11 @@ which fails the lease.
 **The node tunnel's binary follows the release** (qits-2385, `NodeTunnelUpdate`). The install line
 downloads `/usr/local/bin/qits-node-tunnel` once, at the join; the runner keeps it current. One
 minute after its first `Ack` and then every five minutes it asks
-`https://network-access.<rest of its server URL's host>/network-access/api/nodes/qits-node-tunnel`
-with its own bearer and `If-None-Match` naming the host binary's SHA-256: 304 is current. A 200
-whose body matches its `ETag` is staged in the state volume and installed by one helper,
+`https://network-access.<parent>/network-access/api/nodes/qits-node-tunnel` with its own bearer and
+`If-None-Match` naming the host binary's SHA-256: 304 is current. It asks only when its server URL
+is `https://system.<parent>` and `<parent>` has three labels or more; otherwise it logs why and sends
+nothing. A 200 is staged only when the SHA-256 of its body equals its `ETag`, which must be there;
+the helper checks the digest again before the swap. It is staged in the state volume and installed by one helper,
 `qits-system-runner-node-tunnel-<id8>` (`docker run --rm --privileged --pid=host --network none`,
 the runner's own image): it reaches the host's files through `/proc/1/root`, keeps the old binary as
 `.old`, swaps by rename and runs `systemctl restart qits-node-tunnel` through `nsenter -t 1`. The
