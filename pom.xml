@@ -38,7 +38,7 @@
              qits.system.runner / qits-system-runner (qits-1524), which SystemRunnerIdentityTest
              holds this runner's identity to. The toolkit brings qits-containers-driver at the
              version it was released against. -->
-        <qits.runner.version>2026.1117.173956</qits.runner.version>
+        <qits.runner.version>2026.1120.181043</qits.runner.version>
 
         <!-- qits-containers-driver (qits-2289): the platform's docker layer, declared here rather than
              left to arrive through the toolkit, because every docker argv this runner spells is now
