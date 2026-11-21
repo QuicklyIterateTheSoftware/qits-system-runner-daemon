@@ -14,9 +14,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * The memory facts over a fake cgroup tree in a temp dir (qits-1818): the node's root counters in
- * an LXC and on a bare host, no tree at all, the kernel's vmstat, a lease's cgroup under either
- * docker cgroup driver and by the fallback search, the coarse peak, and the last sample an exited
- * lease keeps.
+ * an LXC and on a bare host, no tree at all, the kernel's vmstat and meminfo (qits-2362), a
+ * lease's cgroup under either docker cgroup driver and by the fallback search, the coarse peak,
+ * and the last sample an exited lease keeps.
  */
 class MemorySamplerTest {
 
@@ -64,6 +64,16 @@ class MemorySamplerTest {
     assertNull(CgroupMemory.vmstatOomKills(tmp.resolve("no-vmstat")));
     assertEquals(
         5L, CgroupMemory.counter("oom 1\noom_kill 5\noom_group_kill 0\n", "oom_kill"), "not oom");
+
+    // qits-2362: MemTotal is in kB, converted to bytes, from a /proc/meminfo-shaped file.
+    Path meminfo = tmp.resolve("meminfo");
+    Files.writeString(
+        meminfo, "MemTotal:       16369608 kB\nMemFree:         1234567 kB\nMemAvailable: 1 kB\n");
+    assertEquals(16369608L * 1024, CgroupMemory.memTotalBytes(meminfo));
+    assertNull(CgroupMemory.memTotalBytes(tmp.resolve("no-meminfo")), "unreadable is null");
+    assertNull(
+        CgroupMemory.memTotalBytes(Files.writeString(tmp.resolve("no-total"), "MemFree: 1 kB\n")),
+        "absent is null");
   }
 
   // ---- the node ----------------------------------------------------------------------------------
@@ -72,16 +82,23 @@ class MemorySamplerTest {
   void anLxcsRootCarriesTheNodeCounterAndItsLimit() throws IOException {
     events(root, 9, 292);
     Files.writeString(root.resolve("memory.max"), "34359738368\n");
+    Files.writeString(tmp.resolve("meminfo"), "MemTotal:       16777216 kB\n");
     MemorySampler sampler = sampler();
     sampler.sample(List.of());
-    assertEquals(new NodeMemory(292L, 297L, 32L << 30), sampler.node());
+    assertEquals(new NodeMemory(292L, 297L, 32L << 30, 16777216L * 1024), sampler.node());
   }
 
   @Test
-  void aBareHostsRootHasNoMemoryEventsAndOnlyTheKernelsCountIsLeft() {
+  void aBareHostsRootHasNoMemoryEventsAndOnlyTheKernelsCountAndTheTotalAreLeft() throws IOException {
     MemorySampler sampler = sampler();
     sampler.sample(List.of());
-    assertEquals(new NodeMemory(null, 297L, null), sampler.node());
+    assertEquals(new NodeMemory(null, 297L, null, null), sampler.node(), "meminfo not readable yet");
+
+    // qits-2362: a bare host's root cgroup has no memory.max at all, so MemTotal is what is left
+    // to size the node by.
+    Files.writeString(tmp.resolve("meminfo"), "MemTotal:       8388608 kB\n");
+    sampler.sample(List.of());
+    assertEquals(new NodeMemory(null, 297L, null, 8388608L * 1024), sampler.node());
   }
 
   @Test
@@ -89,7 +106,7 @@ class MemorySamplerTest {
     MemorySampler sampler =
         new MemorySampler(new CgroupSettings(tmp.resolve("not-bound"), vmstat));
     sampler.sample(List.of(running("l1", ID1)));
-    assertEquals(new NodeMemory(null, 297L, null), sampler.node());
+    assertEquals(new NodeMemory(null, 297L, null, null), sampler.node());
     assertEquals(MemorySampler.LeaseMemory.NONE, sampler.lease("l1"));
     assertNull(sampler.resolve(ID1));
 
@@ -231,6 +248,11 @@ class MemorySamplerTest {
                   case "QITS_SYSTEM_RUNNER_VMSTAT" -> "/tmp/vmstat";
                   default -> null;
                 }));
+    // qits-2362: meminfo has no env var of its own — it is vmstat's sibling.
+    assertEquals(Path.of("/proc/meminfo"), CgroupSettings.DEFAULTS.meminfo());
+    assertEquals(
+        Path.of("/tmp/meminfo"),
+        new CgroupSettings(Path.of("/elsewhere"), Path.of("/tmp/vmstat")).meminfo());
   }
 
   // ---- helpers -----------------------------------------------------------------------------------

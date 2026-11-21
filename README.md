@@ -86,8 +86,10 @@ read-only); without it every cgroup-derived fact is null, never an error.
   as `oomKilled`.
 - **For the node**: `node.nodeOomKills` (the root's `memory.events` `oom_kill` — the LXC's own
   counter; null on a bare host, whose root has no `memory.events`), `node.kernelOomKills`
-  (`/proc/vmstat`: every OOM kill on the physical host) and `node.memoryMaxBytes` (the root's
-  `memory.max`, null when `max`).
+  (`/proc/vmstat`: every OOM kill on the physical host), `node.memoryMaxBytes` (the root's
+  `memory.max`, null when `max`), and `node.memoryTotalBytes` (`/proc/meminfo`'s `MemTotal`,
+  qits-2362: the figure left to size a bare host by — localhost, a workstation — whose root
+  cgroup is always `max`).
 
 A change in any OOM counter sends an `inventory`; the peak does not, until it grew by 64 MiB from
 the value last reported — so a growing lease costs one frame per 64 MiB, not one per look.
@@ -435,7 +437,7 @@ frames are this repository's (`SystemRunnerCodec`).
            warmImages:[image]}
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail,
                        oomKills?, oomEvents?, memoryPeakBytes?, oomKilled?}], volumes:[name],
-                       node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?}}
+                       node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?, memoryTotalBytes?}}
     probeLogin → loginState{claude, kimi, checkedAt, volume}                (PRESENT|ABSENT|UNKNOWN)
     healthCheck{requestId} → healthChecked{ok, detail, requestId, checks:[{name, ok, detail, data}]}
     signIn{signInId, harness} → signInProgress{signInId, harness, state, url, userCode, detail} …

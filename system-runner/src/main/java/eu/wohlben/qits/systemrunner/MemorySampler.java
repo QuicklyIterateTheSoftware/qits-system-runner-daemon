@@ -54,6 +54,7 @@ final class MemorySampler {
 
   private final Path root;
   private final Path vmstat;
+  private final Path meminfo;
   private final Map<String, Sample> samples = new HashMap<>();
   private String driver;
   private NodeMemory node;
@@ -61,6 +62,7 @@ final class MemorySampler {
   MemorySampler(CgroupSettings settings) {
     this.root = settings.hostCgroup();
     this.vmstat = settings.vmstat();
+    this.meminfo = settings.meminfo();
   }
 
   /** Docker's cgroup driver ({@code systemd}, {@code cgroupfs}), or null when docker did not say. */
@@ -142,10 +144,13 @@ final class MemorySampler {
       memoryMax = rootMemory.maxBytes();
     }
     Long kernel = CgroupMemory.vmstatOomKills(vmstat);
-    if (nodeOomKills == null && kernel == null && memoryMax == null) {
+    // qits-2362: a root cgroup that is max (localhost, a workstation) leaves memoryMax null, so
+    // MemTotal is read unconditionally — it is the only figure left to size such a node by.
+    Long memoryTotal = CgroupMemory.memTotalBytes(meminfo);
+    if (nodeOomKills == null && kernel == null && memoryMax == null && memoryTotal == null) {
       return null;
     }
-    return new NodeMemory(nodeOomKills, kernel, memoryMax);
+    return new NodeMemory(nodeOomKills, kernel, memoryMax, memoryTotal);
   }
 
   /** Where the container's cgroup is: the driver's path, else a bounded search; null when absent. */

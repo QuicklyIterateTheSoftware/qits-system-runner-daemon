@@ -42,7 +42,9 @@ import java.util.UUID;
  * as null. The same for qits-2091's three: a lease entry's {@code generation} is left out when
  * {@code 0}, a lease report's {@code resolvers} when empty and {@code resolversStale} when false,
  * and absent reads as those defaults — so neither frame changes for a lease the fields say nothing
- * about, and a peer before them reads the frame as it always did. {@code healthCheck} and {@code healthChecked} are
+ * about, and a peer before them reads the frame as it always did. The node's {@code
+ * memoryTotalBytes} (qits-2362) joined the same left-out-when-null group, after {@code
+ * memoryMaxBytes}. {@code healthCheck} and {@code healthChecked} are
  * {@link HealthWire}'s, every runner kind's.
  */
 public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage> {
@@ -126,6 +128,7 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
           putPresent(node, Field.NODE_OOM_KILLS, m.node().nodeOomKills());
           putPresent(node, Field.KERNEL_OOM_KILLS, m.node().kernelOomKills());
           putPresent(node, Field.MEMORY_MAX_BYTES, m.node().memoryMaxBytes());
+          putPresent(node, Field.MEMORY_TOTAL_BYTES, m.node().memoryTotalBytes());
           map.put(Field.NODE, node);
         }
       }
@@ -313,7 +316,8 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
     return new NodeMemory(
         longValue(node, Field.NODE_OOM_KILLS),
         longValue(node, Field.KERNEL_OOM_KILLS),
-        longValue(node, Field.MEMORY_MAX_BYTES));
+        longValue(node, Field.MEMORY_MAX_BYTES),
+        longValue(node, Field.MEMORY_TOTAL_BYTES));
   }
 
   // --- the spec ----------------------------------------------------------------------------------

@@ -114,8 +114,8 @@ class SystemRunnerCodecTest {
                     L2, LeaseState.EXITED, "sha256:bbb", 137, null, 1L, 1L, 4L << 30, true),
                 new LeaseReport("l3", LeaseState.EXITED, "h", 0, null, 0L, 0L, null, false)),
             List.of(),
-            new NodeMemory(292L, 297L, 32L << 30)),
-        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null)),
+            new NodeMemory(292L, 297L, 32L << 30, 64L << 30)),
+        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null, null)),
         new Inventory(
             List.of(
                 new LeaseReport(
@@ -329,18 +329,23 @@ class SystemRunnerCodecTest {
             + "\"detail\":null,\"oomKills\":0}],"
             + "\"volumes\":[],"
             + "\"node\":{\"nodeOomKills\":292,\"kernelOomKills\":297,"
-            + "\"memoryMaxBytes\":34359738368}}",
+            + "\"memoryMaxBytes\":34359738368,\"memoryTotalBytes\":68719476736}}",
         new Inventory(
             List.of(
                 new LeaseReport("l2", LeaseState.EXITED, "h", 137, null, 1L, 1L, 4L << 30, true),
                 new LeaseReport("l3", LeaseState.RUNNING, "h", null, null, 0L, null, null, null)),
             List.of(),
-            new NodeMemory(292L, 297L, 32L << 30)));
+            new NodeMemory(292L, 297L, 32L << 30, 64L << 30)));
     // A bare host's root has no memory.events and no limit: only the kernel's count is left.
     assertJson(
         "{\"type\":\"inventory\",\"leases\":[],\"volumes\":[],"
             + "\"node\":{\"kernelOomKills\":297}}",
-        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null)));
+        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null, null)));
+    // qits-2362: that same bare host still has a MemTotal, spelled last, after memoryMaxBytes.
+    assertJson(
+        "{\"type\":\"inventory\",\"leases\":[],\"volumes\":[],"
+            + "\"node\":{\"kernelOomKills\":297,\"memoryTotalBytes\":17179869184}}",
+        new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null, 16L << 30)));
   }
 
   @Test
@@ -597,7 +602,13 @@ class SystemRunnerCodecTest {
     old.put("node", null);
     assertNull(((Inventory) CODEC.decode(old)).node());
     old.put("node", Map.of("kernelOomKills", 5));
-    assertEquals(new NodeMemory(null, 5L, null), ((Inventory) CODEC.decode(old)).node());
+    assertEquals(new NodeMemory(null, 5L, null, null), ((Inventory) CODEC.decode(old)).node());
+
+    // qits-2362: a payload from before memoryTotalBytes existed decodes it as null, and a payload
+    // that carries it decodes it like any other node field.
+    old.put("node", Map.of("kernelOomKills", 5, "memoryTotalBytes", 17179869184L));
+    assertEquals(
+        new NodeMemory(null, 5L, null, 16L << 30), ((Inventory) CODEC.decode(old)).node());
   }
 
   @Test

@@ -42,4 +42,13 @@ record CgroupSettings(Path hostCgroup, Path vmstat) {
   private static Path path(String raw, String fallback) {
     return Path.of(raw == null || raw.isBlank() ? fallback : raw.strip());
   }
+
+  /**
+   * {@code meminfo}, read from {@link #vmstat}'s own directory (qits-2362): both are the kernel's
+   * counters under the same proc root ({@code /proc} by default), and {@code MemTotal} needs no
+   * env var of its own to say where it lives.
+   */
+  Path meminfo() {
+    return vmstat.resolveSibling("meminfo");
+  }
 }

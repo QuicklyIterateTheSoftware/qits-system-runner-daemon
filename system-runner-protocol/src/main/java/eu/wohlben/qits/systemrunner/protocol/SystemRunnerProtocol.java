@@ -180,6 +180,8 @@ public final class SystemRunnerProtocol {
     public static final String NODE_OOM_KILLS = "nodeOomKills";
     public static final String KERNEL_OOM_KILLS = "kernelOomKills";
     public static final String MEMORY_MAX_BYTES = "memoryMaxBytes";
+    // inventory, qits-2362: the node's physical memory, appended last so the wire stays additive
+    public static final String MEMORY_TOTAL_BYTES = "memoryTotalBytes";
     // inventory, qits-2091: a lease report's resolvers — left out when empty, and false
     public static final String RESOLVERS = "resolvers";
     public static final String RESOLVERS_STALE = "resolversStale";
