@@ -157,6 +157,9 @@ class EstateReconcileTest {
   /** Whether the node tunnel's DNS answers: not on this node unless a test says so. */
   private NodeTunnel.Probe tunnelProbe = NodeTunnel.NEVER;
 
+  /** Run first in the domain's every {@code onAck}: nothing unless a test holds the Ack back. */
+  private Runnable beforeAck = () -> {};
+
   @BeforeEach
   void setUp() throws Exception {
     host = new FakeRunnerHost(vertx, IDENTITY, CODEC);
@@ -286,6 +289,38 @@ class EstateReconcileTest {
     host.send(new Estate(List.of(workspace(L1, H1)), List.of()));
     awaitTrue(() -> runner.session().held().equals(List.of(L1)));
     assertTrue(host.all(Reserve.class).isEmpty(), "the server allocates: no reserve, ever");
+  }
+
+  /**
+   * qits-2475: the runtime runs the Ack and the estate as separate jobs, so the estate can be
+   * converged before the Ack's slot images are taken — the lease refused for want of one, FAILED.
+   * The Ack is held here until that FAILED inventory went out; once taken, it converges the estate
+   * again, so the lease is reported RUNNING, never left FAILED by a refusal no later estate clears.
+   */
+  @Test
+  void anEstateConvergedBeforeItsAckIsConvergedAgainOnceTheAckIsTaken() throws Exception {
+    Predicate<Inventory> failed = i -> stateOf(i, L1) == LeaseState.FAILED;
+    beforeAck =
+        () -> {
+          long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+          while (host.all(Inventory.class).stream().noneMatch(failed)
+              && System.nanoTime() < deadline) {
+            java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+          }
+        };
+    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+    estateThenAck(workspace(L1, H1));
+    start();
+
+    Inventory refused = awaitInventory(failed);
+    assertEquals(
+        "no WORKSPACE image is pinned for this target yet",
+        report(refused, L1).detail(),
+        "the estate met the Ack's absent keys first");
+    awaitTrue(() -> stateOf(host.all(Inventory.class).getLast(), L1) == LeaseState.RUNNING);
+    assertEquals(
+        new LeaseReport(L1, LeaseState.RUNNING, H1, null, null),
+        report(host.all(Inventory.class).getLast(), L1));
   }
 
   @Test
@@ -812,11 +847,18 @@ class EstateReconcileTest {
   /** What the node tunnel's probe was asked, by name. */
   private final List<String> tunnelAsked = new java.util.concurrent.CopyOnWriteArrayList<>();
 
+  /**
+   * The threads that asked it, beside {@link #tunnelAsked}: the periodic look asks too, at its own
+   * time, so a count a test means for one caller is that caller's alone.
+   */
+  private final List<Thread> tunnelAskers = new java.util.concurrent.CopyOnWriteArrayList<>();
+
   /** A node whose host runs the node tunnel: its DNS answers, the runner's upstream the LAN's. */
   private void nodeTunnelUp() throws Exception {
     tunnelProbe =
         (server, name, timeout) -> {
           tunnelAsked.add(server.getHostString() + ":" + server.getPort() + " " + name);
+          tunnelAskers.add(Thread.currentThread());
           return true;
         };
     Files.writeString(resolvConf, "nameserver 192.168.188.1\n");
@@ -850,10 +892,13 @@ class EstateReconcileTest {
             "qits.system.runner.spec-hash=" + H1),
         labelsOf(run),
         "the labels of the same entry without the tunnel");
-    assertEquals(
-        List.of("100.96.0.1:53 " + java.net.URI.create(host.base()).getHost()),
-        tunnelAsked,
-        "the server URL's host, asked at the tunnel's DNS");
+    // The look asks the same probe for the node's resolver choice whenever it ticks, so the count
+    // is the look's to grow: every ask is the same question.
+    String asked = "100.96.0.1:53 " + java.net.URI.create(host.base()).getHost();
+    assertFalse(tunnelAsked.isEmpty(), "the server URL's host, asked at the tunnel's DNS");
+    assertTrue(
+        tunnelAsked.stream().allMatch(asked::equals),
+        () -> "the server URL's host, asked at the tunnel's DNS: " + tunnelAsked);
   }
 
   @Test
@@ -912,9 +957,16 @@ class EstateReconcileTest {
     start();
 
     assertEquals(List.of("100.96.0.1", "192.168.188.1"), domain.successorDns());
-    int asked = tunnelAsked.size();
+    // Counted on this thread alone: the periodic look asks the same probe from the timer's.
+    long asked = askedHere();
     domain.successorDns();
-    assertEquals(asked + 1, tunnelAsked.size(), "asked afresh at each rollover");
+    assertEquals(asked + 1, askedHere(), "asked afresh at each rollover");
+  }
+
+  /** How often this thread asked the node tunnel's probe. */
+  private long askedHere() {
+    Thread self = Thread.currentThread();
+    return tunnelAskers.stream().filter(self::equals).count();
   }
 
   @Test
@@ -1958,6 +2010,7 @@ class EstateReconcileTest {
             SignInProcesses.FORKED,
             resolvConf,
             tunnelProbe);
+    domain.beforeAck(beforeAck);
     runner =
         new RunnerRuntime<>(
             vertx,

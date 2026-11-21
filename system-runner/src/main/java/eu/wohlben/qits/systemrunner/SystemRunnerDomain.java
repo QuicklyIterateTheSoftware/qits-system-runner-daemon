@@ -273,6 +273,12 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The handle the toolkit gave: the same across reconnects, null before the first session. */
   private volatile RunnerSession session;
 
+  /**
+   * Run first in {@link #onAck}, before the {@code Ack}'s keys are taken: a no-op but for the
+   * suite, which holds an {@code Ack} back until the estate converged without it (qits-2475).
+   */
+  private volatile Runnable beforeAck = () -> {};
+
   private final Object inventoryLock = new Object();
 
   private ScheduledFuture<?> tick;
@@ -607,9 +613,18 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * volume and caches are made labelled (before an operator's login command could make the
    * credential volume unlabelled) — an external one is the operator's and is never made — the
    * {@code inventory} goes out, the look ticks from here on, and the login is probed.
+   *
+   * <p><b>The estate can be converged before this runs</b> (qits-2475): the runtime runs the {@code
+   * Ack} and the next frame as separate jobs, so this connection's estate may meet the previous
+   * {@code Ack}'s keys — on a first connection none, every lease refused for want of a pinned slot
+   * image and reported FAILED. Where an estate already arrived on this connection, it is converged
+   * again once the keys are taken, so a refusal made without them never outlives the {@code Ack}.
+   * The keys are written before {@link #estateThisSession} is read and the convergence sets it
+   * before it reads them, so a convergence this one misses already sees them.
    */
   @Override
   public void onAck(Ack ack, RunnerSession session) {
+    beforeAck.run();
     this.session = session;
     try {
       this.ack = SystemRunnerAck.of(ack);
@@ -636,6 +651,14 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     scheduleProbe(Duration.ZERO);
     prePull(session);
     nodeTunnelUpdate.start();
+    if (estateThisSession) {
+      reconvergeSoon();
+    }
+  }
+
+  /** The suite's seam: {@code hook} runs first in every {@link #onAck} (qits-2475). */
+  void beforeAck(Runnable hook) {
+    beforeAck = hook;
   }
 
   /**
@@ -915,8 +938,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   }
 
   /**
-   * A pull settled: converge the latest {@code estate} again, on the re-convergence thread, so the
-   * lease whose image arrived is created. Coalesced: one queued at a time.
+   * A pull settled, or an {@code Ack} came after this connection's estate (qits-2475): converge the
+   * latest {@code estate} again, on the re-convergence thread, so the lease whose image arrived, or
+   * whose slot image the {@code Ack} pinned, is created. Coalesced: one queued at a time.
    */
   private void reconvergeSoon() {
     if (!reconvergeQueued.compareAndSet(false, true)) {
@@ -958,7 +982,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       estateThisSession = true;
       LOG.infof(
           "system-runner's estate%s: %d lease(s), %d purge(s)",
-          again ? " again, after a pull" : "", listed.size(), e.purges().size());
+          again ? " again, after a pull or the Ack" : "", listed.size(), e.purges().size());
       failures.keySet().retainAll(listed);
       pullingDetails.keySet().retainAll(listed);
       sendInventory(session, false);
