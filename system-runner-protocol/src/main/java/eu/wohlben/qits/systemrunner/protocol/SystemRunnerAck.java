@@ -8,8 +8,9 @@ import java.util.Map;
 
 /**
  * The target runner's keys in the host's {@link Ack} — its {@link Ack#extensions()}: {@code
- * slotImages{ci, workspace, desk}}, {@code probeImage} and {@code registryMirrors}. The host writes
- * them with {@link #extensions()}, the runner reads them with {@link #of(Ack)}; one spelling, here.
+ * slotImages{ci, workspace, desk, agent}}, {@code probeImage} and {@code registryMirrors}. The host
+ * writes them with {@link #extensions()}, the runner reads them with {@link #of(Ack)}; one
+ * spelling, here.
  *
  * @param slotImages each slot type's image prefix; never null when decoded ({@link SlotImages#NONE})
  * @param probeImage the pinned workspace image the login probe runs, or null
@@ -30,6 +31,11 @@ public record SystemRunnerAck(
     images.put(Field.CI, slotImages.ci());
     images.put(Field.WORKSPACE, slotImages.workspace());
     images.put(Field.DESK, slotImages.desk());
+    // strictly additive (qits-2519): absent rather than null when unknown, so an Ack without an
+    // agent prefix keeps the spelling every runner before it read
+    if (slotImages.agent() != null) {
+      images.put(Field.AGENT, slotImages.agent());
+    }
     map.put(Field.SLOT_IMAGES, images);
     map.put(Field.PROBE_IMAGE, probeImage);
     map.put(Field.REGISTRY_MIRRORS, registryMirrors == null ? null : new LinkedHashMap<>(registryMirrors));
@@ -54,7 +60,8 @@ public record SystemRunnerAck(
             : new SlotImages(
                 WireMaps.str(images, Field.CI),
                 WireMaps.str(images, Field.WORKSPACE),
-                WireMaps.str(images, Field.DESK));
+                WireMaps.str(images, Field.DESK),
+                WireMaps.str(images, Field.AGENT));
     return new SystemRunnerAck(
         slotImages,
         WireMaps.str(extensions, Field.PROBE_IMAGE),

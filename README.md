@@ -101,22 +101,22 @@ the value last reported — so a growing lease costs one frame per 64 MiB, not o
 A spec carries an image, an environment, a user and limits — nothing else. Everything below is
 fixed in the runner (`SlotPolicy`, every cell asserted by `SlotPolicyTest`):
 
-| | CI | WORKSPACE | DESK |
-|---|---|---|---|
-| image must start with | `Ack.slotImages.ci` | `Ack.slotImages.workspace` | `Ack.slotImages.desk` |
-| user | spec, never 0 | spec, never 0 | spec, never 0 |
-| `/claude-home` | never | credential volume, rw | credential volume, rw |
-| `/workspace` | container filesystem | work volume | work volume |
-| caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE |
-| networks | `bridge` + the build network, + `qits-private` where a resolver edge is visible | the lease network, + `qits-private` where a resolver edge is visible | as WORKSPACE |
-| resolvers | the node's; the preferred resolver edge's VIP first where one is visible, else `100.96.0.1` first where the node tunnel answers — and the builder the CI lease dials gets `100.96.0.1` first too where the node tunnel answers | as CI, without the builder | as WORKSPACE |
-| `BUILDKIT_HOST` | injected | never | never |
-| cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no |
-| `--init` | yes | no | yes |
-| restart | no | no | unless-stopped |
-| on ENDED | container removed | container removed, work volume kept | as WORKSPACE |
+| | CI | WORKSPACE | DESK | AGENT |
+|---|---|---|---|---|
+| image must start with | `Ack.slotImages.ci` | `Ack.slotImages.workspace` | `Ack.slotImages.desk` | `Ack.slotImages.agent` |
+| user | spec, never 0 | spec, never 0 | spec, never 0 | spec, never 0 |
+| `/claude-home` | never | credential volume, rw | credential volume, rw | credential volume, rw |
+| `/workspace` | container filesystem | work volume (`ws-<rowId>`) | work volume (`desk-<deskId>`) | work volume (`agent-<agentId>`) |
+| caches | `ci-git` → `/cache/git`, `ci-m2` → `/caches/m2`, `ci-pnpm` → `/caches/pnpm`, `ci-daemon` → `/caches/ci-daemon` | `m2` → `/caches/m2`, `pnpm` → `/caches/pnpm` | as WORKSPACE | as WORKSPACE |
+| networks | `bridge` + the build network, + `qits-private` where a resolver edge is visible | the lease network, + `qits-private` where a resolver edge is visible | as WORKSPACE | as WORKSPACE |
+| resolvers | the node's; the preferred resolver edge's VIP first where one is visible, else `100.96.0.1` first where the node tunnel answers — and the builder the CI lease dials gets `100.96.0.1` first too where the node tunnel answers | as CI, without the builder | as WORKSPACE | as WORKSPACE |
+| `BUILDKIT_HOST` | injected | never | never | never |
+| cap-drop ALL, no-new-privileges | yes, yes | no, no | no, no | no, no |
+| `--init` | yes | no | yes | yes |
+| restart | no | no | unless-stopped | unless-stopped |
+| on ENDED | container removed | container removed, work volume kept | as WORKSPACE | as WORKSPACE |
 
-Only a CI lease is created on `bridge`; a WORKSPACE or DESK lease is created on the **lease network**
+Only a CI lease is created on `bridge`; a WORKSPACE, DESK or AGENT lease is created on the **lease network**
 `qits-system-runner-leases-<id8>` (qits-2269, `LeaseNetwork`), a bridge of the runner's own,
 owner-labelled, with `com.docker.network.bridge.enable_icc=false` so two leases never reach each
 other over it. On docker's default `bridge` a lease's `--dns` servers go straight into its
@@ -124,9 +124,9 @@ other over it. On docker's default `bridge` a lease's `--dns` servers go straigh
 the LAN upstream's public answer wins and the edge answers 421. On a user-defined network the lease
 gets `nameserver 127.0.0.11`, docker's embedded DNS, which asks the `--dns` servers in order — from
 the `docker create` on, since the lease network is its `--network`. The runner looks the network up
-before every WORKSPACE or DESK `docker create` and makes it only when docker says it
+before every WORKSPACE, DESK or AGENT `docker create` and makes it only when docker says it
 is absent; one docker cannot say about, or cannot make, fails the lease with docker's words — never a
-fallback to `bridge`. A running WORKSPACE or DESK lease not on it (one from before) is reported
+fallback to `bridge`. A running WORKSPACE, DESK or AGENT lease not on it (one from before) is reported
 `resolversStale` whatever its resolvers, with one WARN, until its owner refreshes it through the
 generation.
 
@@ -221,17 +221,18 @@ a connect that fails removes the container again and fails the lease.
 
 **Every network is joined before the lease starts** (qits-2270): the runner makes the container
 with `docker create`, joins `qits-private` and the build network with `docker network connect`,
-and only then runs `docker start` — for every type. A WORKSPACE or DESK lease is created on the
+and only then runs `docker start` — for every type. A WORKSPACE, DESK or AGENT lease is created on the
 lease network already, so only CI needs the join for its resolvers. A container on `bridge` alone has its `--dns` servers in
 `/etc/resolv.conf` as they are; once it is on a user-defined network, it has docker's embedded DNS
 (`127.0.0.11`), which asks them in order. On a tunnel node a CI lease started before the join saw
 the tunnel's resolver and a public one side by side, and musl in the ci-slot image asks both at
 once, so a private app could resolve to the public edge (exit 3, a 421 from the public edge). The
 builder needs no such step: it runs on the build network only, so it has docker's embedded DNS
-from its start. Its user is the spec's (1001 from qits-ci). WORKSPACE and DESK get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
+from its start. Its user is the spec's (1001 from qits-ci). WORKSPACE, DESK and AGENT get `CLAUDE_CONFIG_DIR=/claude-home/.claude`
 from the policy; a spec env key the policy owns — `BUILDKIT_HOST`, `HOME`, `CLAUDE_CONFIG_DIR` — is
 `FAILED` with a detail naming it. A WORKSPACE lease's work key is `ws-<rowId>`, a DESK lease's
-`desk-<deskId>`.
+`desk-<deskId>`, an AGENT lease's `agent-<agentId>`. AGENT (qits-2519, qits-agents' long-running
+agent) is DESK's policy in every cell but its work key.
 
 ### Legacy adoption
 
@@ -242,6 +243,7 @@ takes over. Only names matching the retired runners' own patterns are accepted
 - WORKSPACE: `^qits-workspaces-runner-ws-[0-9]+-[0-9a-f]{8}$` (the workspace row id, a plain
   decimal `long`, never a uuid)
 - DESK: `^qits-projects-desk-runner-desk-[0-9a-f-]{36}-[0-9a-f]{8}$`
+- CI and AGENT: none — no retired runner ever held them, so any `adopt` on them is refused
 
 Before the lease starts, the runner stops and removes that container (if present) and mounts that
 volume as `/workspace`. It never creates such a volume, removes one only on a `purges` entry, and
@@ -311,7 +313,7 @@ Claude reads PRESENT only when it is logged in **and** its first-run keys (onboa
 `.claude/settings.json`; the probe and a successful sign-in merge in the ones that are absent and
 never overwrite one that is set (`ClaudeFirstRun`). The keys are not login state (qits-2088): the
 probe merges them into a signed-out volume too (it still reads ABSENT), and the runner makes sure of
-them before every WORKSPACE or DESK lease container is created — in the probe image when it is on
+them before every WORKSPACE, DESK or AGENT lease container is created — in the probe image when it is on
 the node, else the lease's own — so no agent lease starts on an unseeded volume. A merge that fails
 there is logged and never fails the lease.
 
@@ -345,10 +347,10 @@ the running leases by their label.
 | the first-run keys | container `qits-system-runner-first-run-<id8>` (`--rm`) | none — the reconcile removes owner-labelled containers; a teardown item |
 | a sign-in | container `qits-system-runner-sign-in-<harness>-<id8>` (`--rm -i`) | none, likewise |
 
-| the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, `qits-system-runner-ci-daemon-<id8>` (the per-version qits-ci-daemon binary qits-ci's lease bootstrap caches there, qits-1809), created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
+| the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, `qits-system-runner-ci-daemon-<id8>` (the per-version qits-ci-daemon binary qits-ci's lease bootstrap caches there, qits-1809), created on the first CI lease, never mounted into a WORKSPACE, DESK or AGENT lease | `qits.system.runner=<id>` |
 | the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`, `--memory` `_BUILDER_CONCURRENT_BUILDS` × 8 GiB), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
 | the build network | bridge `qits-system-runner-build-<id8>` | `qits.system.runner=<id>` |
-| the lease network | bridge `qits-system-runner-leases-<id8>` (`enable_icc=false`), every WORKSPACE and DESK lease's at `docker create`; a teardown item, after every container | `qits.system.runner=<id>` |
+| the lease network | bridge `qits-system-runner-leases-<id8>` (`enable_icc=false`), every WORKSPACE, DESK and AGENT lease's at `docker create`; a teardown item, after every container | `qits.system.runner=<id>` |
 | the builder's state | volume `qits-system-runner-buildkitd-state-<id8>` | `qits.system.runner.buildkitd=state` |
 
 Never `qits-buildkitd` or `qits-buildkitd-state`: those are qits-containers' platform builder and
@@ -408,7 +410,7 @@ for the runner too.
 | `QITS_SYSTEM_RUNNER_ID` | The target id the targets page minted. | required |
 | `QITS_SYSTEM_RUNNER_REGISTRATION_TOKEN` | One-time registration token, needed until registered. | required until registered |
 | `QITS_SYSTEM_RUNNER_SLOTS` | How many leases this machine runs. **The server takes it as the target's total.** | `1` |
-| `QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME` | An existing docker volume every WORKSPACE and DESK lease (and the login probe) mounts at `/claude-home`; `-` for the runner's own. Recorded in `node-volumes.json`. | unset: the recorded one, else `qits-system-runner-dot-claude-<id8>` |
+| `QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME` | An existing docker volume every WORKSPACE, DESK and AGENT lease (and the login probe) mounts at `/claude-home`; `-` for the runner's own. Recorded in `node-volumes.json`. | unset: the recorded one, else `qits-system-runner-dot-claude-<id8>` |
 | `QITS_SYSTEM_RUNNER_M2_VOLUME` | Likewise for `/caches/m2`. | unset: the recorded one, else the runner's own |
 | `QITS_SYSTEM_RUNNER_PNPM_VOLUME` | Likewise for `/caches/pnpm`. | unset: the recorded one, else the runner's own |
 | `QITS_SYSTEM_RUNNER_STATE_DIR` | Where `client.json` and `node-volumes.json` live — the state volume's mount point. | `/var/lib/qits-system-runner` |
@@ -442,7 +444,7 @@ frames are this repository's (`SystemRunnerCodec`).
 
     runner → hello{runnerVersion, capabilityVersion, slots, capabilities{docker, arch, os, labels,
              slots, engineId, hostname, credentialVolume, buildkit}, heldLeases}
-    ack{capabilityVersion, slots, slotImages{ci, workspace, desk}, probeImage, registryMirrors, adoptedLeases}
+    ack{capabilityVersion, slots, slotImages{ci, workspace, desk, agent?}, probeImage, registryMirrors, adoptedLeases}
     estate{leases:[{leaseId, slotType, desired, spec, specHash, workVolume, adopt{container, volume}}], purges:[name],
            warmImages:[image]}
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail,
@@ -455,11 +457,11 @@ frames are this repository's (`SystemRunnerCodec`).
     signInCode{signInId, code}   signInCancel{signInId}          (loginState after SUCCEEDED)
     upgrade{…} … retire{…} … quarantined{…} … reinstated{…}
 
-`slotType` is `CI|WORKSPACE|DESK`, `desired` `RUNNING|ENDED`, `state`
+`slotType` is `CI|WORKSPACE|DESK|AGENT`, `desired` `RUNNING|ENDED`, `state`
 `STARTING|RUNNING|EXITED|FAILED|ENDED`, a sign-in's `state`
 `STARTING|AWAITING_CODE|AWAITING_BROWSER|SUCCEEDED|FAILED|EXPIRED|CANCELLED`. `spec` is `{image, env{}, user, limits{memory, memorySwap,
 pidsLimit, cpus, oomScoreAdj}}`; `workVolume` is the lease's **work key** (`ws-<rowId>`,
-`desk-<deskId>`, null for CI), from which the runner derives the volume's name. `warmImages` is a
+`desk-<deskId>`, `agent-<agentId>`, null for CI), from which the runner derives the volume's name. `warmImages` is a
 list of full image references (`registry…/qits/workspace:<version>`, or `…@sha256:<digest>`) to keep
 pulled; absent or null is empty, which is what a server before it sends, so it is not a capability
 bump — both codecs ignore a field they do not know. The `?` fields of an `inventory` (qits-1818) are

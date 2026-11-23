@@ -8,26 +8,26 @@ import java.util.regex.Pattern;
 
 /**
  * The node volumes an operator named instead of the runner's own: {@code
- * QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME}, {@code …_M2_VOLUME} and {@code …_PNPM_VOLUME}, install page
- * tuning the line passes through to the runner's container. On the platform host they name the
+ * QITS_SYSTEM_RUNNER_CREDENTIAL_VOLUME}, {@code …_M2_VOLUME} and {@code …_PNPM_VOLUME}, install
+ * page tuning the line passes through to the runner's container. On the platform host they name the
  * volumes every other container there mounts — {@code qits_shared_dot_claude}, {@code
  * qits_shared_m2}, {@code qits_shared_pnpm} — so the target's one credential volume is the one the
  * admin workspaces and qits-workspaces' transcript archive already use.
  *
  * <p><b>An external volume is never the runner's.</b> It is mounted where the runner's own node
- * volume would be — by every WORKSPACE and DESK lease and by the login probe — and nothing else:
- * never created, never labelled, never removed. A lease started while it is missing fails rather
- * than letting {@code docker run -v} make an empty one. Exactly {@value #OWN} means the runner's own
- * volume.
+ * volume would be — by every WORKSPACE, DESK and AGENT lease and by the login probe — and nothing
+ * else: never created, never labelled, never removed. A lease started while it is missing fails
+ * rather than letting {@code docker run -v} make an empty one. Exactly {@value #OWN} means the
+ * runner's own volume.
  *
  * <p><b>The choice outlives a reinstall</b> (qits-2088): a rotate-token install line carries only
  * the url, the id, the registration token and the slots, so a reinstalled runner that read these
  * three from its environment alone would fall back to its own volumes — an empty {@code
- * /claude-home}, and every running WORKSPACE and DESK lease recreated onto it, because the mounts
- * hash covers the names. {@link Main} therefore resolves them through {@link NodeVolumeRecord}:
- * a set variable wins and is recorded in the state volume, {@value #OWN} resets to the runner's
- * own, and an unset or blank one means what the record says. Removing a volume stays the
- * decommission's job; neither the record nor a reset ever removes one.
+ * /claude-home}, and every running WORKSPACE, DESK and AGENT lease recreated onto it, because the
+ * mounts hash covers the names. {@link Main} therefore resolves them through {@link
+ * NodeVolumeRecord}: a set variable wins and is recorded in the state volume, {@value #OWN} resets
+ * to the runner's own, and an unset or blank one means what the record says. Removing a volume
+ * stays the decommission's job; neither the record nor a reset ever removes one.
  *
  * <p>An invalid name — set or recorded — is a refusal to start ({@code RunnerExit.MISCONFIGURED}),
  * as any other bad setting is. qits-projects-desk-runner-daemon's {@code ExternalVolumes}, with the

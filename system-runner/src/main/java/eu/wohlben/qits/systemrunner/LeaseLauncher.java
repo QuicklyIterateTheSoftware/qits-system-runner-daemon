@@ -35,8 +35,8 @@ import org.jboss.logging.Logger;
  *       converges the estate again. A failed pull is {@code FAILED} with docker's words;
  *   <li><b>RUNNING</b>, no container, the images here → every external node volume asked after, the adopted container stopped and removed and the
  *       adopted volume asked after — or the work volume and the runner's own node volumes made
- *       labelled — then, for a WORKSPACE or DESK lease, Claude Code's first-run keys made sure of
- *       on the credential volume ({@link ClaudeFirstRun}), then {@code create}, each network join and
+ *       labelled — then, for a WORKSPACE, DESK or AGENT lease, Claude Code's first-run keys made
+ *       sure of on the credential volume ({@link ClaudeFirstRun}), then {@code create}, each network join and
  *       {@code start} ({@link #launch});
  *   <li><b>RUNNING</b>, a container whose {@code spec-hash}, {@code mounts} and {@code generation}
  *       labels are the entry's — an absent generation label is {@code 0}, an entry's absent
@@ -52,25 +52,24 @@ import org.jboss.logging.Logger;
  *   <li><b>ENDED</b> → {@code stop}, {@code rm}; the work volume stays until a purge names it.
  * </ul>
  *
- * <p><b>A WORKSPACE or DESK lease runs on the lease network</b> ({@link LeaseNetwork}, qits-2269),
- * made sure of before each of their {@code docker create}s and named as the create's {@code
- * --network} — one that cannot be made fails the lease with docker's words, never falling back to
- * {@code bridge}; <b>only a CI lease is on {@code bridge}</b>. Where a preferred resolver edge is
- * visible on the node's daemon (qits-2062, qits-2304), a lease is also on {@code qits-private} with
- * that edge's VIP as its first resolver ({@link PrivateEdge}): asked just before each create, and
- * joined ({@code ContainerSpec.extraNetworks}, {@code --dns}) after the {@code docker create} and
- * before the {@code docker start}, so no process runs before the join (qits-2270). A join that
- * fails removes the container and fails the lease. Off the platform host there is no overlay and
- * the lease runs on its create's network with the node's resolvers — unless the node runs the node
- * tunnel: where the tunnel's DNS at {@code 100.96.0.1} answers, the lease stays on that network
- * alone and gets
- * that address as its first resolver, followed by the runner's own ({@link NodeTunnel},
- * qits-2068), so private names resolve through the tunnel — on the lease network through docker's
- * embedded DNS, which asks them in that order. Nothing of either is hashed, still: the runner does
- * not recreate a running lease when the edge arrives or moves, or the tunnel comes or goes. Each
- * lease's resolvers are reported instead, with whether they are stale against the node's choice
- * now ({@link NodeResolvers}), and refreshed only by the owner through the lease's generation
- * (qits-2091).
+ * <p><b>A WORKSPACE, DESK or AGENT lease runs on the lease network</b> ({@link LeaseNetwork},
+ * qits-2269), made sure of before each of their {@code docker create}s and named as the create's
+ * {@code --network} — one that cannot be made fails the lease with docker's words, never falling
+ * back to {@code bridge}; <b>only a CI lease is on {@code bridge}</b>. Where a preferred resolver
+ * edge is visible on the node's daemon (qits-2062, qits-2304), a lease is also on {@code
+ * qits-private} with that edge's VIP as its first resolver ({@link PrivateEdge}): asked just before
+ * each create, and joined ({@code ContainerSpec.extraNetworks}, {@code --dns}) after the {@code
+ * docker create} and before the {@code docker start}, so no process runs before the join
+ * (qits-2270). A join that fails removes the container and fails the lease. Off the platform host
+ * there is no overlay and the lease runs on its create's network with the node's resolvers — unless
+ * the node runs the node tunnel: where the tunnel's DNS at {@code 100.96.0.1} answers, the lease
+ * stays on that network alone and gets that address as its first resolver, followed by the runner's
+ * own ({@link NodeTunnel}, qits-2068), so private names resolve through the tunnel — on the lease
+ * network through docker's embedded DNS, which asks them in that order. Nothing of either is
+ * hashed, still: the runner does not recreate a running lease when the edge arrives or moves, or
+ * the tunnel comes or goes. Each lease's resolvers are reported instead, with whether they are
+ * stale against the node's choice now ({@link NodeResolvers}), and refreshed only by the owner
+ * through the lease's generation (qits-2091).
  *
  * <p><b>A CI lease</b> starts the target's {@link BuildPlane} first (on the first one, and
  * re-checked on every later one), makes the CI caches labelled, runs with {@code BUILDKIT_HOST}
@@ -138,7 +137,7 @@ final class LeaseLauncher {
   private final Supplier<String> probeImage;
 
   /**
-   * @param leaseNetwork the network WORKSPACE and DESK leases run on (qits-2269)
+   * @param leaseNetwork the network WORKSPACE, DESK and AGENT leases run on (qits-2269)
    * @param firstRun the login probe's: the same volume, container name and deadline, one run at a
    *     time with the probe's own
    * @param probeImage the latest {@code Ack.probeImage}, null when the host named none

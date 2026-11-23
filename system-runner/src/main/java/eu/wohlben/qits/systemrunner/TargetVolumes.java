@@ -37,7 +37,7 @@ import java.util.Optional;
  *       qits-system-runner-ci-m2-<id8>}, {@code qits-system-runner-ci-pnpm-<id8>}, {@code
  *       qits-system-runner-ci-daemon-<id8>} (the per-version qits-ci-daemon binary qits-ci's lease
  *       bootstrap caches there, qits-1809), always the runner's own, created labelled on the first
- *       CI lease and never mounted into a WORKSPACE or DESK lease.
+ *       CI lease and never mounted into a WORKSPACE, DESK or AGENT lease.
  * </ul>
  *
  * <p>The node volumes are labelled with the runner's ownership label alone: they belong to no

@@ -8,11 +8,17 @@ package eu.wohlben.qits.systemrunner.protocol;
  * @param ci the CI step images' prefix
  * @param workspace the workspace image's prefix
  * @param desk the project-agent image's prefix
+ * @param agent the long-running agent image's prefix (qits-2519); null from a host that names none
  */
-public record SlotImages(String ci, String workspace, String desk) {
+public record SlotImages(String ci, String workspace, String desk, String agent) {
 
   /** None known: every lease is refused until an {@code Ack} names them. */
-  public static final SlotImages NONE = new SlotImages(null, null, null);
+  public static final SlotImages NONE = new SlotImages(null, null, null, null);
+
+  /** Without an agent prefix, as a host before qits-2519 names them: every AGENT is refused. */
+  public SlotImages(String ci, String workspace, String desk) {
+    this(ci, workspace, desk, null);
+  }
 
   /** {@code type}'s prefix, or null. */
   public String of(SlotType type) {
@@ -20,6 +26,7 @@ public record SlotImages(String ci, String workspace, String desk) {
       case CI -> ci;
       case WORKSPACE -> workspace;
       case DESK -> desk;
+      case AGENT -> agent;
     };
   }
 }

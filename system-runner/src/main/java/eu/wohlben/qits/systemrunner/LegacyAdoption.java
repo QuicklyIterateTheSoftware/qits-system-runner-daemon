@@ -19,6 +19,9 @@ import java.util.regex.Pattern;
  *   <li>DESK: qits-projects-desk-runner-daemon's {@code qits-projects-desk-runner-desk-<36>-<id8>}.
  * </ul>
  *
+ * <p>CI and AGENT have none: AGENT (qits-2519) was born on this runner, so nothing retired holds
+ * its containers or volumes.
+ *
  * <p>Before the lease starts the runner stops and removes that container (if present) and mounts
  * that volume as the work volume. It never creates such a volume, and it removes one only on an
  * explicit {@code purges} entry ({@link #purgeable}). A name outside the patterns — or an adopt on a
@@ -41,7 +44,8 @@ final class LegacyAdoption {
     return switch (type) {
       case WORKSPACE -> Optional.of(WORKSPACE);
       case DESK -> Optional.of(DESK);
-      case CI -> Optional.empty();
+      // AGENT (qits-2519) never had a retired runner of its own: nothing to adopt, as for CI
+      case CI, AGENT -> Optional.empty();
     };
   }
 

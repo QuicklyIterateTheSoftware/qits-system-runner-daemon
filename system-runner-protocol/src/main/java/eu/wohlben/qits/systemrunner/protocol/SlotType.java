@@ -16,5 +16,7 @@ public enum SlotType {
   /** A coding workspace: qits-workspaces' row, its work volume {@code ws-<rowId>}. */
   WORKSPACE,
   /** A project front desk: qits-projects' desk, its work volume {@code desk-<deskId>}. */
-  DESK
+  DESK,
+  /** A long-running agent: qits-agents' agent, its work volume {@code agent-<agentId>}. */
+  AGENT
 }

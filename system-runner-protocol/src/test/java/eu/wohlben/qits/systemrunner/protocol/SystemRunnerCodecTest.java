@@ -250,6 +250,66 @@ class SystemRunnerCodecTest {
     assertNull(none.registryMirrors(), "not sent is not empty");
   }
 
+  @Test
+  void theAgentImagePrefixIsSpelledLastInSlotImagesAndAnAckWithoutItReadsAsNone() {
+    SystemRunnerAck ext =
+        new SystemRunnerAck(
+            new SlotImages(
+                "registry.qits.example.eu/qits/ci-",
+                "registry.qits.example.eu/qits/workspace",
+                "registry.qits.example.eu/qits/project-agent",
+                "registry.qits.example.eu/qits/agent"),
+            null,
+            null);
+    Map<String, Object> ackWire = CODEC.encode(new Ack(1, 4, List.of(), ext.extensions()));
+    assertEquals(ext, SystemRunnerAck.of((Ack) CODEC.decode(ackWire)));
+    assertEquals(
+        "{\"type\":\"ack\",\"capabilityVersion\":1,\"slots\":4,\"slotImages\":{\"ci\":"
+            + "\"registry.qits.example.eu/qits/ci-\",\"workspace\":"
+            + "\"registry.qits.example.eu/qits/workspace\",\"desk\":"
+            + "\"registry.qits.example.eu/qits/project-agent\",\"agent\":"
+            + "\"registry.qits.example.eu/qits/agent\"},\"probeImage\":null,"
+            + "\"registryMirrors\":null,\"adoptedLeases\":[]}",
+        Json.write(ackWire));
+    assertEquals(
+        "registry.qits.example.eu/qits/agent",
+        SystemRunnerAck.of((Ack) CODEC.decode(ackWire)).slotImages().of(SlotType.AGENT));
+
+    // A server from before qits-2519 sends slotImages{ci, workspace, desk} alone.
+    Map<String, Object> images = new LinkedHashMap<>();
+    images.put("ci", "registry.qits.example.eu/qits/ci-");
+    images.put("workspace", "registry.qits.example.eu/qits/workspace");
+    images.put("desk", "registry.qits.example.eu/qits/project-agent");
+    Map<String, Object> old = new LinkedHashMap<>();
+    old.put("slotImages", images);
+    SlotImages decoded = SystemRunnerAck.of(old).slotImages();
+    assertEquals(
+        new SlotImages(
+            "registry.qits.example.eu/qits/ci-",
+            "registry.qits.example.eu/qits/workspace",
+            "registry.qits.example.eu/qits/project-agent"),
+        decoded);
+    assertNull(decoded.agent());
+    assertNull(decoded.of(SlotType.AGENT), "no agent prefix: every AGENT lease is refused");
+    assertNull(SlotImages.NONE.of(SlotType.AGENT));
+  }
+
+  @Test
+  void anAgentLeaseIsSpelledByItsNameAndRoundTrips() {
+    LeaseEntry agent =
+        new LeaseEntry(L1, SlotType.AGENT, DesiredState.RUNNING, fullSpec(), "h", "agent-7", null);
+    Estate estate = new Estate(List.of(agent), List.of());
+    Map<String, Object> wire = CODEC.encode(estate);
+    assertEquals(estate, CODEC.decode(wire));
+    assertEquals(
+        "AGENT",
+        ((Map<?, ?>) ((List<?>) wire.get("leases")).getFirst()).get("slotType"));
+    Estate decoded =
+        (Estate)
+            CODEC.decode(estateOf(Map.of("leaseId", L2, "slotType", "AGENT", "desired", "ENDED")));
+    assertEquals(SlotType.AGENT, decoded.leases().getFirst().slotType());
+  }
+
   // --- the golden spelling ---------------------------------------------------------------------
 
   private static final String FULL_SPEC_JSON =

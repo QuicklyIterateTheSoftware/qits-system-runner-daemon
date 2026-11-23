@@ -30,9 +30,11 @@ class SlotPolicyTest {
 
   private static final String REGISTRY = "registry.qits.example.eu/qits/";
   private static final SlotImages IMAGES =
-      new SlotImages(REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent");
+      new SlotImages(
+          REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent", REGISTRY + "agent");
   private static final String WS_IMAGE = REGISTRY + "workspace:2026.1023.1";
   private static final String DESK_IMAGE = REGISTRY + "project-agent:2026.1023.1";
+  private static final String AGENT_IMAGE = REGISTRY + "agent:2026.1123.1";
   private static final String CI_IMAGE = REGISTRY + "ci-slot@sha256:abc";
   private static final String NAME = "qits-system-runner-lease-l1-1a2b3c4d";
   private static final SlotPolicy.Mounts MOUNTS =
@@ -154,7 +156,7 @@ class SlotPolicyTest {
 
   @Test
   void aWorkspaceOrDeskLeaseNeverMountsACiCacheOrGetsBuildkitHost() {
-    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
+    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK, SlotType.AGENT)) {
       ContainerSpec c =
           SlotPolicy.of(type)
               .containerSpec(NAME, spec(imageOf(type), env(), "1000"), ALL_MOUNTS, BUILD, LEASES);
@@ -171,7 +173,7 @@ class SlotPolicyTest {
 
   @Test
   void aWorkspaceOrDeskLeaseWithoutItsLeaseNetworkIsNeverSpecified() {
-    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
+    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK, SlotType.AGENT)) {
       SlotPolicy policy = SlotPolicy.of(type);
       for (String none : java.util.Arrays.asList(null, "", " ")) {
         assertThrows(
@@ -253,6 +255,48 @@ class SlotPolicyTest {
     assertContainer(c, DESK_IMAGE, "1234", true);
   }
 
+  @Test
+  void agentIsTheDesksColumnButItsWorkKey() {
+    SlotPolicy agent = SlotPolicy.of(SlotType.AGENT);
+    assertEquals(SlotType.AGENT, agent.type);
+    assertTrue(agent.enabled);
+    assertTrue(agent.credentialHome);
+    assertTrue(agent.workVolume);
+    assertEquals(List.of(Cache.M2, Cache.PNPM), agent.caches);
+    assertFalse(agent.buildNetwork);
+    assertFalse(agent.injectsBuildkitHost);
+    assertFalse(agent.capDropAll);
+    assertFalse(agent.noNewPrivileges);
+    assertTrue(agent.init, "--init, as the desk");
+    assertTrue(agent.restartUnlessStopped);
+    assertTrue(agent.lifecycle().restartsUnlessStopped(), "restart: unless-stopped");
+    assertEquals("agent-", agent.workKeyPrefix);
+    assertEquals(SlotPolicy.RunNetwork.LEASE, agent.runNetwork, "the lease network (qits-2269)");
+    assertTrue(agent.onLeaseNetwork());
+    assertTrue(agent.agentVolumes());
+    assertEquals(LEASES, agent.runNetwork(LEASES));
+    assertEquals(List.of(LEASES), agent.networks(null, LEASES));
+
+    ContainerSpec c = agent.containerSpec(NAME, spec(AGENT_IMAGE, env(), "1234"), MOUNTS, LEASES);
+    assertContainer(c, AGENT_IMAGE, "1234", true);
+
+    SlotPolicy desk = SlotPolicy.DESK;
+    assertEquals(desk.enabled, agent.enabled);
+    assertEquals(desk.credentialHome, agent.credentialHome);
+    assertEquals(desk.workVolume, agent.workVolume);
+    assertEquals(desk.caches, agent.caches);
+    assertEquals(desk.buildNetwork, agent.buildNetwork);
+    assertEquals(desk.injectsBuildkitHost, agent.injectsBuildkitHost);
+    assertEquals(desk.capDropAll, agent.capDropAll);
+    assertEquals(desk.noNewPrivileges, agent.noNewPrivileges);
+    assertEquals(desk.init, agent.init);
+    assertEquals(desk.restartUnlessStopped, agent.restartUnlessStopped);
+    assertEquals(desk.runNetwork, agent.runNetwork);
+    assertEquals(
+        desk.containerSpec(NAME, spec(AGENT_IMAGE, env(), "1234"), MOUNTS, LEASES), c,
+        "the same container spec as a desk's, cell for cell");
+  }
+
   /**
    * What WORKSPACE and DESK share: the spec's image, user, env and limits; the credential volume
    * at {@code /claude-home} and {@code CLAUDE_CONFIG_DIR} beside it; the work volume at {@code
@@ -291,13 +335,13 @@ class SlotPolicyTest {
 
   @Test
   void aWorkspaceOrDeskLeaseAlwaysMountsTheCredentialVolumeAtClaudeHome() {
-    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK)) {
+    for (SlotType type : List.of(SlotType.WORKSPACE, SlotType.DESK, SlotType.AGENT)) {
       for (String credential : List.of("qits-system-runner-dot-claude-1a2b3c4d", "qits_shared_dot_claude")) {
         ContainerSpec c =
             SlotPolicy.of(type)
                 .containerSpec(
                     NAME,
-                    spec(type == SlotType.DESK ? DESK_IMAGE : WS_IMAGE, Map.of(), "1000"),
+                    spec(imageOf(type), Map.of(), "1000"),
                     new SlotPolicy.Mounts("w", credential, "m", "p"),
                     LEASES);
         assertTrue(
@@ -330,7 +374,7 @@ class SlotPolicyTest {
 
   @Test
   void aSpecEnvKeyThePolicyOwnsIsRefusedNamingIt() {
-    for (SlotType type : List.of(SlotType.CI, SlotType.WORKSPACE, SlotType.DESK)) {
+    for (SlotType type : List.of(SlotType.CI, SlotType.WORKSPACE, SlotType.DESK, SlotType.AGENT)) {
       for (String key : Set.of("BUILDKIT_HOST", "QITS_CI_BUILDER_SLOTS", "HOME", "CLAUDE_CONFIG_DIR")) {
         Map<String, String> env = new LinkedHashMap<>(env());
         env.put(key, "/somewhere");
@@ -357,6 +401,20 @@ class SlotPolicyTest {
             .refusal(entry(SlotType.DESK, spec("docker.io/library/alpine:3", Map.of(), "1000"), "desk-1"), IMAGES)
             .orElseThrow()
             .contains("is not a DESK image"));
+    assertTrue(
+        SlotPolicy.AGENT
+            .refusal(entry(SlotType.AGENT, spec(DESK_IMAGE, Map.of(), "1000"), "agent-1"), IMAGES)
+            .orElseThrow()
+            .contains("is not a AGENT image"));
+    assertTrue(
+        SlotPolicy.AGENT
+            .refusal(
+                entry(SlotType.AGENT, spec(AGENT_IMAGE, Map.of(), "1000"), "agent-1"),
+                new SlotImages(
+                    REGISTRY + "ci-", REGISTRY + "workspace", REGISTRY + "project-agent"))
+            .orElseThrow()
+            .contains("no AGENT image is pinned"),
+        "a host from before qits-2519 names no agent prefix");
     assertTrue(
         SlotPolicy.WORKSPACE
             .refusal(entry(SlotType.WORKSPACE, spec(WS_IMAGE, Map.of(), "1000"), "ws-1"), SlotImages.NONE)
@@ -385,6 +443,18 @@ class SlotPolicyTest {
           Optional.empty(),
           SlotPolicy.DESK.refusal(entry(SlotType.DESK, spec(DESK_IMAGE, Map.of(), user), "desk-1"), IMAGES),
           user);
+      assertEquals(
+          Optional.empty(),
+          SlotPolicy.AGENT.refusal(
+              entry(SlotType.AGENT, spec(AGENT_IMAGE, Map.of(), user), "agent-1"), IMAGES),
+          user);
+    }
+    for (String root : List.of("0", "root", "0:0")) {
+      assertTrue(
+          SlotPolicy.AGENT
+              .refusal(entry(SlotType.AGENT, spec(AGENT_IMAGE, Map.of(), root), "agent-1"), IMAGES)
+              .isPresent(),
+          root);
     }
   }
 
@@ -410,6 +480,26 @@ class SlotPolicyTest {
                 spec(DESK_IMAGE, Map.of(), "1000"),
                 "desk-5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397"),
             IMAGES));
+    for (String wrong : java.util.Arrays.asList(null, "desk-1", "ws-1", "agent-../x")) {
+      assertTrue(
+          SlotPolicy.AGENT
+              .refusal(entry(SlotType.AGENT, spec(AGENT_IMAGE, Map.of(), "1000"), wrong), IMAGES)
+              .isPresent(),
+          String.valueOf(wrong));
+    }
+    assertTrue(
+        SlotPolicy.DESK
+            .refusal(entry(SlotType.DESK, spec(DESK_IMAGE, Map.of(), "1000"), "agent-1"), IMAGES)
+            .isPresent(),
+        "an agent's work key is never a desk's");
+    assertEquals(
+        Optional.empty(),
+        SlotPolicy.AGENT.refusal(
+            entry(
+                SlotType.AGENT,
+                spec(AGENT_IMAGE, Map.of(), "1000"),
+                "agent-5ca0e7e9-7dd8-4128-bbdd-58aa40d9b397"),
+            IMAGES));
   }
 
   // --- fixtures ----------------------------------------------------------------------------------
@@ -434,6 +524,7 @@ class SlotPolicyTest {
       case CI -> CI_IMAGE;
       case WORKSPACE -> WS_IMAGE;
       case DESK -> DESK_IMAGE;
+      case AGENT -> AGENT_IMAGE;
     };
   }
 
@@ -442,6 +533,7 @@ class SlotPolicyTest {
       case CI -> null;
       case WORKSPACE -> "ws-42";
       case DESK -> "desk-7";
+      case AGENT -> "agent-9";
     };
   }
 }

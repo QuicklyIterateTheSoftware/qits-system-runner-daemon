@@ -108,7 +108,7 @@ import org.jboss.logging.Logger;
  * {@code --dns} servers ride its report, with {@code resolversStale} when the node's resolver
  * choice ({@link NodeResolvers}, asked from the periodic look off the converge lock and kept a
  * minute) is not the container's first one — a lease created before the overlay existed, or while
- * the node tunnel did not answer. A WORKSPACE or DESK lease not on the lease network ({@link
+ * the node tunnel did not answer. A WORKSPACE, DESK or AGENT lease not on the lease network ({@link
  * LeaseNetwork}, qits-2269) — one created on {@code bridge} before it — is stale whatever its
  * resolvers, so the owner's refresh moves it over. One WARN per lease that turns stale, none per
  * look; the runner never recreates a lease for it. The owner does, by raising the entry's {@code
@@ -199,7 +199,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /** The build plane with the latest {@code Ack}'s registry mirrors merged in. */
   private volatile BuildPlane buildPlane;
 
-  /** The network WORKSPACE and DESK leases run on (qits-2269). */
+  /** The network WORKSPACE, DESK and AGENT leases run on (qits-2269). */
   private final LeaseNetwork leaseNetwork;
 
   private final HealthChecks healthChecks;
@@ -227,7 +227,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    */
   private final Set<String> staleWarned = ConcurrentHashMap.newKeySet();
 
-  /** The same for a WORKSPACE or DESK lease off the lease network, warned in its own words. */
+  /** The same for a WORKSPACE, DESK or AGENT lease off the lease network, in its own words. */
   private final Set<String> offNetworkWarned = ConcurrentHashMap.newKeySet();
 
   /** The last convergence's STARTING words per lease for {@code inventory}: the pull it awaits. */
@@ -787,7 +787,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
     return List.copyOf(items);
   }
 
-  /** The network WORKSPACE and DESK leases run on. */
+  /** The network WORKSPACE, DESK and AGENT leases run on. */
   LeaseNetwork leaseNetwork() {
     return leaseNetwork;
   }
@@ -1367,7 +1367,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    *
    * <p>A lease with a container carries its resolvers, and whether they are stale against the
    * node's last resolver choice — warned of once when one turns stale (qits-2091) — or, for a
-   * WORKSPACE or DESK lease, because it is not on the lease network (qits-2269).
+   * WORKSPACE, DESK or AGENT lease, because it is not on the lease network (qits-2269).
    */
   Optional<Inventory> inventory(List<LeaseContainers.Seen> now) {
     Map<String, LeaseReport> leases = new HashMap<>();
@@ -1470,7 +1470,7 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
   /**
    * Whether {@code seen} is a lease of a type that runs on the lease network ({@link
    * SlotPolicy#onLeaseNetwork()}) and is on networks that do not include {@code leaseNetwork}: a
-   * WORKSPACE or DESK container from before qits-2269, on {@code bridge}. A container whose
+   * WORKSPACE, DESK or AGENT container from before qits-2269, on {@code bridge}. A container whose
    * networks docker did not say is not counted — never a staleness it may not have — and CI never.
    */
   static boolean offLeaseNetwork(LeaseContainers.Seen seen, String leaseNetwork) {

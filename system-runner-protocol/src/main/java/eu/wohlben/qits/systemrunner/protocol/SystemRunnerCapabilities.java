@@ -20,7 +20,7 @@ import java.util.Map;
  *     legacy adoption matches an old runner's node by
  * @param hostname the docker engine's host name ({@code docker info --format '{{.Name}}'}), or
  *     null: the fallback match when no engine id is recorded
- * @param credentialVolume the credential volume every WORKSPACE and DESK lease mounts
+ * @param credentialVolume the credential volume every WORKSPACE, DESK and AGENT lease mounts
  * @param buildkit whether this target has a build plane; false until the CI feature
  */
 public record SystemRunnerCapabilities(

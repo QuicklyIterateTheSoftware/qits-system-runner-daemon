@@ -20,23 +20,24 @@ import java.util.Set;
  * tenant's volume. {@code SlotPolicyTest} asserts every cell.
  *
  * <pre>
- *                     CI                              WORKSPACE                DESK
- *   image prefix      Ack.slotImages.ci               Ack.slotImages.workspace Ack.slotImages.desk
- *   user              spec, never 0                   spec, never 0            spec, never 0
- *   /claude-home      never                           credential volume, rw    credential volume, rw
- *   /workspace        container filesystem            work volume              work volume
- *   caches            ci-git, ci-m2, ci-pnpm,         m2, pnpm                 m2, pnpm
+ *                     CI                              WORKSPACE                DESK                  AGENT
+ *   image prefix      Ack.slotImages.ci               Ack.slotImages.workspace Ack.slotImages.desk   Ack.slotImages.agent
+ *   user              spec, never 0                   spec, never 0            spec, never 0         spec, never 0
+ *   /claude-home      never                           credential volume, rw    credential volume, rw credential volume, rw
+ *   /workspace        container filesystem            work volume              work volume           work volume
+ *   work volume       none                            ws-<rowId>               desk-<deskId>         agent-<agentId>
+ *   caches            ci-git, ci-m2, ci-pnpm,         m2, pnpm                 m2, pnpm              m2, pnpm
  *                     ci-daemon
- *   networks          bridge + the build network      the lease network        the lease network
- *                     + qits-private (*)              + qits-private (*)       + qits-private (*)
- *   BUILDKIT_HOST     injected                        never                    never
- *   QITS_CI_BUILDER_SLOTS injected                    never                    never
- *   cap-drop / nnp    yes / yes                       no / no                  no / no
- *   --init            yes                             yes                      yes
- *   restart           no                              no                       unless-stopped
+ *   networks          bridge + the build network      the lease network        the lease network     the lease network
+ *                     + qits-private (*)              + qits-private (*)       + qits-private (*)    + qits-private (*)
+ *   BUILDKIT_HOST     injected                        never                    never                 never
+ *   QITS_CI_BUILDER_SLOTS injected                    never                    never                 never
+ *   cap-drop / nnp    yes / yes                       no / no                  no / no               no / no
+ *   --init            yes                             yes                      yes                   yes
+ *   restart           no                              no                       unless-stopped        unless-stopped
  *   on ENDED          container removed               container removed, work volume kept
  *
- *   resolvers         the node's (+)                  the node's (+)           the node's (+)
+ *   resolvers         the node's (+)                  the node's (+)           the node's (+)        the node's (+)
  *
  *   (*) where the private edge is visible on the node's daemon, its VIP the first resolver
  *   (+) the edge's VIP first with (*); else 100.96.0.1 first where the node tunnel's DNS answers
@@ -69,7 +70,7 @@ import java.util.Set;
  * stale against what the node offers now, and refreshed only by the owner through the lease's
  * generation (qits-2091).
  *
- * <p>WORKSPACE and DESK run on the lease network, not docker's default {@code bridge}
+ * <p>WORKSPACE, DESK and AGENT run on the lease network, not docker's default {@code bridge}
  * (qits-2269): on {@code bridge} docker writes the {@code --dns} servers straight into the lease's
  * {@code /etc/resolv.conf}, and musl's resolver asks them all at once, so the LAN's public answer
  * beats the node tunnel's private one; on a user-defined network the lease resolves through
@@ -126,7 +127,25 @@ enum SlotPolicy {
       true,
       true,
       RunNetwork.LEASE,
-      "desk-");
+      "desk-"),
+  /**
+   * A long-running agent (qits-2519): DESK's policy in every cell, its work volume {@code
+   * agent-<agentId>} alone different.
+   */
+  AGENT(
+      SlotType.AGENT,
+      true,
+      true,
+      true,
+      List.of(Cache.M2, Cache.PNPM),
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      RunNetwork.LEASE,
+      "agent-");
 
   /** Where the credential volume lands. */
   static final String CLAUDE_HOME = "/claude-home";
@@ -177,9 +196,9 @@ enum SlotPolicy {
 
   /**
    * The volumes a lease of a type that has them mounts, as the runner named them: the work volume,
-   * the credential volume and the agent caches for WORKSPACE and DESK, the CI caches for CI. A type
-   * never mounts the others' — CI never the credential volume, the agent caches or a work volume,
-   * and WORKSPACE and DESK never a CI cache — whatever this record carries.
+   * the credential volume and the agent caches for WORKSPACE, DESK and AGENT, the CI caches for CI.
+   * A type never mounts the others' — CI never the credential volume, the agent caches or a work
+   * volume, and WORKSPACE, DESK and AGENT never a CI cache — whatever this record carries.
    */
   record Mounts(
       String workVolume,
@@ -264,6 +283,7 @@ enum SlotPolicy {
       case CI -> CI;
       case WORKSPACE -> WORKSPACE;
       case DESK -> DESK;
+      case AGENT -> AGENT;
     };
   }
 
@@ -325,10 +345,10 @@ enum SlotPolicy {
 
   /**
    * The driver's spec of a lease container under this policy. Only for an entry {@link #refusal}
-   * passed. The spec's network is {@link #runNetwork}'s — the lease network for WORKSPACE and DESK
-   * (qits-2269), {@code bridge} for CI — the {@code docker create}'s {@code --network}, with no
-   * extra network and no resolver: a CI lease's build network is {@link #networks}' and joined by
-   * the runner's own connect ({@link BuildPlane#connect}) between the create and the start
+   * passed. The spec's network is {@link #runNetwork}'s — the lease network for WORKSPACE, DESK and
+   * AGENT (qits-2269), {@code bridge} for CI — the {@code docker create}'s {@code --network}, with
+   * no extra network and no resolver: a CI lease's build network is {@link #networks}' and joined
+   * by the runner's own connect ({@link BuildPlane#connect}) between the create and the start
    * (qits-2270), and {@code qits-private} with the edge's VIP as first resolver is {@link
    * PrivateEdge}'s, added to this spec just before the create where the node's daemon has the
    * private edge (qits-2062).
@@ -401,7 +421,7 @@ enum SlotPolicy {
 
   /**
    * The network a lease of this type is created on: {@code leaseNetwork} for
-   * WORKSPACE and DESK, {@code bridge} for CI.
+   * WORKSPACE, DESK and AGENT, {@code bridge} for CI.
    *
    * @throws IllegalStateException for a type on the lease network when it is not named
    */

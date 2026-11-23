@@ -28,8 +28,8 @@ import java.util.Optional;
  * .HostConfig.Dns}}}, qits-2091) — docker prints {@code null} or a JSON array of address literals,
  * read by hand since the native image carries no JSON parser — and its {@code generation} label,
  * so reporting a lease's resolvers costs no docker call of its own. It also reads the networks the
- * container is on ({@code .NetworkSettings.Networks}' names, qits-2269), so a WORKSPACE or DESK
- * lease still on {@code bridge} is reported stale from the same look.
+ * container is on ({@code .NetworkSettings.Networks}' names, qits-2269), so a WORKSPACE, DESK or
+ * AGENT lease still on {@code bridge} is reported stale from the same look.
  */
 final class LeaseContainers {
 

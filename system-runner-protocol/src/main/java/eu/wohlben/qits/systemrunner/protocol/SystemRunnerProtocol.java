@@ -222,6 +222,7 @@ public final class SystemRunnerProtocol {
     public static final String CI = "ci";
     public static final String WORKSPACE = "workspace";
     public static final String DESK = "desk";
+    public static final String AGENT = "agent";
     public static final String PROBE_IMAGE = "probeImage";
     public static final String REGISTRY_MIRRORS = "registryMirrors";
 

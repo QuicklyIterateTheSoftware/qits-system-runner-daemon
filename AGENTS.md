@@ -55,14 +55,14 @@ change to that table, reviewed as one, with the test cell beside it.
   (`LeaseLauncher.launch`). Never the driver's `run`, which starts the container before it joins
   `extraNetworks`: a CI lease on a tunnel node would see the tunnel's resolver beside a public one,
   and musl asks both at once. `EstateReconcileTest` pins the order.
-- **WORKSPACE and DESK run on the runner's lease network, CI on `bridge`** (`LeaseNetwork`,
+- **WORKSPACE, DESK and AGENT run on the runner's lease network, CI on `bridge`** (`LeaseNetwork`,
   qits-2269): `qits-system-runner-leases-<id8>`, owner-labelled, `enable_icc=false`, made by the
-  runner's own `docker network create` when a look says it is absent, before every WORKSPACE or DESK
+  runner's own `docker network create` when a look says it is absent, before every WORKSPACE, DESK or AGENT
   `docker create`, whose `--network` it is — so the lease has docker's embedded `127.0.0.11` from
   the create on. One that cannot be made fails the lease — never a fallback to `bridge`, where
   docker writes the `--dns` servers into resolv.conf and musl asks them all at once. It is the
   create's network (`SlotPolicy.RunNetwork`), a teardown item after every container, and a
-  WORKSPACE or DESK lease found on other networks is reported `resolversStale`.
+  WORKSPACE, DESK or AGENT lease found on other networks is reported `resolversStale`.
 - **Every lease joins `qits-private` with a resolver edge's VIP as first resolver where one of
   `PrivateEdge.APPLICATIONS` is visible on the node's daemon** (`PrivateEdge`, qits-2062,
   qits-2304): `qits-edge-overlay` first, `qits-edge-private` as fallback — the same preference

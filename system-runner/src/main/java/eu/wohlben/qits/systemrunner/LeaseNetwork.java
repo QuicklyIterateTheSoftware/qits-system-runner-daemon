@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * <b>The network WORKSPACE and DESK leases start on</b> (qits-2269): {@code
+ * <b>The network WORKSPACE, DESK and AGENT leases start on</b> (qits-2269): {@code
  * qits-system-runner-leases-<id8>}, a user-defined bridge of the runner's own, in place of docker's
  * default {@code bridge}.
  *
@@ -27,9 +27,9 @@ import java.util.Optional;
  * two leases on one node do not reach each other over it — on {@code bridge} they could, by
  * address. Every call goes through {@link RunnerDocker} under its deadline; the driver's {@code
  * ContainersDriver} has no network create, so the argv is {@link DockerArgv#bridgeNetworkCreate},
- * the bridge an embedder makes by its own decision. Asked at every WORKSPACE or DESK create, never
- * cached, so a network somebody removed by hand is made again by the next lease. It is the domain's
- * {@link TeardownItem}, after every container that may still be on it.
+ * the bridge an embedder makes by its own decision. Asked at every WORKSPACE, DESK or AGENT create,
+ * never cached, so a network somebody removed by hand is made again by the next lease. It is the
+ * domain's {@link TeardownItem}, after every container that may still be on it.
  */
 final class LeaseNetwork {
 

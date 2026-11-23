@@ -20,12 +20,13 @@ import org.jboss.logging.Logger;
  * <b>A lease resolving through the node tunnel where the node has one</b> (qits-2068): a target off
  * the platform host whose host runs the node tunnel reaches the private edge's tunnel address
  * {@value #DNS_ADDRESS} from {@code bridge}, the runner's own container exactly like a lease. Such
- * a lease keeps its run network — the lease network for WORKSPACE and DESK ({@link LeaseNetwork},
- * qits-2269), {@code bridge} for CI — and no other, and gets {@code --dns 100.96.0.1} followed by
- * the runner's own upstreams, so private names resolve to the private edge through the tunnel and
- * every other name resolves there too: since qits-2262 the tunnel resolver forwards it to its own
- * upstream and relays the answer unchanged. The runner's own upstreams that follow are the
- * fallback for when the tunnel or the edge is down, answering with silence or SERVFAIL.
+ * a lease keeps its run network — the lease network for WORKSPACE, DESK and AGENT ({@link
+ * LeaseNetwork}, qits-2269), {@code bridge} for CI — and no other, and gets {@code --dns
+ * 100.96.0.1} followed by the runner's own upstreams, so private names resolve to the private edge
+ * through the tunnel and every other name resolves there too: since qits-2262 the tunnel resolver
+ * forwards it to its own upstream and relays the answer unchanged. The runner's own upstreams that
+ * follow are the fallback for when the tunnel or the edge is down, answering with silence or
+ * SERVFAIL.
  *
  * <p>Asked at every create, after {@link PrivateEdge} and never cached:
  *

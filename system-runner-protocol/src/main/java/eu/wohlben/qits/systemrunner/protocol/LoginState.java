@@ -7,8 +7,8 @@ package eu.wohlben.qits.systemrunner.protocol;
  * @param claude Claude Code's login
  * @param kimi Kimi Code's login
  * @param checkedAt an ISO-8601 instant: when the probe ran
- * @param volume the credential volume the probe mounted — the one every WORKSPACE and DESK lease
- *     mounts at {@code /claude-home}, and the only one the server's login command may name
+ * @param volume the credential volume the probe mounted — the one every WORKSPACE, DESK and AGENT
+ *     lease mounts at {@code /claude-home}, and the only one the server's login command may name
  */
 public record LoginState(LoginPresence claude, LoginPresence kimi, String checkedAt, String volume)
     implements SystemRunnerMessage {

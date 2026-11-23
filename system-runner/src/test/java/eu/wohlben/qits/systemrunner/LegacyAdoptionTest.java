@@ -96,6 +96,16 @@ class LegacyAdoptionTest {
   }
 
   @Test
+  void anAgentLeaseHasNoRetiredRunnerToAdoptFrom() {
+    assertEquals(Optional.empty(), LegacyAdoption.pattern(SlotType.AGENT));
+    assertFalse(LegacyAdoption.allowed(SlotType.AGENT, OLD_WS));
+    assertFalse(LegacyAdoption.allowed(SlotType.AGENT, OLD_DESK));
+    assertEquals(
+        Optional.of("adopt name not allowed"),
+        LegacyAdoption.refusal(entry(SlotType.AGENT, OLD_DESK, OLD_DESK)));
+  }
+
+  @Test
   void onlyARetiredRunnersVolumeOrOneOfTheseRunnersOwnMayBePurged() {
     assertTrue(LegacyAdoption.purgeable(OLD_WS));
     assertTrue(LegacyAdoption.purgeable(OLD_DESK));

@@ -24,7 +24,7 @@ import org.jboss.logging.Logger;
  * thing of the runner's a reinstall keeps (the install script removes only {@code client.json}, and
  * only the decommission removes the volume). Without the record a reinstalled platform-host runner
  * mounted its own empty credential volume instead of {@code qits_shared_dot_claude}, and since the
- * mounts hash covers the names, recreated every running WORKSPACE and DESK lease onto it.
+ * mounts hash covers the names, recreated every running WORKSPACE, DESK and AGENT lease onto it.
  *
  * <p>Each of the three resolves, at every start, as:
  *
