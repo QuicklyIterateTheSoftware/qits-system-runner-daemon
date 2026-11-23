@@ -89,7 +89,9 @@ read-only); without it every cgroup-derived fact is null, never an error.
   (`/proc/vmstat`: every OOM kill on the physical host), `node.memoryMaxBytes` (the root's
   `memory.max`, null when `max`), and `node.memoryTotalBytes` (`/proc/meminfo`'s `MemTotal`,
   qits-2362: the figure left to size a bare host by — localhost, a workstation — whose root
-  cgroup is always `max`).
+  cgroup is always `max`), and `node.builderMemoryBytes` (qits-2503: the shared builder's
+  `--memory` cap, `_BUILDER_CONCURRENT_BUILDS` × 6 GiB — configuration, reported whether or not the
+  builder exists, because its builds run outside every lease's cap).
 
 A change in any OOM counter sends an `inventory`; the peak does not, until it grew by 64 MiB from
 the value last reported — so a growing lease costs one frame per 64 MiB, not one per look.
@@ -344,7 +346,7 @@ the running leases by their label.
 | a sign-in | container `qits-system-runner-sign-in-<harness>-<id8>` (`--rm -i`) | none, likewise |
 
 | the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, `qits-system-runner-ci-daemon-<id8>` (the per-version qits-ci-daemon binary qits-ci's lease bootstrap caches there, qits-1809), created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
-| the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
+| the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`, `--memory` `_BUILDER_CONCURRENT_BUILDS` × 6 GiB), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
 | the build network | bridge `qits-system-runner-build-<id8>` | `qits.system.runner=<id>` |
 | the lease network | bridge `qits-system-runner-leases-<id8>` (`enable_icc=false`), every WORKSPACE and DESK lease's at `docker create`; a teardown item, after every container | `qits.system.runner=<id>` |
 | the builder's state | volume `qits-system-runner-buildkitd-state-<id8>` | `qits.system.runner.buildkitd=state` |
@@ -358,8 +360,11 @@ its volume, on the same docker on the platform host. No build-plane name is conf
 and re-checked on every later one: the network and the state volume made, the builder run (its
 image pulled in the background when absent, the CI lease `STARTING` meanwhile; pre-pulled at the
 `Ack` on a target with slots) or started, or replaced when its **stamp** — a hash of the image, the
-rendered `buildkitd.toml`, the bootstrap and the state volume — moved; the state volume rides
-across. A container under the builder's name without the stamp label is somebody else's: the CI
+rendered `buildkitd.toml`, the bootstrap, the state volume and the memory cap — moved; the state volume rides
+across. The builder runs under `--memory` `_BUILDER_CONCURRENT_BUILDS` × 6 GiB (qits-2503, no
+`--memory-swap`): the builds a CI lease sends it — a native-image `RUN` takes about 6 GiB, the same as
+a CI lease's own cap — run in its cgroup, not the lease's, so the cap is what placement can count. It
+is derived, with no setting of its own, and its arrival in the stamp replaced every builder once. A container under the builder's name without the stamp label is somebody else's: the CI
 lease fails and the container is left alone. The toml bounds the worker (`max-parallelism` —
 `_BUILDKIT_MAX_PARALLELISM` when set, else the runner's own slot total — it only sets how far an
 admitted build fans out, since the build gate below bounds how many builds run; GC at 72h / 20 GiB) and carries one `[registry."host"]` table per
@@ -381,7 +386,7 @@ buildkitd's own per-operation semaphore instead.
 Health: `buildkit` fails on a stopped builder or a foreign container under its name, and is ok
 while no CI lease ever needed one. A stale stamp is ok too, with `data.stale: true` (qits-2090): the
 next CI lease replaces the builder, and a failure would quarantine the target, so it would never be
-granted that CI lease. The stamp moves with an image bump and whenever the node tunnel comes or goes.
+granted that CI lease. The stamp moves with an image bump, a changed `_BUILDER_CONCURRENT_BUILDS` (the memory cap) and whenever the node tunnel comes or goes.
 Its `data` carries the builder's own `resolvers` alongside `configuredStamp`, so an operator can see whether the node tunnel's is in effect. `network`
 is ok while missing only when no builder exists. Both are read-only. There is no uid/gid range
 check: a host whose user namespace maps fewer than the full 32-bit id space is not unhealthy for it
@@ -437,7 +442,8 @@ frames are this repository's (`SystemRunnerCodec`).
            warmImages:[image]}
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail,
                        oomKills?, oomEvents?, memoryPeakBytes?, oomKilled?}], volumes:[name],
-                       node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?, memoryTotalBytes?}}
+                       node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?, memoryTotalBytes?,
+                             builderMemoryBytes?}}
     probeLogin → loginState{claude, kimi, checkedAt, volume}                (PRESENT|ABSENT|UNKNOWN)
     healthCheck{requestId} → healthChecked{ok, detail, requestId, checks:[{name, ok, detail, data}]}
     signIn{signInId, harness} → signInProgress{signInId, harness, state, url, userCode, detail} …

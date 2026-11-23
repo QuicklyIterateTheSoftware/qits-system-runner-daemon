@@ -85,20 +85,20 @@ class MemorySamplerTest {
     Files.writeString(tmp.resolve("meminfo"), "MemTotal:       16777216 kB\n");
     MemorySampler sampler = sampler();
     sampler.sample(List.of());
-    assertEquals(new NodeMemory(292L, 297L, 32L << 30, 16777216L * 1024), sampler.node());
+    assertEquals(new NodeMemory(292L, 297L, 32L << 30, 16777216L * 1024, null), sampler.node());
   }
 
   @Test
   void aBareHostsRootHasNoMemoryEventsAndOnlyTheKernelsCountAndTheTotalAreLeft() throws IOException {
     MemorySampler sampler = sampler();
     sampler.sample(List.of());
-    assertEquals(new NodeMemory(null, 297L, null, null), sampler.node(), "meminfo not readable yet");
+    assertEquals(new NodeMemory(null, 297L, null, null, null), sampler.node(), "meminfo not readable yet");
 
     // qits-2362: a bare host's root cgroup has no memory.max at all, so MemTotal is what is left
     // to size the node by.
     Files.writeString(tmp.resolve("meminfo"), "MemTotal:       8388608 kB\n");
     sampler.sample(List.of());
-    assertEquals(new NodeMemory(null, 297L, null, 8388608L * 1024), sampler.node());
+    assertEquals(new NodeMemory(null, 297L, null, 8388608L * 1024, null), sampler.node());
   }
 
   @Test
@@ -106,7 +106,7 @@ class MemorySamplerTest {
     MemorySampler sampler =
         new MemorySampler(new CgroupSettings(tmp.resolve("not-bound"), vmstat));
     sampler.sample(List.of(running("l1", ID1)));
-    assertEquals(new NodeMemory(null, 297L, null, null), sampler.node());
+    assertEquals(new NodeMemory(null, 297L, null, null, null), sampler.node());
     assertEquals(MemorySampler.LeaseMemory.NONE, sampler.lease("l1"));
     assertNull(sampler.resolve(ID1));
 
@@ -114,6 +114,23 @@ class MemorySamplerTest {
         new MemorySampler(new CgroupSettings(tmp.resolve("not-bound"), tmp.resolve("no-vmstat")));
     nothing.sample(List.of());
     assertNull(nothing.node(), "nothing read is no node, not a node of nulls");
+  }
+
+  @Test
+  void theBuildersCapIsReportedWhetherOrNotAnythingElseIsRead() throws IOException {
+    // qits-2503: configuration, not a reading — so a node that reads nothing else still reports.
+    MemorySampler nothingElse =
+        new MemorySampler(
+            new CgroupSettings(tmp.resolve("not-bound"), tmp.resolve("no-vmstat")), 6L << 30);
+    nothingElse.sample(List.of());
+    assertEquals(new NodeMemory(null, null, null, null, 6L << 30), nothingElse.node());
+
+    events(root, 9, 292);
+    Files.writeString(tmp.resolve("meminfo"), "MemTotal:       16777216 kB\n");
+    MemorySampler sampler =
+        new MemorySampler(new CgroupSettings(root, vmstat), BuildkitSettings.DEFAULTS.memoryCapBytes());
+    sampler.sample(List.of());
+    assertEquals(new NodeMemory(292L, 297L, null, 16777216L * 1024, 6L << 30), sampler.node());
   }
 
   // ---- finding a lease's cgroup ------------------------------------------------------------------

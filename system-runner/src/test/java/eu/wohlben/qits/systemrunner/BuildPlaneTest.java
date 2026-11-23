@@ -183,10 +183,24 @@ class BuildPlaneTest {
         resolvers);
   }
 
-  /** The stamp before qits-2090, restated: image, toml, bootstrap and state volume, nothing else. */
-  private static String stampBeforeTheTunnel(BuildPlane plane) throws Exception {
-    String material =
-        plane.image() + "\n" + plane.toml() + "\n" + BuildPlane.BOOTSTRAP + "\n" + STATE;
+  /**
+   * The stamp without resolvers, restated: image, toml, bootstrap, state volume and the default
+   * memory cap (qits-2503) — no resolver line, as before qits-2090.
+   */
+  private static String stampWithoutResolvers(BuildPlane plane) throws Exception {
+    return sha(stampBeforeTheCapMaterial(plane) + "\nmemory=6442450944");
+  }
+
+  /** The stamp from before qits-2503, restated: image, toml, bootstrap and state volume only. */
+  private static String stampBeforeTheCap(BuildPlane plane) throws Exception {
+    return sha(stampBeforeTheCapMaterial(plane));
+  }
+
+  private static String stampBeforeTheCapMaterial(BuildPlane plane) {
+    return plane.image() + "\n" + plane.toml() + "\n" + BuildPlane.BOOTSTRAP + "\n" + STATE;
+  }
+
+  private static String sha(String material) throws Exception {
     byte[] digest =
         MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
     return HexFormat.of().formatHex(digest).substring(0, 16);
@@ -228,7 +242,7 @@ class BuildPlaneTest {
         run::toString);
     assertEquals(Map.of("qits.system.runner.buildkitd", stamp), docker.containers().get(BUILDER));
     assertNotEquals(tunnelled.configuredStamp(List.of()), stamp, "the resolvers move the stamp");
-    assertNotEquals(stampBeforeTheTunnel(tunnelled), stamp);
+    assertNotEquals(stampWithoutResolvers(tunnelled), stamp);
     assertNotEquals(
         stamp,
         tunnelled.configuredStamp(List.of("100.96.0.1", "1.1.1.1")),
@@ -236,14 +250,15 @@ class BuildPlaneTest {
   }
 
   @Test
-  void noResolversAreTodaysArgvAndTodaysStampByteForByte() throws Exception {
+  void noResolversAddNothingToTheArgvOrTheStamp() throws Exception {
     BuildPlane untunnelled = planeWith(List::of);
     noBuilderYet();
 
     assertEquals(Optional.empty(), untunnelled.ensure());
 
     String stamp = untunnelled.configuredStamp(List.of());
-    assertEquals(stampBeforeTheTunnel(untunnelled), stamp);
+    assertEquals(stampWithoutResolvers(untunnelled), stamp);
+    assertNotEquals(stampBeforeTheCap(untunnelled), stamp, "qits-2503 moved every stamp once");
     assertEquals(stamp, untunnelled.configuredStamp());
     assertEquals(plane.configuredStamp(), stamp, "the five-argument plane is the same builder");
     assertEquals(untunnelled.runArgv(stamp), untunnelled.runArgv(stamp, List.of()));
@@ -262,7 +277,7 @@ class BuildPlaneTest {
               throw new IllegalStateException("boom");
             });
     assertEquals(List.of(), throwing.resolvers());
-    assertEquals(stampBeforeTheTunnel(throwing), throwing.configuredStamp());
+    assertEquals(stampWithoutResolvers(throwing), throwing.configuredStamp());
     assertEquals(List.of(), planeWith(() -> null).resolvers());
   }
 
@@ -390,6 +405,27 @@ class BuildPlaneTest {
     assertNotEquals(derived.configuredStamp(), explicit.configuredStamp());
   }
 
+  @Test
+  void theBuilderRunsUnderTheMemoryCapTheGatesWidthDerives() {
+    // qits-2503: --memory is BUILDER_CONCURRENT_BUILDS × 6 GiB, never a --memory-swap, and the cap
+    // is in the stamp, so a changed width replaces the builder.
+    List<String> one = plane.runArgv(plane.configuredStamp());
+    assertEquals("6442450944", one.get(one.indexOf("--memory") + 1), one::toString);
+    assertFalse(one.contains("--memory-swap"), one::toString);
+
+    BuildPlane two =
+        new BuildPlane(
+            IDENTITY,
+            TARGET,
+            new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
+            new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, null, 2, List.of(), List.of()),
+            1);
+    List<String> wider = two.runArgv(two.configuredStamp());
+    assertEquals("12884901888", wider.get(wider.indexOf("--memory") + 1), wider::toString);
+    assertEquals(plane.toml(), two.toml(), "the width moves nothing in the toml");
+    assertNotEquals(plane.configuredStamp(), two.configuredStamp(), "the cap moves the stamp");
+  }
+
   // --- health ------------------------------------------------------------------------------------
 
   @Test
@@ -471,6 +507,7 @@ class BuildPlaneTest {
     assertEquals("moby/buildkit:v0.33.0", BuildkitSettings.DEFAULTS.image());
     assertNull(BuildkitSettings.DEFAULTS.maxParallelism());
     assertEquals(1, BuildkitSettings.DEFAULTS.concurrentBuilds(), "unset means 1");
+    assertEquals(6L << 30, BuildkitSettings.DEFAULTS.memoryCapBytes(), "one build's 6 GiB");
 
     Map<String, String> env =
         Map.of(
@@ -487,6 +524,8 @@ class BuildPlaneTest {
             List.of("registry.qits:5000", "mirror:8080"),
             List.of("docker.io=mirror:8080/hub")),
         BuildkitSettings.parse(IDENTITY, env::get));
+    // qits-2503: the builder's cap follows the gate's width, with no variable of its own.
+    assertEquals(5 * (6L << 30), BuildkitSettings.parse(IDENTITY, env::get).memoryCapBytes());
   }
 
   @Test
@@ -561,8 +600,17 @@ class BuildPlaneTest {
         resolvers);
   }
 
-  /** A running builder under {@code stamp}, inspected back with this image, resolvers and toml. */
+  /**
+   * A running builder under {@code stamp}, inspected back with this image, resolvers and toml, and
+   * the default memory cap.
+   */
   private void runningBuilder(String stamp, String image, List<String> dns, String toml)
+      throws Exception {
+    runningBuilder(stamp, image, BuildkitSettings.MEMORY_PER_BUILD, dns, toml);
+  }
+
+  /** The same with this {@code HostConfig.Memory}: {@code 0} is a builder from before qits-2503. */
+  private void runningBuilder(String stamp, String image, long memory, List<String> dns, String toml)
       throws Exception {
     docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
     docker.answerFor("inspect", BUILDER, 0, stamp + "|running\n", "");
@@ -571,7 +619,11 @@ class BuildPlaneTest {
             + toml.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
             + "\"\n";
     docker.answerFor(
-        "container", BUILDER, 0, image + "\n" + String.join(" ", dns) + " \n" + env, "");
+        "container",
+        BUILDER,
+        0,
+        image + "\n" + memory + "\n" + String.join(" ", dns) + " \n" + env,
+        "");
     docker.volume(STATE, Map.of("qits.system.runner.buildkitd", "state"));
   }
 
@@ -679,6 +731,17 @@ class BuildPlaneTest {
     assertEquals("bootstrap or state volume", fresh.changes("0123456789abcdef", List.of()));
     assertEquals(
         "nothing readable", fresh.changes(fresh.configuredStamp(List.of()), List.of()));
+  }
+
+  @Test
+  void theChangesNameTheMemoryCapAndABuilderFromBeforeItRestatesItsStamp() throws Exception {
+    BuildPlane fresh = planeWith(() -> List.of());
+    // qits-2503: a builder from before the cap runs without one (HostConfig.Memory 0) under the
+    // stamp without a memory line, so only the cap reads as changed.
+    runningBuilder(stampBeforeTheCap(fresh), fresh.image(), 0, List.of(), fresh.toml());
+
+    assertEquals(
+        "memory 0 -> 6442450944", fresh.changes(stampBeforeTheCap(fresh), List.of()));
   }
 
   @Test

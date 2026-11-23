@@ -33,6 +33,11 @@ import java.util.Set;
  * #PEAK_STEP} or more, so a growing lease costs one frame per 64 MiB, not one per look. The OOM
  * counters are reported exactly — a change in one is the point.
  *
+ * <p><b>The builder's cap is configuration, not a reading</b> (qits-2503): the node's facts carry
+ * {@code builderMemoryBytes}, the {@code --memory} the target's shared buildkitd is started under
+ * ({@link BuildkitSettings#memoryCapBytes()}), whether or not the builder container exists yet —
+ * placement sizes the node by what the builder may take, not by what it happens to hold now.
+ *
  * <p>Nothing here throws: no tree, no file, no permission all read as null.
  */
 final class MemorySampler {
@@ -56,13 +61,24 @@ final class MemorySampler {
   private final Path vmstat;
   private final Path meminfo;
   private final Map<String, Sample> samples = new HashMap<>();
+  private final Long builderMemoryBytes;
   private String driver;
   private NodeMemory node;
 
+  /** A sampler for a node without a build plane: no builder figure. */
   MemorySampler(CgroupSettings settings) {
+    this(settings, null);
+  }
+
+  /**
+   * A sampler whose node facts carry {@code builderMemoryBytes}, the build plane's configured cap
+   * (qits-2503), or null when there is none.
+   */
+  MemorySampler(CgroupSettings settings, Long builderMemoryBytes) {
     this.root = settings.hostCgroup();
     this.vmstat = settings.vmstat();
     this.meminfo = settings.meminfo();
+    this.builderMemoryBytes = builderMemoryBytes;
   }
 
   /** Docker's cgroup driver ({@code systemd}, {@code cgroupfs}), or null when docker did not say. */
@@ -147,10 +163,16 @@ final class MemorySampler {
     // qits-2362: a root cgroup that is max (localhost, a workstation) leaves memoryMax null, so
     // MemTotal is read unconditionally — it is the only figure left to size such a node by.
     Long memoryTotal = CgroupMemory.memTotalBytes(meminfo);
-    if (nodeOomKills == null && kernel == null && memoryMax == null && memoryTotal == null) {
+    // qits-2503: the builder's cap counts as a figure too — a node that reads nothing else still
+    // tells placement what its builder may take.
+    if (nodeOomKills == null
+        && kernel == null
+        && memoryMax == null
+        && memoryTotal == null
+        && builderMemoryBytes == null) {
       return null;
     }
-    return new NodeMemory(nodeOomKills, kernel, memoryMax, memoryTotal);
+    return new NodeMemory(nodeOomKills, kernel, memoryMax, memoryTotal, builderMemoryBytes);
   }
 
   /** Where the container's cgroup is: the driver's path, else a bounded search; null when absent. */

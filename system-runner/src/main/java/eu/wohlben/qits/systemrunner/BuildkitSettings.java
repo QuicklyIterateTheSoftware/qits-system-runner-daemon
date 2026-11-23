@@ -35,6 +35,14 @@ import java.util.regex.Pattern;
  *       hold the builder and does not count against buildkitd's own semaphore.
  * </ul>
  *
+ * <p><b>The builder's memory cap is derived, never set</b> (qits-2503): {@link #memoryCapBytes()}
+ * is {@code …_BUILDER_CONCURRENT_BUILDS} × {@link #MEMORY_PER_BUILD}, the {@code --memory} {@link
+ * BuildPlane} starts buildkitd under. The builds a CI lease sends there run in the builder's
+ * cgroup, outside the lease's own cap, so without it a native-image {@code RUN} was memory no
+ * placement counted; the gate already bounds how many builds are inside at once, so the cap follows
+ * the gate's width rather than another variable that could disagree with it. The runner reports it
+ * as the node's {@code builderMemoryBytes}.
+ *
  * <p>Every registry is checked against its charset here because it is rendered inside a TOML string:
  * a quote or a newline in it would be configuration nobody wrote. An invalid value is a refusal to
  * start ({@code RunnerExit.MISCONFIGURED}) naming the variable.
@@ -63,6 +71,13 @@ record BuildkitSettings(
   /** The build gate's width when {@code …_BUILDER_CONCURRENT_BUILDS} is unset: one at a time. */
   static final int DEFAULT_CONCURRENT_BUILDS = 1;
 
+  /**
+   * The room one image build needs on the shared builder (qits-2503): a native-image {@code RUN}
+   * under {@code -Dquarkus.native.native-image-xmx=4g}, plus native-image's off-heap and maven
+   * beside it — the same 6 GiB as a CI lease's {@code qits.ci.slot.memory}.
+   */
+  static final long MEMORY_PER_BUILD = 6L * 1024 * 1024 * 1024;
+
   /** A registry as buildkitd.toml names it: {@code host[:port]}. */
   static final Pattern REGISTRY = Pattern.compile("[A-Za-z0-9][A-Za-z0-9.-]{0,252}(:[0-9]{1,5})?");
 
@@ -82,6 +97,14 @@ record BuildkitSettings(
   BuildkitSettings {
     httpRegistries = List.copyOf(httpRegistries);
     registryMirrors = List.copyOf(registryMirrors);
+  }
+
+  /**
+   * The builder's {@code --memory} (qits-2503): {@link #MEMORY_PER_BUILD} for each build the gate
+   * lets onto it at once.
+   */
+  long memoryCapBytes() {
+    return concurrentBuilds * MEMORY_PER_BUILD;
   }
 
   /**

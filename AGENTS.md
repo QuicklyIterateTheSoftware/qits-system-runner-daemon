@@ -77,6 +77,12 @@ change to that table, reviewed as one, with the test cell beside it.
   stamp label, never the owner label — the toolkit's reconcile removes every owner-labelled
   container that is not a held lease. It is the one privileged `docker run`, a fixed argv through
   `RunnerDocker`, and its three names are the domain's `TeardownItem`s.
+- **The builder runs under a derived memory cap** (qits-2503): `--memory`
+  `BuildkitSettings.memoryCapBytes()` = `…_BUILDER_CONCURRENT_BUILDS` × 6 GiB (`MEMORY_PER_BUILD`,
+  a CI lease's `qits.ci.slot.memory`), no `--memory-swap`, no setting of its own. The cap is in the
+  stamp, so a changed width replaces the builder (never under a running build, qits-2260), and the
+  inventory reports it as `node.builderMemoryBytes` (`NodeMemory`'s fifth, nullable component) —
+  the builds a lease sends there run in the builder's cgroup, outside every lease's cap.
 - **A CI lease's builds queue at a target-wide FIFO build gate before they reach the builder**,
   implemented by qits-ci-daemon's `buildctl` shim against a gate directory under `/cache/git` — not
   by buildkitd's own `max-parallelism`. The gate's width is `…_BUILDER_CONCURRENT_BUILDS`

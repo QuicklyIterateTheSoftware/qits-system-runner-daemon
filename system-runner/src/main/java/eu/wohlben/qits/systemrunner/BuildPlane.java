@@ -47,11 +47,12 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Ownership is the stamp label</b> {@code qits.system.runner.buildkitd}: a container under the
  * builder's name without it is somebody else's and is refused, not touched. The stamp hashes the
- * image, the rendered toml, the bootstrap and the resolvers when there are any, so a bumped pin, a
- * changed registry setting (the environment's, or the {@code Ack}'s mirrors) or a changed resolver
- * list replaces the container, and the state volume rides
- * across. The builder deliberately does not carry the owner label {@code qits.system.runner=<id>}:
- * the toolkit's reconcile removes every owner-labelled container that is not a held lease.
+ * image, the rendered toml, the bootstrap, the resolvers when there are any and the memory cap, so a
+ * bumped pin, a changed registry setting (the environment's, or the {@code Ack}'s mirrors), a
+ * changed resolver list or a changed {@code …_BUILDER_CONCURRENT_BUILDS} replaces the container,
+ * and the state volume rides across. The builder deliberately does not carry the owner label
+ * {@code qits.system.runner=<id>}: the toolkit's reconcile removes every owner-labelled container
+ * that is not a held lease.
  *
  * <p><b>Through the runner's process seam, not the driver.</b> qits-containers-driver cannot express
  * this container: {@code ContainerSpec} has no {@code --privileged} (on purpose), its {@code
@@ -78,6 +79,15 @@ import org.jboss.logging.Logger;
  * resolver answers next to the tunnel's. A lease is different: it starts on {@code bridge}, so it is
  * made with {@code docker create} and started only after its joins ({@link LeaseLauncher}). A second
  * network on the builder would need the same order.
+ *
+ * <p><b>Under a memory cap</b> (qits-2503): {@code --memory} {@link
+ * BuildkitSettings#memoryCapBytes()}, {@code …_BUILDER_CONCURRENT_BUILDS} × 6 GiB, and no {@code
+ * --memory-swap}. The builds a CI lease sends here — a native-image {@code RUN} takes about 6 GiB —
+ * run in the builder's cgroup, outside the lease's own cap, so without one they were memory no
+ * placement could count; the runner reports the cap as the node's {@code builderMemoryBytes}. The
+ * cap joined the stamp, so the release carrying it changed every existing builder's stamp once, and
+ * each was replaced through the path below on the first {@link #ensure} that found no CI lease on
+ * its network — never under a running build.
  *
  * <p><b>Never replaced under a running build</b> (qits-2260): a stale builder that is running and
  * has a CI lease on the build network ({@link #users}) is kept, and the lease starts on it. The
@@ -383,19 +393,27 @@ final class BuildPlane {
   }
 
   /**
-   * The stamp over the image, the toml, the bootstrap, the state volume and — only when there are
-   * any — the resolvers: an empty list is the stamp from before qits-2090, byte for byte, so a
-   * builder without resolvers is not replaced by this change.
+   * The stamp over the image, the toml, the bootstrap, the state volume, the resolvers — only when
+   * there are any — and the memory cap. An empty resolver list adds nothing, as it did since
+   * qits-2090; the cap is always there, so qits-2503 changed every builder's stamp once, the
+   * empty-resolver one included, and each builder was replaced the way a bumped image is.
    */
   String configuredStamp(List<String> dns) {
-    return stamp(settings.image(), toml, dns);
+    return stamp(settings.image(), toml, dns, settings.memoryCapBytes());
   }
 
-  /** The stamp over these inputs, with this plane's bootstrap and state volume. */
-  private String stamp(String image, String toml, List<String> dns) {
+  /**
+   * The stamp over these inputs, with this plane's bootstrap and state volume. A {@code memory} of
+   * {@code 0} — docker's "no limit", what a builder from before qits-2503 inspects back as — adds
+   * nothing, so {@link #changes} can restate such a builder's stamp from what it reads.
+   */
+  private String stamp(String image, String toml, List<String> dns, long memory) {
     String material = image + "\n" + toml + "\n" + BOOTSTRAP + "\n" + names.stateVolume();
     if (!dns.isEmpty()) {
       material += "\n" + String.join(",", dns);
+    }
+    if (memory > 0) {
+      material += "\nmemory=" + memory;
     }
     try {
       byte[] digest =
@@ -557,9 +575,9 @@ final class BuildPlane {
 
   /**
    * Which of the stamp's inputs differ between the running builder and the configured one, for the
-   * log: the image and the resolvers with old and new values, the toml by name, and the bootstrap or
-   * state volume when the old inputs read back do not give the running stamp. One {@code docker
-   * container inspect}; never fails the caller.
+   * log: the image, the memory cap (qits-2503, {@code 0} for none) and the resolvers with old and
+   * new values, the toml by name, and the bootstrap or state volume when the old inputs read back do
+   * not give the running stamp. One {@code docker container inspect}; never fails the caller.
    */
   String changes(String runningStamp, List<String> dns) {
     RunnerDocker.Result inspected =
@@ -567,23 +585,32 @@ final class BuildPlane {
             DockerArgv.containerInspect(
                 docker.binary(),
                 names.builder(),
-                "{{.Config.Image}}{{\"\\n\"}}{{range .HostConfig.Dns}}{{.}} {{end}}{{\"\\n\"}}"
+                "{{.Config.Image}}{{\"\\n\"}}{{.HostConfig.Memory}}{{\"\\n\"}}"
+                    + "{{range .HostConfig.Dns}}{{.}} {{end}}{{\"\\n\"}}"
                     + "{{range .Config.Env}}{{json .}}{{\"\\n\"}}{{end}}"));
     if (!inspected.ok()) {
       return "unknown: " + inspected.detail();
     }
     String[] lines = inspected.stdout().split("\n", -1);
     String oldImage = lines.length > 0 ? lines[0].strip() : "";
-    List<String> oldDns = new ArrayList<>();
+    long oldMemory = 0;
     if (lines.length > 1) {
-      for (String server : lines[1].strip().split(" ")) {
+      try {
+        oldMemory = Long.parseLong(lines[1].strip());
+      } catch (NumberFormatException unreadable) {
+        oldMemory = -1;
+      }
+    }
+    List<String> oldDns = new ArrayList<>();
+    if (lines.length > 2) {
+      for (String server : lines[2].strip().split(" ")) {
         if (!server.isEmpty()) {
           oldDns.add(server);
         }
       }
     }
     String oldToml = null;
-    for (int i = 2; i < lines.length; i++) {
+    for (int i = 3; i < lines.length; i++) {
       String env = unquote(lines[i].strip());
       if (env != null && env.startsWith("BUILDKITD_TOML=")) {
         oldToml = env.substring("BUILDKITD_TOML=".length());
@@ -593,13 +620,19 @@ final class BuildPlane {
     if (!oldImage.equals(image())) {
       changed.add("image " + oldImage + " -> " + image());
     }
+    long memory = settings.memoryCapBytes();
+    if (oldMemory >= 0 && oldMemory != memory) {
+      changed.add("memory " + oldMemory + " -> " + memory);
+    }
     if (!oldDns.equals(dns)) {
       changed.add("resolvers " + oldDns + " -> " + dns);
     }
     if (!toml.equals(oldToml)) {
       changed.add("toml");
     }
-    if (oldToml != null && !stamp(oldImage, oldToml, oldDns).equals(runningStamp)) {
+    if (oldToml != null
+        && oldMemory >= 0
+        && !stamp(oldImage, oldToml, oldDns, oldMemory).equals(runningStamp)) {
       changed.add("bootstrap or state volume");
     }
     return changed.isEmpty() ? "nothing readable" : String.join(", ", changed);
@@ -675,7 +708,9 @@ final class BuildPlane {
   /**
    * The same, with one {@code --dns} per resolver right after {@code --network} — rendered by the
    * driver's {@link HostRunArgv}, whose options keep the order they are added in. Throws when a
-   * value fails the driver's belts (a resolver that is not an address literal).
+   * value fails the driver's belts (a resolver that is not an address literal). The builder runs
+   * under {@code --memory} {@link BuildkitSettings#memoryCapBytes()} (qits-2503), with no {@code
+   * --memory-swap}.
    */
   List<String> runArgv(String stamp, List<String> dns) {
     HostRunSpec.Builder run =
@@ -688,6 +723,7 @@ final class BuildPlane {
         run.label(stampLabel(), stamp)
             .privileged()
             .restart("unless-stopped")
+            .memory(String.valueOf(settings.memoryCapBytes()))
             .volume(names.stateVolume() + ":/var/lib/buildkit")
             .env("BUILDKITD_TOML", toml)
             .entrypoint("/bin/sh")

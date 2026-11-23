@@ -44,8 +44,8 @@ import java.util.UUID;
  * and absent reads as those defaults — so neither frame changes for a lease the fields say nothing
  * about, and a peer before them reads the frame as it always did. The node's {@code
  * memoryTotalBytes} (qits-2362) joined the same left-out-when-null group, after {@code
- * memoryMaxBytes}. {@code healthCheck} and {@code healthChecked} are
- * {@link HealthWire}'s, every runner kind's.
+ * memoryMaxBytes}, and its {@code builderMemoryBytes} (qits-2503) after that. {@code healthCheck}
+ * and {@code healthChecked} are {@link HealthWire}'s, every runner kind's.
  */
 public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage> {
 
@@ -129,6 +129,7 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
           putPresent(node, Field.KERNEL_OOM_KILLS, m.node().kernelOomKills());
           putPresent(node, Field.MEMORY_MAX_BYTES, m.node().memoryMaxBytes());
           putPresent(node, Field.MEMORY_TOTAL_BYTES, m.node().memoryTotalBytes());
+          putPresent(node, Field.BUILDER_MEMORY_BYTES, m.node().builderMemoryBytes());
           map.put(Field.NODE, node);
         }
       }
@@ -317,7 +318,8 @@ public final class SystemRunnerCodec implements DomainCodec<SystemRunnerMessage>
         longValue(node, Field.NODE_OOM_KILLS),
         longValue(node, Field.KERNEL_OOM_KILLS),
         longValue(node, Field.MEMORY_MAX_BYTES),
-        longValue(node, Field.MEMORY_TOTAL_BYTES));
+        longValue(node, Field.MEMORY_TOTAL_BYTES),
+        longValue(node, Field.BUILDER_MEMORY_BYTES));
   }
 
   // --- the spec ----------------------------------------------------------------------------------
