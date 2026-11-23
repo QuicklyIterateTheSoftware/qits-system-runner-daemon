@@ -22,8 +22,11 @@ import java.util.function.Supplier;
  * skipped by reference and by id; an image some container uses is skipped by {@code docker ps -a
  * --filter ancestor=}; and {@code docker image rm} without {@code -f} refuses one a container uses
  * anyway. Never {@code system prune}, never {@code image prune -a}. A repository no current image
- * belongs to is never looked at, so before the first {@code estate} and {@code Ack} the pass removes
- * nothing.
+ * belongs to is never looked at, and nothing is current until an {@code estate} has been taken
+ * (qits-2513): the toolkit starts housekeeping right after the first {@code Ack}, before the first
+ * estate, and until then the probe image alone would be the only "current" image, so a pass run in
+ * that gap could remove other tags of its repository — the workspace image — that the coming
+ * estate is about to keep warm or run.
  */
 final class LeaseImagesPass implements HousekeepingPass {
 
@@ -31,7 +34,8 @@ final class LeaseImagesPass implements HousekeepingPass {
   private final Supplier<Set<String>> currentImages;
 
   /**
-   * @param currentImages the images in use now; empty before an estate and an Ack named any
+   * @param currentImages the images in use now; empty until an estate has been taken (qits-2513),
+   *     so a pass that runs between the {@code Ack} and the first estate removes nothing
    */
   LeaseImagesPass(RunnerDocker docker, Supplier<Set<String>> currentImages) {
     this.docker = docker;

@@ -275,7 +275,9 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * Run first in {@link #onAck}, before the {@code Ack}'s keys are taken: a no-op but for the
-   * suite, which holds an {@code Ack} back until the estate converged without it (qits-2475).
+   * suite, which holds an {@code Ack} back until the estate converged without it — exercising the
+   * out-of-order delivery that qits-runner-javalib's Ack gate (qits-2513) now rules out in
+   * production (qits-2475).
    */
   private volatile Runnable beforeAck = () -> {};
 
@@ -615,13 +617,11 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * credential volume unlabelled) — an external one is the operator's and is never made — the
    * {@code inventory} goes out, the look ticks from here on, and the login is probed.
    *
-   * <p><b>The estate can be converged before this runs</b> (qits-2475): the runtime runs the {@code
-   * Ack} and the next frame as separate jobs, so this connection's estate may meet the previous
-   * {@code Ack}'s keys — on a first connection none, every lease refused for want of a pinned slot
-   * image and reported FAILED. Where an estate already arrived on this connection, it is converged
-   * again once the keys are taken, so a refusal made without them never outlives the {@code Ack}.
-   * The keys are written before {@link #estateThisSession} is read and the convergence sets it
-   * before it reads them, so a convergence this one misses already sees them.
+   * <p>Since qits-runner-javalib's Ack gate (qits-2513), an estate on this connection is delivered
+   * only after this returns, so a first connection's first estate always meets the keys taken here.
+   * The {@code estateThisSession} / {@link #reconvergeSoon} re-convergence below is kept as a
+   * harmless defence: it no longer fires on a first connection, but would still cover a toolkit
+   * that delivered an estate out of order.
    */
   @Override
   public void onAck(Ack ack, RunnerSession session) {
@@ -669,10 +669,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
    * image's repository prefix only ({@link SlotImages#ci()}), never a pinned reference, so the CI
    * image itself is pulled once a lease names it — off the converge lock, like this. The kept
    * estate's {@code warmImages} go to the warm pool after them, a warm pull that failed on an
-   * earlier connection tried again. The kept estate may already be this connection's own: the
-   * runtime runs the {@code Ack} and the estate concurrently, so the estate can arrive, and its warm
-   * pull fail, before this runs — which is why {@link ImagePulls#retryWarm} is per connection, and
-   * keeps a failure this connection's estate made until the next estate.
+   * earlier connection tried again. {@code kept} is always the previous connection's estate: since
+   * qits-runner-javalib's Ack gate (qits-2513) this connection's own estate is delivered only after
+   * {@link #onAck} returns, so it cannot have arrived yet. {@link ImagePulls#retryWarm} stays per
+   * connection regardless, as a defence against a toolkit that delivered out of order.
    */
   private void prePull(RunnerSession session) {
     try {
@@ -810,19 +810,23 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
 
   /**
    * The images in use now: every spec image of the latest {@code estate}, its warm images, and the
-   * probe image.
+   * probe image — but nothing at all until an {@code estate} has been taken. Before the first
+   * estate, the probe image alone is not a safe answer: a housekeeping pass run between the {@code
+   * Ack} and the first estate would then remove tags of the probe's own repository (the workspace
+   * image) that the coming estate is about to keep warm or run (qits-2513).
    */
   Set<String> currentImages() {
-    Set<String> images = new LinkedHashSet<>();
     Estate e = estate;
-    if (e != null) {
-      for (LeaseEntry entry : e.leases()) {
-        if (entry.spec() != null) {
-          images.add(entry.spec().image());
-        }
-      }
-      images.addAll(warmImages(e));
+    if (e == null) {
+      return Set.of();
     }
+    Set<String> images = new LinkedHashSet<>();
+    for (LeaseEntry entry : e.leases()) {
+      if (entry.spec() != null) {
+        images.add(entry.spec().image());
+      }
+    }
+    images.addAll(warmImages(e));
     String probe = ack.probeImage();
     if (probe != null && !probe.isBlank()) {
       images.add(probe);
