@@ -61,6 +61,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -292,35 +293,33 @@ class EstateReconcileTest {
   }
 
   /**
-   * qits-2475: the runtime runs the Ack and the estate as separate jobs, so the estate can be
-   * converged before the Ack's slot images are taken — the lease refused for want of one, FAILED.
-   * The Ack is held here until that FAILED inventory went out; once taken, it converges the estate
-   * again, so the lease is reported RUNNING, never left FAILED by a refusal no later estate clears.
+   * qits-2513: the runtime hands the host's first estate to the domain only once the {@code Ack}'s
+   * handling has returned, so the estate always meets the {@code Ack}'s slot images. Before it the
+   * two ran concurrently, and an estate converged first refused its lease for want of a pinned slot
+   * image and reported it FAILED — what qits-2475's re-convergence at the {@code Ack} repaired.
+   * Now nothing of the estate is taken when the {@code Ack} begins, the lease is created at the
+   * estate's first convergence, and no inventory ever reports it FAILED.
    */
   @Test
-  void anEstateConvergedBeforeItsAckIsConvergedAgainOnceTheAckIsTaken() throws Exception {
-    Predicate<Inventory> failed = i -> stateOf(i, L1) == LeaseState.FAILED;
-    beforeAck =
-        () -> {
-          long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-          while (host.all(Inventory.class).stream().noneMatch(failed)
-              && System.nanoTime() < deadline) {
-            java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
-          }
-        };
-    seen(L1, "running", 0, "WORKSPACE", H1, mounts(work("ws-42")));
+  void anEstateRightBehindTheAckMeetsItsSlotImagesAndItsLeaseIsNeverRefused() throws Exception {
+    List<Set<String>> imagesAtAck = new java.util.concurrent.CopyOnWriteArrayList<>();
+    beforeAck = () -> imagesAtAck.add(domain.currentImages());
     estateThenAck(workspace(L1, H1));
     start();
 
-    Inventory refused = awaitInventory(failed);
+    awaitTrue(() -> !runsOf(lease(L1)).isEmpty());
     assertEquals(
-        "no WORKSPACE image is pinned for this target yet",
-        report(refused, L1).detail(),
-        "the estate met the Ack's absent keys first");
-    awaitTrue(() -> stateOf(host.all(Inventory.class).getLast(), L1) == LeaseState.RUNNING);
-    assertEquals(
-        new LeaseReport(L1, LeaseState.RUNNING, H1, null, null),
-        report(host.all(Inventory.class).getLast(), L1));
+        List.of(Set.of()), imagesAtAck, "no estate, and no earlier Ack, taken when the Ack began");
+    assertEquals(WS_IMAGE, runOf(lease(L1)).getLast(), "created at the estate's first convergence");
+    created(lease(L1));
+    docker.answerFor(
+        "inspect", lease(L1), 0, "c-" + L1 + "|running|0|" + L1 + "|WORKSPACE|" + H1 + "|"
+            + mounts(work("ws-42")) + "\n", "");
+    Inventory running = awaitInventory(i -> stateOf(i, L1) == LeaseState.RUNNING);
+    assertEquals(new LeaseReport(L1, LeaseState.RUNNING, H1, null, null), report(running, L1));
+    assertTrue(
+        host.all(Inventory.class).stream().noneMatch(i -> stateOf(i, L1) == LeaseState.FAILED),
+        () -> "never refused: " + host.all(Inventory.class));
   }
 
   @Test
@@ -1389,9 +1388,13 @@ class EstateReconcileTest {
     assertTrue(
         starting.detail().matches("pulling " + Pattern.quote(WS_NEXT) + " since \\S+Z"),
         starting.detail());
+    // The Ack's own inventory goes out before the estate is handed over (qits-2513), so it reports
+    // the node alone — L2's container — and L1 is reported from the estate's first inventory on.
+    assertEquals(null, stateOf(host.all(Inventory.class).getFirst(), L1), "the Ack's inventory");
     assertEquals(
         List.of(starting.detail()),
         host.all(Inventory.class).stream()
+            .filter(i -> stateOf(i, L1) != null)
             .map(i -> report(i, L1).detail())
             .filter(d -> d != null && d.startsWith("pulling "))
             .distinct()
@@ -1625,6 +1628,11 @@ class EstateReconcileTest {
     start();
 
     awaitTrue(() -> domain.currentImages().contains(WARM));
+    // The runtime starts its housekeeping — this pass among it — at the first Ack, in the same
+    // instant it hands the estate over (qits-2513), so its own first pass runs beside this one.
+    // Its last call is the removal of the old tag: wait for it, and judge only this pass's calls.
+    awaitCall(calls -> has(calls, List.of("image", "rm", old)));
+    int before = docker.calls().size();
     new LeaseImagesPass(
             new RunnerDocker(IDENTITY, docker.binary(), Duration.ofSeconds(10)),
             domain::currentImages)
@@ -1639,7 +1647,11 @@ class EstateReconcileTest {
                 Clock.systemUTC(),
                 Logger.getLogger(EstateReconcileTest.class)));
     List<List<String>> removed =
-        docker.calls("image").stream().filter(c -> c.get(1).equals("rm")).toList();
+        docker.calls().stream()
+            .skip(before)
+            .map(FakeDocker::withoutConfig)
+            .filter(c -> c.size() > 1 && c.get(0).equals("image") && c.get(1).equals("rm"))
+            .toList();
     assertEquals(List.of(List.of("image", "rm", old)), removed, docker.calls()::toString);
   }
 
