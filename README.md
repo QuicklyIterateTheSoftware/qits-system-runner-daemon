@@ -90,7 +90,7 @@ read-only); without it every cgroup-derived fact is null, never an error.
   `memory.max`, null when `max`), and `node.memoryTotalBytes` (`/proc/meminfo`'s `MemTotal`,
   qits-2362: the figure left to size a bare host by — localhost, a workstation — whose root
   cgroup is always `max`), and `node.builderMemoryBytes` (qits-2503: the shared builder's
-  `--memory` cap, `_BUILDER_CONCURRENT_BUILDS` × 6 GiB — configuration, reported whether or not the
+  `--memory` cap, `_BUILDER_CONCURRENT_BUILDS` × 8 GiB — configuration, reported whether or not the
   builder exists, because its builds run outside every lease's cap).
 
 A change in any OOM counter sends an `inventory`; the peak does not, until it grew by 64 MiB from
@@ -346,7 +346,7 @@ the running leases by their label.
 | a sign-in | container `qits-system-runner-sign-in-<harness>-<id8>` (`--rm -i`) | none, likewise |
 
 | the CI caches | `qits-system-runner-ci-git-<id8>`, `qits-system-runner-ci-m2-<id8>`, `qits-system-runner-ci-pnpm-<id8>`, `qits-system-runner-ci-daemon-<id8>` (the per-version qits-ci-daemon binary qits-ci's lease bootstrap caches there, qits-1809), created on the first CI lease, never mounted into a WORKSPACE or DESK lease | `qits.system.runner=<id>` |
-| the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`, `--memory` `_BUILDER_CONCURRENT_BUILDS` × 6 GiB), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
+| the builder | container `qits-system-runner-buildkitd-<id8>` (`--privileged`, `--restart unless-stopped`, `--memory` `_BUILDER_CONCURRENT_BUILDS` × 8 GiB), on the build network | `qits.system.runner.buildkitd=<stamp>` — **not** the owner label, which the reconcile removes by |
 | the build network | bridge `qits-system-runner-build-<id8>` | `qits.system.runner=<id>` |
 | the lease network | bridge `qits-system-runner-leases-<id8>` (`enable_icc=false`), every WORKSPACE and DESK lease's at `docker create`; a teardown item, after every container | `qits.system.runner=<id>` |
 | the builder's state | volume `qits-system-runner-buildkitd-state-<id8>` | `qits.system.runner.buildkitd=state` |
@@ -361,8 +361,8 @@ and re-checked on every later one: the network and the state volume made, the bu
 image pulled in the background when absent, the CI lease `STARTING` meanwhile; pre-pulled at the
 `Ack` on a target with slots) or started, or replaced when its **stamp** — a hash of the image, the
 rendered `buildkitd.toml`, the bootstrap, the state volume and the memory cap — moved; the state volume rides
-across. The builder runs under `--memory` `_BUILDER_CONCURRENT_BUILDS` × 6 GiB (qits-2503, no
-`--memory-swap`): the builds a CI lease sends it — a native-image `RUN` takes about 6 GiB, the same as
+across. The builder runs under `--memory` `_BUILDER_CONCURRENT_BUILDS` × 8 GiB (qits-2503, no
+`--memory-swap`): the builds a CI lease sends it — a native-image `RUN` takes up to 8 GiB, more than
 a CI lease's own cap — run in its cgroup, not the lease's, so the cap is what placement can count. It
 is derived, with no setting of its own, and its arrival in the stamp replaced every builder once. A container under the builder's name without the stamp label is somebody else's: the CI
 lease fails and the container is left alone. The toml bounds the worker (`max-parallelism` —

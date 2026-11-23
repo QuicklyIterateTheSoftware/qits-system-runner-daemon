@@ -17,7 +17,7 @@ package eu.wohlben.qits.systemrunner.protocol;
  *     left to size the node by at all. Appended last so the wire stays additive: an old reader
  *     ignores it, and a message encoded before it existed decodes it as null.
  * @param builderMemoryBytes the memory cap of the target's shared buildkitd (qits-2503), which the
- *     runner derives as {@code …_BUILDER_CONCURRENT_BUILDS} × 6 GiB and starts the builder under
+ *     runner derives as {@code …_BUILDER_CONCURRENT_BUILDS} × 8 GiB and starts the builder under
  *     ({@code --memory}): the image builds a CI lease sends there run in the builder's cgroup, not
  *     the lease's, so placement has to count this beside the leases. Null from a runner without a
  *     build plane or older than qits-2503. Appended last, additive on the wire like {@code

@@ -81,8 +81,8 @@ import org.jboss.logging.Logger;
  * network on the builder would need the same order.
  *
  * <p><b>Under a memory cap</b> (qits-2503): {@code --memory} {@link
- * BuildkitSettings#memoryCapBytes()}, {@code …_BUILDER_CONCURRENT_BUILDS} × 6 GiB, and no {@code
- * --memory-swap}. The builds a CI lease sends here — a native-image {@code RUN} takes about 6 GiB —
+ * BuildkitSettings#memoryCapBytes()}, {@code …_BUILDER_CONCURRENT_BUILDS} × 8 GiB, and no {@code
+ * --memory-swap}. The builds a CI lease sends here — a native-image {@code RUN} takes up to 8 GiB —
  * run in the builder's cgroup, outside the lease's own cap, so without one they were memory no
  * placement could count; the runner reports the cap as the node's {@code builderMemoryBytes}. The
  * cap joined the stamp, so the release carrying it changed every existing builder's stamp once, and

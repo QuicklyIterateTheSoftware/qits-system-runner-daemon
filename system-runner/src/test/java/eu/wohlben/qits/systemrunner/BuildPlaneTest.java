@@ -188,7 +188,7 @@ class BuildPlaneTest {
    * memory cap (qits-2503) — no resolver line, as before qits-2090.
    */
   private static String stampWithoutResolvers(BuildPlane plane) throws Exception {
-    return sha(stampBeforeTheCapMaterial(plane) + "\nmemory=6442450944");
+    return sha(stampBeforeTheCapMaterial(plane) + "\nmemory=8589934592");
   }
 
   /** The stamp from before qits-2503, restated: image, toml, bootstrap and state volume only. */
@@ -407,10 +407,10 @@ class BuildPlaneTest {
 
   @Test
   void theBuilderRunsUnderTheMemoryCapTheGatesWidthDerives() {
-    // qits-2503: --memory is BUILDER_CONCURRENT_BUILDS × 6 GiB, never a --memory-swap, and the cap
+    // qits-2503: --memory is BUILDER_CONCURRENT_BUILDS × 8 GiB, never a --memory-swap, and the cap
     // is in the stamp, so a changed width replaces the builder.
     List<String> one = plane.runArgv(plane.configuredStamp());
-    assertEquals("6442450944", one.get(one.indexOf("--memory") + 1), one::toString);
+    assertEquals("8589934592", one.get(one.indexOf("--memory") + 1), one::toString);
     assertFalse(one.contains("--memory-swap"), one::toString);
 
     BuildPlane two =
@@ -421,7 +421,7 @@ class BuildPlaneTest {
             new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, null, 2, List.of(), List.of()),
             1);
     List<String> wider = two.runArgv(two.configuredStamp());
-    assertEquals("12884901888", wider.get(wider.indexOf("--memory") + 1), wider::toString);
+    assertEquals("17179869184", wider.get(wider.indexOf("--memory") + 1), wider::toString);
     assertEquals(plane.toml(), two.toml(), "the width moves nothing in the toml");
     assertNotEquals(plane.configuredStamp(), two.configuredStamp(), "the cap moves the stamp");
   }
@@ -507,7 +507,7 @@ class BuildPlaneTest {
     assertEquals("moby/buildkit:v0.33.0", BuildkitSettings.DEFAULTS.image());
     assertNull(BuildkitSettings.DEFAULTS.maxParallelism());
     assertEquals(1, BuildkitSettings.DEFAULTS.concurrentBuilds(), "unset means 1");
-    assertEquals(6L << 30, BuildkitSettings.DEFAULTS.memoryCapBytes(), "one build's 6 GiB");
+    assertEquals(8L << 30, BuildkitSettings.DEFAULTS.memoryCapBytes(), "one build's 8 GiB");
 
     Map<String, String> env =
         Map.of(
@@ -525,7 +525,7 @@ class BuildPlaneTest {
             List.of("docker.io=mirror:8080/hub")),
         BuildkitSettings.parse(IDENTITY, env::get));
     // qits-2503: the builder's cap follows the gate's width, with no variable of its own.
-    assertEquals(5 * (6L << 30), BuildkitSettings.parse(IDENTITY, env::get).memoryCapBytes());
+    assertEquals(5 * (8L << 30), BuildkitSettings.parse(IDENTITY, env::get).memoryCapBytes());
   }
 
   @Test
@@ -741,7 +741,7 @@ class BuildPlaneTest {
     runningBuilder(stampBeforeTheCap(fresh), fresh.image(), 0, List.of(), fresh.toml());
 
     assertEquals(
-        "memory 0 -> 6442450944", fresh.changes(stampBeforeTheCap(fresh), List.of()));
+        "memory 0 -> 8589934592", fresh.changes(stampBeforeTheCap(fresh), List.of()));
   }
 
   @Test

@@ -130,7 +130,7 @@ class MemorySamplerTest {
     MemorySampler sampler =
         new MemorySampler(new CgroupSettings(root, vmstat), BuildkitSettings.DEFAULTS.memoryCapBytes());
     sampler.sample(List.of());
-    assertEquals(new NodeMemory(292L, 297L, null, 16777216L * 1024, 6L << 30), sampler.node());
+    assertEquals(new NodeMemory(292L, 297L, null, 16777216L * 1024, 8L << 30), sampler.node());
   }
 
   // ---- finding a lease's cgroup ------------------------------------------------------------------

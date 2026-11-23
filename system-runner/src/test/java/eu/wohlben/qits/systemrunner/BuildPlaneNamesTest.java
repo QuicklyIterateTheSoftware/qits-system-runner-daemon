@@ -88,7 +88,7 @@ class BuildPlaneNamesTest {
             "--restart",
             "unless-stopped",
             "--memory",
-            "6442450944",
+            "8589934592",
             "-v",
             "qits-system-runner-buildkitd-state-1a2b3c4d:/var/lib/buildkit",
             "-e",

@@ -72,11 +72,13 @@ record BuildkitSettings(
   static final int DEFAULT_CONCURRENT_BUILDS = 1;
 
   /**
-   * The room one image build needs on the shared builder (qits-2503): a native-image {@code RUN}
-   * under {@code -Dquarkus.native.native-image-xmx=4g}, plus native-image's off-heap and maven
-   * beside it — the same 6 GiB as a CI lease's {@code qits.ci.slot.memory}.
+   * The room one image build needs on the shared builder (qits-2503): the estate's largest
+   * native-image {@code RUN}, qits-projects-service's under {@code
+   * -Dquarkus.native.native-image-xmx=6g} (its embedded SPA outgrew 4g), plus 2 GiB for
+   * native-image's off-heap and the maven beside it. 6 GiB, the first figure, was the heap alone
+   * and starved that build ({@code cannot allocate memory}); raise this with the largest heap.
    */
-  static final long MEMORY_PER_BUILD = 6L * 1024 * 1024 * 1024;
+  static final long MEMORY_PER_BUILD = 8L * 1024 * 1024 * 1024;
 
   /** A registry as buildkitd.toml names it: {@code host[:port]}. */
   static final Pattern REGISTRY = Pattern.compile("[A-Za-z0-9][A-Za-z0-9.-]{0,252}(:[0-9]{1,5})?");

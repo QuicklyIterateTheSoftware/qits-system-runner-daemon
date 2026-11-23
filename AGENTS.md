@@ -78,7 +78,7 @@ change to that table, reviewed as one, with the test cell beside it.
   container that is not a held lease. It is the one privileged `docker run`, a fixed argv through
   `RunnerDocker`, and its three names are the domain's `TeardownItem`s.
 - **The builder runs under a derived memory cap** (qits-2503): `--memory`
-  `BuildkitSettings.memoryCapBytes()` = `…_BUILDER_CONCURRENT_BUILDS` × 6 GiB (`MEMORY_PER_BUILD`,
+  `BuildkitSettings.memoryCapBytes()` = `…_BUILDER_CONCURRENT_BUILDS` × 8 GiB (`MEMORY_PER_BUILD`,
   a CI lease's `qits.ci.slot.memory`), no `--memory-swap`, no setting of its own. The cap is in the
   stamp, so a changed width replaces the builder (never under a running build, qits-2260), and the
   inventory reports it as `node.builderMemoryBytes` (`NodeMemory`'s fifth, nullable component) —
