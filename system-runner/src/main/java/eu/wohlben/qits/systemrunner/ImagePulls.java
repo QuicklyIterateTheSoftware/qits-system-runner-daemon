@@ -253,9 +253,10 @@ final class ImagePulls {
   /**
    * A new connection's {@code Ack}: a warm pull that failed on an earlier connection is tried again
    * when it is named again. One this connection's own estate already made fail is kept until the
-   * next {@code estate} — the runtime runs the {@code Ack} and the estate concurrently, so the
-   * estate's warm pull may have failed before the {@code Ack} got here, and clearing it would pull
-   * the image twice on one connection.
+   * next {@code estate}. Since qits-runner-javalib's Ack gate (qits-2513) this connection's estate
+   * cannot have arrived before this runs, so that case no longer happens on a first connection; the
+   * per-session guard stays, as a defence against an estate this connection's own re-convergence
+   * already failed, which would otherwise be pulled twice.
    */
   synchronized void retryWarm() {
     failed.values().removeIf(f -> f.warm && f.session < session);
