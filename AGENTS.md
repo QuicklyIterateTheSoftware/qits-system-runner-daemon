@@ -28,7 +28,10 @@ process seam (`RunnerDocker`, `qits-containers-driver`), under a deadline. **Eve
 `qits-containers-driver` builder** (`DockerArgv`, `SwarmArgv`, `HostRunArgv`, `ExecArgv`;
 qits-2289): the binary is only ever a builder's first argument, never the head of a hand-built
 list. A spelling the library lacks is added there and released, never spelled here. The one fork
-of its own is the sign-in's (`SignInProcesses`), whose argv is still `HostRunArgv`'s.
+of its own is the sign-in's (`SignInProcesses`), whose argv is still `HostRunArgv`'s. One interim
+exception: `BuildPlane.memoryUpdateArgv` (`docker update --memory … --memory-swap …`, qits-2503),
+spelled here because the driver has no such builder and the fix could not wait for its release;
+it moves into `DockerArgv` once the driver gains one.
 
 **A healthy runner never exits**, and **a rollover never drains**: `quiescent()` is "no convergence
 in flight", never "holds nothing". Lease containers are node state that outlives the process.
@@ -82,7 +85,11 @@ change to that table, reviewed as one, with the test cell beside it.
   a CI lease's `qits.ci.slot.memory`), no `--memory-swap`, no setting of its own. The cap is in the
   stamp, so a changed width replaces the builder (never under a running build, qits-2260), and the
   inventory reports it as `node.builderMemoryBytes` (`NodeMemory`'s fifth, nullable component) —
-  the builds a lease sends there run in the builder's cgroup, outside every lease's cap.
+  the builds a lease sends there run in the builder's cgroup, outside every lease's cap. A **raised**
+  cap does not wait for that replacement: a stale builder kept under CI leases whose
+  `HostConfig.Memory` is below the cap gets it in place (`docker update --memory --memory-swap`,
+  `BuildPlane.raiseInPlace`; swap keeps docker's ratio); a lower cap, or `0` (unlimited), is never
+  applied in place. The stamp label stays stale, so the builder is still replaced at the next gap.
 - **A CI lease's builds queue at a target-wide FIFO build gate before they reach the builder**,
   implemented by qits-ci-daemon's `buildctl` shim against a gate directory under `/cache/git` — not
   by buildkitd's own `max-parallelism`. The gate's width is `…_BUILDER_CONCURRENT_BUILDS`

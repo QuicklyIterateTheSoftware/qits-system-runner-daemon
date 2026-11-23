@@ -364,7 +364,12 @@ rendered `buildkitd.toml`, the bootstrap, the state volume and the memory cap �
 across. The builder runs under `--memory` `_BUILDER_CONCURRENT_BUILDS` × 8 GiB (qits-2503, no
 `--memory-swap`): the builds a CI lease sends it — a native-image `RUN` takes up to 8 GiB, more than
 a CI lease's own cap — run in its cgroup, not the lease's, so the cap is what placement can count. It
-is derived, with no setting of its own, and its arrival in the stamp replaced every builder once. A container under the builder's name without the stamp label is somebody else's: the CI
+is derived, with no setting of its own, and its arrival in the stamp replaced every builder once.
+A stale builder is never replaced while a CI lease is on the build network (qits-2260) — it is
+replaced at the first CI lease that finds none — but a **raised** cap is applied to it in place
+(`docker update --memory <cap> --memory-swap <swap>`, swap keeping docker's ratio), so a build that
+needs the new cap does not wait for a gap; a lower cap is never applied in place, and the builder
+stays stale (its stamp label cannot be updated) until that gap replaces it. A container under the builder's name without the stamp label is somebody else's: the CI
 lease fails and the container is left alone. The toml bounds the worker (`max-parallelism` —
 `_BUILDKIT_MAX_PARALLELISM` when set, else the runner's own slot total — it only sets how far an
 admitted build fans out, since the build gate below bounds how many builds run; GC at 72h / 20 GiB) and carries one `[registry."host"]` table per

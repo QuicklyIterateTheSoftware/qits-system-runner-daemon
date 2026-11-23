@@ -609,8 +609,19 @@ class BuildPlaneTest {
     runningBuilder(stamp, image, BuildkitSettings.MEMORY_PER_BUILD, dns, toml);
   }
 
-  /** The same with this {@code HostConfig.Memory}: {@code 0} is a builder from before qits-2503. */
+  /**
+   * The same with this {@code HostConfig.Memory}: {@code 0} is a builder from before qits-2503. Its
+   * {@code HostConfig.MemorySwap} is docker's for a {@code --memory} alone: twice it, {@code 0}
+   * without one.
+   */
   private void runningBuilder(String stamp, String image, long memory, List<String> dns, String toml)
+      throws Exception {
+    runningBuilder(stamp, image, memory, 2 * memory, dns, toml);
+  }
+
+  /** The same with this {@code HostConfig.MemorySwap}. */
+  private void runningBuilder(
+      String stamp, String image, long memory, long memorySwap, List<String> dns, String toml)
       throws Exception {
     docker.answerFor("network-inspect", NETWORK, 0, "bridge\n", "");
     docker.answerFor("inspect", BUILDER, 0, stamp + "|running\n", "");
@@ -622,7 +633,7 @@ class BuildPlaneTest {
         "container",
         BUILDER,
         0,
-        image + "\n" + memory + "\n" + String.join(" ", dns) + " \n" + env,
+        image + "\n" + memory + " " + memorySwap + "\n" + String.join(" ", dns) + " \n" + env,
         "");
     docker.volume(STATE, Map.of("qits.system.runner.buildkitd", "state"));
   }
@@ -728,7 +739,10 @@ class BuildPlaneTest {
     BuildPlane fresh = planeWith(() -> List.of());
     runningBuilder("0123456789abcdef", fresh.image(), List.of(), fresh.toml());
 
-    assertEquals("bootstrap or state volume", fresh.changes("0123456789abcdef", List.of()));
+    // At the configured cap, a cap raised in place (qits-2503) reads back the same way.
+    assertEquals(
+        "bootstrap, state volume or a memory cap raised in place",
+        fresh.changes("0123456789abcdef", List.of()));
     assertEquals(
         "nothing readable", fresh.changes(fresh.configuredStamp(List.of()), List.of()));
   }
@@ -742,6 +756,113 @@ class BuildPlaneTest {
 
     assertEquals(
         "memory 0 -> 8589934592", fresh.changes(stampBeforeTheCap(fresh), List.of()));
+  }
+
+  // --- a raised cap under running builds (qits-2503) ----------------------------------------------
+
+  private static final long GIB = 1024L * 1024 * 1024;
+
+  /** A stale builder under {@code memory}/{@code memorySwap}, with a CI lease on the network. */
+  private BuildPlane inUseStaleBuilder(String image, long memory, long memorySwap)
+      throws Exception {
+    BuildPlane fresh = planeWith(() -> List.of());
+    runningBuilder("0123456789abcdef", image, memory, memorySwap, List.of(), fresh.toml());
+    docker.answerFor(
+        "ps", "network=" + NETWORK, 0, BUILDER + "\nqits-system-runner-lease-l1-r1\n", "");
+    return fresh;
+  }
+
+  private void builderUntouched() {
+    assertTrue(docker.calls("rm").isEmpty(), docker.calls()::toString);
+    assertTrue(docker.calls("run").stream().noneMatch(c -> c.contains(BUILDER)));
+  }
+
+  @Test
+  void aKeptStaleBuilderUnderALowerCapGetsTheConfiguredOneInPlace() throws Exception {
+    BuildPlane fresh = inUseStaleBuilder("moby/buildkit:v0.33.0", 6 * GIB, 12 * GIB);
+    List<String> logged = captureInfo();
+
+    assertEquals(Optional.empty(), fresh.ensure());
+    assertEquals(Optional.empty(), fresh.ensure());
+
+    builderUntouched();
+    assertEquals(
+        List.of(
+            List.of(
+                "update",
+                "--memory",
+                "8589934592",
+                "--memory-swap",
+                "17179869184",
+                BUILDER)),
+        docker.calls("update").stream().map(FakeDocker::withoutConfig).toList());
+    assertEquals(
+        1,
+        logged.stream().filter(l -> l.contains("keeps its stale builder")).count(),
+        logged::toString);
+    String raised =
+        logged.stream()
+            .filter(l -> l.contains("raised its stale builder's memory cap in place"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(logged));
+    assertTrue(raised.contains("6442450944 -> 8589934592"), raised);
+  }
+
+  @Test
+  void aKeptStaleBuilderUnderAHigherCapIsNeverLoweredInPlace() throws Exception {
+    BuildPlane fresh = inUseStaleBuilder("moby/buildkit:v0.33.0", 16 * GIB, 32 * GIB);
+
+    assertEquals(Optional.empty(), fresh.ensure());
+
+    builderUntouched();
+    assertTrue(docker.calls("update").isEmpty(), docker.calls()::toString);
+  }
+
+  @Test
+  void aKeptStaleBuilderWithoutACapIsLeftUnlimited() throws Exception {
+    BuildPlane fresh = inUseStaleBuilder("moby/buildkit:v0.33.0", 0, 0);
+
+    assertEquals(Optional.empty(), fresh.ensure());
+
+    builderUntouched();
+    assertTrue(docker.calls("update").isEmpty(), docker.calls()::toString);
+  }
+
+  @Test
+  void aFailedRaiseStillStartsTheLeaseReplacesNothingAndIsTriedAgain() throws Exception {
+    BuildPlane fresh = inUseStaleBuilder("moby/buildkit:v0.33.0", 6 * GIB, 12 * GIB);
+    docker.answerFor("update", BUILDER, 1, "", "Error response from daemon: nope");
+
+    assertEquals(Optional.empty(), fresh.ensure());
+    assertEquals(Optional.empty(), fresh.ensure());
+
+    builderUntouched();
+    assertEquals(2, docker.calls("update").size(), docker.calls()::toString);
+  }
+
+  @Test
+  void aStaleImageUnderTheConfiguredCapIsNotUpdated() throws Exception {
+    BuildPlane fresh = inUseStaleBuilder("moby/buildkit:v0.32.0", 8 * GIB, 16 * GIB);
+    List<String> logged = captureInfo();
+
+    assertEquals(Optional.empty(), fresh.ensure());
+    assertEquals(Optional.empty(), fresh.ensure());
+
+    builderUntouched();
+    assertTrue(docker.calls("update").isEmpty(), docker.calls()::toString);
+    assertEquals(1, docker.calls("container").size(), "a settled deferral skips the inspect");
+    assertTrue(
+        logged.stream().anyMatch(l -> l.contains("image moby/buildkit:v0.32.0 -> ")),
+        logged::toString);
+  }
+
+  @Test
+  void theSwapKeepsDockersRatioUnlimitedOrAtLeastTheCap() {
+    assertEquals(16 * GIB, BuildPlane.memorySwapFor(6 * GIB, 12 * GIB, 8 * GIB));
+    assertEquals(16 * GIB, BuildPlane.memorySwapFor(6 * GIB, null, 8 * GIB));
+    assertEquals(-1, BuildPlane.memorySwapFor(6 * GIB, -1L, 8 * GIB));
+    assertEquals(8 * GIB, BuildPlane.memorySwapFor(6 * GIB, 6 * GIB, 8 * GIB));
+    assertEquals(20 * GIB, BuildPlane.memorySwapFor(6 * GIB, 20 * GIB, 8 * GIB));
   }
 
   @Test

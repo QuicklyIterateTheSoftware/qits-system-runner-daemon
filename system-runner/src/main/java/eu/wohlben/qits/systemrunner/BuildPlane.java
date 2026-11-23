@@ -3,6 +3,7 @@ package eu.wohlben.qits.systemrunner;
 import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.containers.driver.docker.HostRunArgv;
 import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
+import eu.wohlben.qits.containers.driver.spec.ContainersIdentifiers;
 import eu.wohlben.qits.containers.driver.spec.HostRunSpec;
 import eu.wohlben.qits.containers.driver.spec.LabelNamespace;
 import eu.wohlben.qits.containers.driver.spec.VolumeSpec;
@@ -87,13 +88,20 @@ import org.jboss.logging.Logger;
  * placement could count; the runner reports the cap as the node's {@code builderMemoryBytes}. The
  * cap joined the stamp, so the release carrying it changed every existing builder's stamp once, and
  * each was replaced through the path below on the first {@link #ensure} that found no CI lease on
- * its network — never under a running build.
+ * its network — never under a running build. <b>A raised cap does not wait for that gap</b>
+ * (qits-2503): a kept stale builder whose {@code HostConfig.Memory} is below the configured cap gets
+ * the cap in place ({@link #raiseInPlace}), because on a busy target CI leases overlap without end
+ * and a build that needs the new cap kept failing on the old one ({@code cannot allocate memory}).
+ * A lower cap is never applied in place — it could OOM a running build — and waits for the
+ * replacement.
  *
  * <p><b>Never replaced under a running build</b> (qits-2260): a stale builder that is running and
  * has a CI lease on the build network ({@link #users}) is kept, and the lease starts on it. The
  * first {@link #ensure} that finds no CI lease on the network replaces it. When docker cannot say
  * who is on the network, the builder is kept too. Each replacement, and each first deferral, logs
- * which input changed ({@link #changes}).
+ * which input changed ({@link #changes}). The one change made to a kept builder is the raised cap
+ * above, a {@code docker update} that touches neither the container nor its builds; the stamp label
+ * cannot be updated, so the builder stays stale and is still replaced at the next gap.
  *
  * <p>Departure from the CI runner: no host CA bundle mount. This runner always runs in a container
  * and makes no host-path mount; the builder trusts the image's own bundle (what the CI runner did in
@@ -227,6 +235,13 @@ final class BuildPlane {
 
   /** The last stale stamp pair {@link #ensure} kept the builder for, so it is logged once. */
   private String deferred;
+
+  /**
+   * The last stale stamp pair whose kept builder is known to run at or above the configured cap —
+   * read so, or raised in place (qits-2503) — so a later deferral of the same pair skips the
+   * inspect. A failed raise leaves it unset, and the next {@link #ensure} tries again.
+   */
+  private String capInPlace;
 
   /**
    * The plane under the environment's settings alone. {@code slots} is the runner's own ({@code
@@ -491,6 +506,11 @@ final class BuildPlane {
           List<String> users = users();
           if (users == null || !users.isEmpty()) {
             String pair = builder.stamp() + ">" + stamp;
+            if (pair.equals(deferred) && pair.equals(capInPlace)) {
+              return Optional.empty();
+            }
+            // One inspect serves both the log and the in-place cap (qits-2503).
+            Running running = running();
             if (!pair.equals(deferred)) {
               deferred = pair;
               LOG.infof(
@@ -501,13 +521,17 @@ final class BuildPlane {
                       : "CI leases use it " + users,
                   builder.stamp(),
                   stamp,
-                  changes(builder.stamp(), dns),
+                  changes(builder.stamp(), dns, running),
                   names.network());
+            }
+            if (raiseInPlace(running)) {
+              capInPlace = pair;
             }
             return Optional.empty();
           }
         }
         deferred = null;
+        capInPlace = null;
         LOG.infof(
             "system-runner replaces its builder: stamp %s, configured %s, changed %s",
             builder.stamp(),
@@ -574,31 +598,45 @@ final class BuildPlane {
   }
 
   /**
-   * Which of the stamp's inputs differ between the running builder and the configured one, for the
-   * log: the image, the memory cap (qits-2503, {@code 0} for none) and the resolvers with old and
-   * new values, the toml by name, and the bootstrap or state volume when the old inputs read back do
-   * not give the running stamp. One {@code docker container inspect}; never fails the caller.
+   * The running builder's stamp inputs as one {@code docker container inspect} reads them back:
+   * the image, {@code HostConfig.Memory} ({@code 0} for none, {@code -1} when unreadable), {@code
+   * HostConfig.MemorySwap} (null when unreadable), the resolvers and the toml. {@code detail} is set
+   * instead when docker did not answer.
    */
-  String changes(String runningStamp, List<String> dns) {
+  record Running(
+      String image, long memory, Long memorySwap, List<String> dns, String toml, String detail) {}
+
+  /** The one inspect behind {@link #changes} and {@link #raiseInPlace}; never fails the caller. */
+  Running running() {
     RunnerDocker.Result inspected =
         docker.run(
             DockerArgv.containerInspect(
                 docker.binary(),
                 names.builder(),
-                "{{.Config.Image}}{{\"\\n\"}}{{.HostConfig.Memory}}{{\"\\n\"}}"
+                "{{.Config.Image}}{{\"\\n\"}}"
+                    + "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}{{\"\\n\"}}"
                     + "{{range .HostConfig.Dns}}{{.}} {{end}}{{\"\\n\"}}"
                     + "{{range .Config.Env}}{{json .}}{{\"\\n\"}}{{end}}"));
     if (!inspected.ok()) {
-      return "unknown: " + inspected.detail();
+      return new Running(null, -1, null, List.of(), null, inspected.detail());
     }
     String[] lines = inspected.stdout().split("\n", -1);
     String oldImage = lines.length > 0 ? lines[0].strip() : "";
     long oldMemory = 0;
+    Long oldSwap = null;
     if (lines.length > 1) {
+      String[] limits = lines[1].strip().split(" ");
       try {
-        oldMemory = Long.parseLong(lines[1].strip());
+        oldMemory = Long.parseLong(limits[0]);
       } catch (NumberFormatException unreadable) {
         oldMemory = -1;
+      }
+      if (limits.length > 1) {
+        try {
+          oldSwap = Long.parseLong(limits[1]);
+        } catch (NumberFormatException unreadable) {
+          oldSwap = null;
+        }
       }
     }
     List<String> oldDns = new ArrayList<>();
@@ -616,26 +654,122 @@ final class BuildPlane {
         oldToml = env.substring("BUILDKITD_TOML=".length());
       }
     }
+    return new Running(oldImage, oldMemory, oldSwap, oldDns, oldToml, null);
+  }
+
+  /** {@link #changes(String, List, Running)} over a fresh {@link #running()}. */
+  String changes(String runningStamp, List<String> dns) {
+    return changes(runningStamp, dns, running());
+  }
+
+  /**
+   * Which of the stamp's inputs differ between the running builder and the configured one, for the
+   * log: the image, the memory cap (qits-2503, {@code 0} for none) and the resolvers with old and
+   * new values, the toml by name, and the bootstrap or state volume when the old inputs read back do
+   * not give the running stamp. A cap raised in place reads back as the configured one, so such a
+   * builder's stamp cannot be restated, and that is named too. Never fails the caller.
+   */
+  String changes(String runningStamp, List<String> dns, Running running) {
+    if (running.detail() != null) {
+      return "unknown: " + running.detail();
+    }
     List<String> changed = new ArrayList<>();
-    if (!oldImage.equals(image())) {
-      changed.add("image " + oldImage + " -> " + image());
+    if (!running.image().equals(image())) {
+      changed.add("image " + running.image() + " -> " + image());
     }
     long memory = settings.memoryCapBytes();
-    if (oldMemory >= 0 && oldMemory != memory) {
-      changed.add("memory " + oldMemory + " -> " + memory);
+    if (running.memory() >= 0 && running.memory() != memory) {
+      changed.add("memory " + running.memory() + " -> " + memory);
     }
-    if (!oldDns.equals(dns)) {
-      changed.add("resolvers " + oldDns + " -> " + dns);
+    if (!running.dns().equals(dns)) {
+      changed.add("resolvers " + running.dns() + " -> " + dns);
     }
-    if (!toml.equals(oldToml)) {
+    if (!toml.equals(running.toml())) {
       changed.add("toml");
     }
-    if (oldToml != null
-        && oldMemory >= 0
-        && !stamp(oldImage, oldToml, oldDns, oldMemory).equals(runningStamp)) {
-      changed.add("bootstrap or state volume");
+    if (running.toml() != null
+        && running.memory() >= 0
+        && !stamp(running.image(), running.toml(), running.dns(), running.memory())
+            .equals(runningStamp)) {
+      changed.add(
+          running.memory() == memory
+              ? "bootstrap, state volume or a memory cap raised in place"
+              : "bootstrap or state volume");
     }
     return changed.isEmpty() ? "nothing readable" : String.join(", ", changed);
+  }
+
+  /**
+   * Raise a kept stale builder's memory cap to the configured one in place (qits-2503), so a raised
+   * {@code …_BUILDER_CONCURRENT_BUILDS} or {@link BuildkitSettings#MEMORY_PER_BUILD} takes effect
+   * under running builds instead of at the next gap. Only ever up: a {@code HostConfig.Memory} at or
+   * above the cap — {@code 0}, docker's "no limit", included — or an unreadable one is left alone,
+   * and a lower cap waits for the replacement, since it could OOM a running build. One {@code docker
+   * update} under {@link RunnerDocker}'s deadline ({@link #memoryUpdateArgv}); a failure is logged
+   * and the lease starts regardless. True when the builder now runs at or above the cap.
+   */
+  boolean raiseInPlace(Running running) {
+    long cap = settings.memoryCapBytes();
+    if (running.detail() != null || running.memory() < 0) {
+      return false;
+    }
+    if (running.memory() == 0 || running.memory() >= cap) {
+      return true;
+    }
+    long swap = memorySwapFor(running.memory(), running.memorySwap(), cap);
+    RunnerDocker.Result updated = docker.run(memoryUpdateArgv(cap, swap));
+    if (!updated.ok()) {
+      LOG.warnf(
+          "system-runner could not raise its stale builder's memory cap in place %d -> %d: %s",
+          running.memory(),
+          cap,
+          updated.detail());
+      return false;
+    }
+    LOG.infof(
+        "system-runner raised its stale builder's memory cap in place: %d -> %d (memory-swap %s ->"
+            + " %d); the builder is still replaced once no CI lease is on %s",
+        running.memory(),
+        cap,
+        running.memorySwap() == null ? "unknown" : running.memorySwap(),
+        swap,
+        names.network());
+    return true;
+  }
+
+  /**
+   * The {@code --memory-swap} that goes with a raised {@code cap}: docker refuses a {@code --memory}
+   * above the current memory+swap limit unless both are given. Docker's own ratio is kept — {@code
+   * -1} (unlimited) stays {@code -1}, twice the memory (what {@code docker run --memory} alone sets,
+   * how the builder is run) becomes twice the cap, and so does an unreadable one — and any other
+   * value becomes the larger of it and the cap.
+   */
+  static long memorySwapFor(long memory, Long memorySwap, long cap) {
+    if (memorySwap == null || memorySwap == 2 * memory) {
+      return 2 * cap;
+    }
+    if (memorySwap == -1) {
+      return -1;
+    }
+    return Math.max(memorySwap, cap);
+  }
+
+  /**
+   * {@code docker update --memory <cap> --memory-swap <swap> <builder>} (qits-2503). <b>Spelled
+   * here, not by a {@code qits-containers-driver} builder</b>: the driver has only {@code
+   * updateRestartNo}, and the raise could not wait for a library release while builds failed. The
+   * builder's name goes through the driver's own belt; the spelling moves into {@code DockerArgv}
+   * once the driver gains one.
+   */
+  List<String> memoryUpdateArgv(long cap, long swap) {
+    return List.of(
+        docker.binary(),
+        "update",
+        "--memory",
+        String.valueOf(cap),
+        "--memory-swap",
+        String.valueOf(swap),
+        ContainersIdentifiers.requireContainerName(names.builder()));
   }
 
   /** A JSON string literal's value, or null when {@code json} is not one. */
