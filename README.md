@@ -91,7 +91,9 @@ read-only); without it every cgroup-derived fact is null, never an error.
   qits-2362: the figure left to size a bare host by — localhost, a workstation — whose root
   cgroup is always `max`), and `node.builderMemoryBytes` (qits-2503: the shared builder's
   `--memory` cap, `_BUILDER_CONCURRENT_BUILDS` × 8 GiB — configuration, reported whether or not the
-  builder exists, because its builds run outside every lease's cap).
+  builder exists, because its builds run outside every lease's cap), and
+  `node.builderConcurrentBuilds` (qits-2568: the builder gate's width, `_BUILDER_CONCURRENT_BUILDS`
+  — placement lets at most that many plus one image-building CI leases onto the target).
 
 A change in any OOM counter sends an `inventory`; the peak does not, until it grew by 64 MiB from
 the value last reported — so a growing lease costs one frame per 64 MiB, not one per look.
@@ -450,7 +452,7 @@ frames are this repository's (`SystemRunnerCodec`).
     runner → inventory{leases:[{leaseId, state, specHash, exitCode, detail,
                        oomKills?, oomEvents?, memoryPeakBytes?, oomKilled?}], volumes:[name],
                        node?{nodeOomKills?, kernelOomKills?, memoryMaxBytes?, memoryTotalBytes?,
-                             builderMemoryBytes?}}
+                             builderMemoryBytes?, builderConcurrentBuilds?}}
     probeLogin → loginState{claude, kimi, checkedAt, volume}                (PRESENT|ABSENT|UNKNOWN)
     healthCheck{requestId} → healthChecked{ok, detail, requestId, checks:[{name, ok, detail, data}]}
     signIn{signInId, harness} → signInProgress{signInId, harness, state, url, userCode, detail} …

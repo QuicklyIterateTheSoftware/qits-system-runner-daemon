@@ -22,10 +22,28 @@ package eu.wohlben.qits.systemrunner.protocol;
  *     the lease's, so placement has to count this beside the leases. Null from a runner without a
  *     build plane or older than qits-2503. Appended last, additive on the wire like {@code
  *     memoryTotalBytes}.
+ * @param builderConcurrentBuilds how many image builds the target's builder gate lets onto that
+ *     buildkitd at once ({@code …_BUILDER_CONCURRENT_BUILDS}, handed to every CI lease as {@code
+ *     QITS_CI_BUILDER_SLOTS}, qits-1807): placement caps the image-building CI leases on the target
+ *     at this plus one (qits-2568), because a lease past that only waits at the gate holding its
+ *     memory. Null from a runner without a build plane or older than qits-2568. Appended last,
+ *     additive on the wire like {@code builderMemoryBytes}.
  */
 public record NodeMemory(
     Long nodeOomKills,
     Long kernelOomKills,
     Long memoryMaxBytes,
     Long memoryTotalBytes,
-    Long builderMemoryBytes) {}
+    Long builderMemoryBytes,
+    Integer builderConcurrentBuilds) {
+
+  /** The facts of a runner that reports no builder width (older than qits-2568). */
+  public NodeMemory(
+      Long nodeOomKills,
+      Long kernelOomKills,
+      Long memoryMaxBytes,
+      Long memoryTotalBytes,
+      Long builderMemoryBytes) {
+    this(nodeOomKills, kernelOomKills, memoryMaxBytes, memoryTotalBytes, builderMemoryBytes, null);
+  }
+}

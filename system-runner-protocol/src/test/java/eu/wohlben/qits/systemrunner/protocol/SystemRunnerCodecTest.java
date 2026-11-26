@@ -118,6 +118,7 @@ class SystemRunnerCodecTest {
         new Inventory(List.of(), List.of(), new NodeMemory(null, 297L, null, null, null)),
         new Inventory(List.of(), List.of(), new NodeMemory(292L, 297L, null, 64L << 30, 6L << 30)),
         new Inventory(List.of(), List.of(), new NodeMemory(null, null, null, null, 12L << 30)),
+        new Inventory(List.of(), List.of(), new NodeMemory(null, null, null, null, 8L << 30, 1)),
         new Inventory(
             List.of(
                 new LeaseReport(
@@ -420,6 +421,11 @@ class SystemRunnerCodecTest {
         "{\"type\":\"inventory\",\"leases\":[],\"volumes\":[],"
             + "\"node\":{\"builderMemoryBytes\":12884901888}}",
         new Inventory(List.of(), List.of(), new NodeMemory(null, null, null, null, 12L << 30)));
+    // qits-2568: the builder gate's width is spelled last, after builderMemoryBytes.
+    assertJson(
+        "{\"type\":\"inventory\",\"leases\":[],\"volumes\":[],"
+            + "\"node\":{\"builderMemoryBytes\":17179869184,\"builderConcurrentBuilds\":2}}",
+        new Inventory(List.of(), List.of(), new NodeMemory(null, null, null, null, 16L << 30, 2)));
   }
 
   @Test
@@ -692,6 +698,13 @@ class SystemRunnerCodecTest {
             "kernelOomKills", 5, "memoryTotalBytes", 17179869184L, "builderMemoryBytes", 6442450944L));
     assertEquals(
         new NodeMemory(null, 5L, null, 16L << 30, 6L << 30),
+        ((Inventory) CODEC.decode(old)).node());
+
+    // qits-2568: builderConcurrentBuilds is null from a runner before it (above), and read when
+    // present.
+    old.put("node", Map.of("builderMemoryBytes", 8589934592L, "builderConcurrentBuilds", 1));
+    assertEquals(
+        new NodeMemory(null, null, null, null, 8L << 30, 1),
         ((Inventory) CODEC.decode(old)).node());
   }
 

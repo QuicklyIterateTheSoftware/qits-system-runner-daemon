@@ -85,7 +85,9 @@ change to that table, reviewed as one, with the test cell beside it.
   a CI lease's `qits.ci.slot.memory`), no `--memory-swap`, no setting of its own. The cap is in the
   stamp, so a changed width replaces the builder (never under a running build, qits-2260), and the
   inventory reports it as `node.builderMemoryBytes` (`NodeMemory`'s fifth, nullable component) —
-  the builds a lease sends there run in the builder's cgroup, outside every lease's cap. A **raised**
+  the builds a lease sends there run in the builder's cgroup, outside every lease's cap. The gate's
+  width itself travels as `node.builderConcurrentBuilds` (the sixth, qits-2568), which placement
+  caps the image-building CI leases by (width + 1). A **raised**
   cap does not wait for that replacement: a stale builder kept under CI leases whose
   `HostConfig.Memory` is below the cap gets it in place (`docker update --memory --memory-swap`,
   `BuildPlane.raiseInPlace`; swap keeps docker's ratio); a lower cap, or `0` (unlimited), is never

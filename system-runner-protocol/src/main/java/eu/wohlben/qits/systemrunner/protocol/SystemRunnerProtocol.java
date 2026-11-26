@@ -184,6 +184,8 @@ public final class SystemRunnerProtocol {
     public static final String MEMORY_TOTAL_BYTES = "memoryTotalBytes";
     // inventory, qits-2503: the cap of the target's shared buildkitd, appended last as well
     public static final String BUILDER_MEMORY_BYTES = "builderMemoryBytes";
+    // inventory, qits-2568: the width of the target's builder gate, appended last as well
+    public static final String BUILDER_CONCURRENT_BUILDS = "builderConcurrentBuilds";
     // inventory, qits-2091: a lease report's resolvers — left out when empty, and false
     public static final String RESOLVERS = "resolvers";
     public static final String RESOLVERS_STALE = "resolversStale";

@@ -407,8 +407,10 @@ public final class SystemRunnerDomain implements RunnerDomain<SystemRunnerMessag
       SignInProcesses processes,
       Path resolvConf,
       NodeTunnel.Probe tunnelProbe) {
-    // qits-2503: the node's facts carry the builder's cap, which only the build plane's settings know.
-    this.memory = new MemorySampler(cgroups, buildkit.memoryCapBytes());
+    // qits-2503: the node's facts carry the builder's cap, which only the build plane's settings know;
+    // qits-2568: and the width of its gate, which placement caps the image-building CI leases by.
+    this.memory =
+        new MemorySampler(cgroups, buildkit.memoryCapBytes(), buildkit.concurrentBuilds());
     this.docker = RunnerDocker.of(identity, settings);
     this.targetId = settings.runnerId();
     this.slots = settings.slots();
