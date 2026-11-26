@@ -3,7 +3,6 @@ package eu.wohlben.qits.systemrunner;
 import eu.wohlben.qits.containers.driver.docker.DockerArgv;
 import eu.wohlben.qits.containers.driver.docker.HostRunArgv;
 import eu.wohlben.qits.containers.driver.docker.SwarmArgv;
-import eu.wohlben.qits.containers.driver.spec.ContainersIdentifiers;
 import eu.wohlben.qits.containers.driver.spec.HostRunSpec;
 import eu.wohlben.qits.containers.driver.spec.LabelNamespace;
 import eu.wohlben.qits.containers.driver.spec.VolumeSpec;
@@ -705,8 +704,9 @@ final class BuildPlane {
    * under running builds instead of at the next gap. Only ever up: a {@code HostConfig.Memory} at or
    * above the cap — {@code 0}, docker's "no limit", included — or an unreadable one is left alone,
    * and a lower cap waits for the replacement, since it could OOM a running build. One {@code docker
-   * update} under {@link RunnerDocker}'s deadline ({@link #memoryUpdateArgv}); a failure is logged
-   * and the lease starts regardless. True when the builder now runs at or above the cap.
+   * update} under {@link RunnerDocker}'s deadline ({@link DockerArgv#updateMemory}, qits-2565); a
+   * failure is logged and the lease starts regardless. True when the builder now runs at or above
+   * the cap.
    */
   boolean raiseInPlace(Running running) {
     long cap = settings.memoryCapBytes();
@@ -717,7 +717,8 @@ final class BuildPlane {
       return true;
     }
     long swap = memorySwapFor(running.memory(), running.memorySwap(), cap);
-    RunnerDocker.Result updated = docker.run(memoryUpdateArgv(cap, swap));
+    RunnerDocker.Result updated =
+        docker.run(DockerArgv.updateMemory(docker.binary(), names.builder(), cap, swap));
     if (!updated.ok()) {
       LOG.warnf(
           "system-runner could not raise its stale builder's memory cap in place %d -> %d: %s",
@@ -752,24 +753,6 @@ final class BuildPlane {
       return -1;
     }
     return Math.max(memorySwap, cap);
-  }
-
-  /**
-   * {@code docker update --memory <cap> --memory-swap <swap> <builder>} (qits-2503). <b>Spelled
-   * here, not by a {@code qits-containers-driver} builder</b>: the driver has only {@code
-   * updateRestartNo}, and the raise could not wait for a library release while builds failed. The
-   * builder's name goes through the driver's own belt; the spelling moves into {@code DockerArgv}
-   * once the driver gains one.
-   */
-  List<String> memoryUpdateArgv(long cap, long swap) {
-    return List.of(
-        docker.binary(),
-        "update",
-        "--memory",
-        String.valueOf(cap),
-        "--memory-swap",
-        String.valueOf(swap),
-        ContainersIdentifiers.requireContainerName(names.builder()));
   }
 
   /** A JSON string literal's value, or null when {@code json} is not one. */
