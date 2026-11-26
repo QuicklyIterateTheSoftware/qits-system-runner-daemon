@@ -36,7 +36,9 @@ import java.util.Set;
  * <p><b>The builder's cap is configuration, not a reading</b> (qits-2503): the node's facts carry
  * {@code builderMemoryBytes}, the {@code --memory} the target's shared buildkitd is started under
  * ({@link BuildkitSettings#memoryCapBytes()}), whether or not the builder container exists yet —
- * placement sizes the node by what the builder may take, not by what it happens to hold now.
+ * placement sizes the node by what the builder may take, not by what it happens to hold now. Its
+ * gate's width, {@code builderConcurrentBuilds} ({@link BuildkitSettings#concurrentBuilds()},
+ * qits-2568), travels beside it the same way: placement caps the image-building CI leases by it.
  *
  * <p>Nothing here throws: no tree, no file, no permission all read as null.
  */
@@ -62,6 +64,7 @@ final class MemorySampler {
   private final Path meminfo;
   private final Map<String, Sample> samples = new HashMap<>();
   private final Long builderMemoryBytes;
+  private final Integer builderConcurrentBuilds;
   private String driver;
   private NodeMemory node;
 
@@ -75,10 +78,19 @@ final class MemorySampler {
    * (qits-2503), or null when there is none.
    */
   MemorySampler(CgroupSettings settings, Long builderMemoryBytes) {
+    this(settings, builderMemoryBytes, null);
+  }
+
+  /**
+   * A sampler whose node facts also carry {@code builderConcurrentBuilds}, the width of the build
+   * plane's gate (qits-2568), or null when there is none.
+   */
+  MemorySampler(CgroupSettings settings, Long builderMemoryBytes, Integer builderConcurrentBuilds) {
     this.root = settings.hostCgroup();
     this.vmstat = settings.vmstat();
     this.meminfo = settings.meminfo();
     this.builderMemoryBytes = builderMemoryBytes;
+    this.builderConcurrentBuilds = builderConcurrentBuilds;
   }
 
   /** Docker's cgroup driver ({@code systemd}, {@code cgroupfs}), or null when docker did not say. */
@@ -169,10 +181,12 @@ final class MemorySampler {
         && kernel == null
         && memoryMax == null
         && memoryTotal == null
-        && builderMemoryBytes == null) {
+        && builderMemoryBytes == null
+        && builderConcurrentBuilds == null) {
       return null;
     }
-    return new NodeMemory(nodeOomKills, kernel, memoryMax, memoryTotal, builderMemoryBytes);
+    return new NodeMemory(
+        nodeOomKills, kernel, memoryMax, memoryTotal, builderMemoryBytes, builderConcurrentBuilds);
   }
 
   /** Where the container's cgroup is: the driver's path, else a bounded search; null when absent. */

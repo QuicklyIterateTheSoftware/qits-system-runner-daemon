@@ -424,7 +424,7 @@ class EstateReconcileTest {
     assertEquals(
         new LeaseReport(L1, LeaseState.RUNNING, H1, null, null, 1L, 1L, 1L << 30, null),
         report(running, L1));
-    assertEquals(new NodeMemory(292L, 297L, null, null, 8L << 30), running.node());
+    assertEquals(new NodeMemory(292L, 297L, null, null, 8L << 30, 1), running.node());
 
     // The OOM kill ends it: the cgroup goes with the container, docker says OOMKilled.
     Files.writeString(scope.resolve("memory.events"), "oom 1\noom_kill 2\n");
@@ -445,7 +445,7 @@ class EstateReconcileTest {
     assertEquals(
         new LeaseReport(L1, LeaseState.EXITED, H1, 137, null, 2L, 1L, 1L << 30, true),
         report(exited, L1));
-    assertEquals(new NodeMemory(294L, 297L, null, null, 8L << 30), exited.node());
+    assertEquals(new NodeMemory(294L, 297L, null, null, 8L << 30, 1), exited.node());
   }
 
   @Test

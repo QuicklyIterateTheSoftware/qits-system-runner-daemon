@@ -133,6 +133,26 @@ class MemorySamplerTest {
     assertEquals(new NodeMemory(292L, 297L, null, 16777216L * 1024, 8L << 30), sampler.node());
   }
 
+  @Test
+  void theBuilderGatesWidthIsReportedBesideItsCap() throws IOException {
+    // qits-2568: the width placement caps the image-building CI leases by, configuration too.
+    MemorySampler nothingElse =
+        new MemorySampler(
+            new CgroupSettings(tmp.resolve("not-bound"), tmp.resolve("no-vmstat")), null, 1);
+    nothingElse.sample(List.of());
+    assertEquals(new NodeMemory(null, null, null, null, null, 1), nothingElse.node());
+
+    BuildkitSettings four =
+        new BuildkitSettings(BuildkitSettings.DEFAULT_IMAGE, null, 4, List.of(), List.of());
+    MemorySampler sampler =
+        new MemorySampler(
+            new CgroupSettings(tmp.resolve("not-bound"), tmp.resolve("no-vmstat")),
+            four.memoryCapBytes(),
+            four.concurrentBuilds());
+    sampler.sample(List.of());
+    assertEquals(new NodeMemory(null, null, null, null, 32L << 30, 4), sampler.node());
+  }
+
   // ---- finding a lease's cgroup ------------------------------------------------------------------
 
   @Test
